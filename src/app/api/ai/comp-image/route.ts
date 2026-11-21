@@ -20,6 +20,8 @@ export interface ImageCompResponse {
   ebayActiveUrl: string;
 }
 
+export const maxDuration = 30;
+
 /**
  * POST /api/ai/comp-image
  * Accepts a base64 JPEG/WebP/PNG snapshot from iPhone camera or desktop upload,
@@ -86,6 +88,14 @@ Inspect this item photo${body.hint ? ` (reseller hint: "${body.hint}")` : ""} an
   "inspectionTips": ["Short in-store flaw/test check #1", "Short check #2", "Short check #3"]
 }`;
 
+      const generationConfig: Record<string, unknown> = {
+        temperature: 0.2,
+        responseMimeType: "application/json",
+      };
+      if (model.includes("2.5")) {
+        generationConfig.thinkingConfig = { thinkingBudget: 0 };
+      }
+
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
         {
@@ -105,10 +115,7 @@ Inspect this item photo${body.hint ? ` (reseller hint: "${body.hint}")` : ""} an
                 ],
               },
             ],
-            generationConfig: {
-              temperature: 0.2,
-              responseMimeType: "application/json",
-            },
+            generationConfig,
           }),
         }
       );
@@ -131,20 +138,33 @@ Inspect this item photo${body.hint ? ` (reseller hint: "${body.hint}")` : ""} an
 
       const json = (await res.json()) as {
         candidates?: Array<{
-          content?: { parts?: Array<{ text?: string }> };
+          content?: {
+            parts?: Array<{ text?: string; thought?: boolean }>;
+          };
         }>;
       };
-      const rawText = (
-        json.candidates?.[0]?.content?.parts?.[0]?.text || ""
-      )
+      const parts = json.candidates?.[0]?.content?.parts ?? [];
+      const rawJoined = parts
+        .filter((p) => !p.thought && typeof p.text === "string")
+        .map((p) => p.text ?? "")
+        .join("\n")
         .trim()
         .replace(/^```(?:json)?\s*/i, "")
         .replace(/\s*```$/i, "")
         .trim();
 
+      const firstBrace = rawJoined.indexOf("{");
+      const lastBrace = rawJoined.lastIndexOf("}");
+      const rawText =
+        firstBrace !== -1 && lastBrace > firstBrace
+          ? rawJoined.slice(firstBrace, lastBrace + 1)
+          : rawJoined;
+
       if (!rawText) {
         return NextResponse.json(
-          { error: `Gemini (${model}) returned an empty response for this photo.` },
+          {
+            error: `Gemini (${model}) returned an empty response for this photo.`,
+          },
           { status: 502 }
         );
       }
