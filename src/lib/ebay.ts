@@ -740,7 +740,7 @@ export async function sendEbayOfferToWatchers(params: {
         "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
       },
       body: JSON.stringify({
-        allowCounterOffer: true,
+        allowCounterOffer: false,
         message,
         offeredItems: [
           {
