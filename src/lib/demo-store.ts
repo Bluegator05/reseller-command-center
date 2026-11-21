@@ -1827,6 +1827,14 @@ export function promoteDemoDraftToActive(itemId: string): InventoryItem | null {
   return item;
 }
 
+export function deleteDemoInventoryItem(itemId: string): boolean {
+  const store = getDemoStore();
+  const before = store.items.length;
+  store.items = store.items.filter((i) => i.id !== itemId);
+  store.listings = store.listings.filter((l) => l.item_id !== itemId);
+  return store.items.length < before;
+}
+
 export function addDemoExpense(
   input: Omit<BusinessExpense, "id" | "created_at">
 ): BusinessExpense {

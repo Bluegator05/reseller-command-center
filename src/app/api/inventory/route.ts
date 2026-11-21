@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   createDemoInventoryItem,
+  deleteDemoInventoryItem,
   promoteDemoDraftToActive,
   updateDemoInventoryItem,
 } from "@/lib/demo-store";
@@ -210,6 +211,44 @@ export async function PATCH(request: Request) {
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Failed to update inventory item";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
+
+export async function DELETE(request: Request) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const id = searchParams.get("id")?.trim();
+    if (!id) {
+      return NextResponse.json(
+        { error: "Missing required id query parameter" },
+        { status: 400 }
+      );
+    }
+
+    const envReadiness = getEnvReadiness();
+    const supabase = getSupabaseServerClient();
+
+    if (supabase && envReadiness.isSupabaseReady) {
+      const { error } = await supabase
+        .from("inventory_items")
+        .delete()
+        .eq("id", id);
+
+      if (error) {
+        return NextResponse.json({ error: error.message }, { status: 400 });
+      }
+      return NextResponse.json({ mode: "live", deletedId: id });
+    }
+
+    const removed = deleteDemoInventoryItem(id);
+    if (!removed) {
+      return NextResponse.json({ error: "Item not found" }, { status: 404 });
+    }
+    return NextResponse.json({ mode: "demo", deletedId: id });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Failed to delete inventory item";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

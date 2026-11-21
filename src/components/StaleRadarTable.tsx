@@ -6,7 +6,6 @@ import {
   ArrowDownRight,
   ArrowUpDown,
   ArrowUpRight,
-  CheckCircle2,
   Eye,
   Heart,
   LayoutGrid,
@@ -20,6 +19,7 @@ import {
   Send,
   Sparkles,
   Star,
+  Trash2,
   TrendingDown,
   X,
   Zap,
@@ -59,6 +59,7 @@ interface StaleRadarTableProps {
   }) => Promise<void>;
   onOpenItemDetail: (row: StaleRadarRow) => void;
   onPromoteDraft: (itemId: string) => Promise<void>;
+  onDeleteDraft: (itemId: string) => Promise<void>;
 }
 
 type FilterKey =
@@ -219,6 +220,7 @@ export function StaleRadarTable({
   onRunAutoPromote,
   onOpenItemDetail,
   onPromoteDraft,
+  onDeleteDraft,
 }: StaleRadarTableProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeFilter, setActiveFilter] = useState<FilterKey>("all");
@@ -232,6 +234,10 @@ export function StaleRadarTable({
     () => items.length === 0 && draftItems.length > 0
   );
   const [promotingDraftId, setPromotingDraftId] = useState<string | null>(null);
+  const [deletingDraftId, setDeletingDraftId] = useState<string | null>(null);
+  const [confirmDeleteDraftId, setConfirmDeleteDraftId] = useState<
+    string | null
+  >(null);
   const [mountNow] = useState(() => Date.now());
 
   const [notesMap, setNotesMap] = useStoredMap<Record<string, string>>(
@@ -820,8 +826,10 @@ export function StaleRadarTable({
                       )
                     )
                   : 0;
-                const basis = draft.cogs + (draft.prep_cost ?? 0);
-                const isBusy = promotingDraftId === draft.id;
+                const basis = Number(draft.cogs) + Number(draft.prep_cost ?? 0);
+                const isBusy =
+                  promotingDraftId === draft.id || deletingDraftId === draft.id;
+                const isConfirmingDelete = confirmDeleteDraftId === draft.id;
                 return (
                   <div
                     key={draft.id}
@@ -851,30 +859,78 @@ export function StaleRadarTable({
                       </div>
                       <div className="mt-0.5 text-[11px] font-mono text-[#5F666D]">
                         Cost Basis {formatMoney(basis)} · Target Ask{" "}
-                        {formatMoney(draft.target_price)}
+                        {formatMoney(Number(draft.target_price))}
                         {draft.notes ? ` · ${draft.notes}` : ""}
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      disabled={isBusy}
-                      onClick={async () => {
-                        setPromotingDraftId(draft.id);
-                        try {
-                          await onPromoteDraft(draft.id);
-                        } finally {
-                          setPromotingDraftId(null);
-                        }
-                      }}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#0F766E] text-white hover:bg-[#0B5B55] disabled:opacity-50 cursor-pointer shrink-0"
-                    >
-                      {isBusy ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <div className="flex items-center gap-2 shrink-0">
+                      {isConfirmingDelete ? (
+                        <>
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={async () => {
+                              setDeletingDraftId(draft.id);
+                              try {
+                                await onDeleteDraft(draft.id);
+                              } finally {
+                                setDeletingDraftId(null);
+                                setConfirmDeleteDraftId(null);
+                              }
+                            }}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-[#B91C1C] text-white hover:bg-[#991B1B] disabled:opacity-50 cursor-pointer"
+                          >
+                            {deletingDraftId === draft.id ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Trash2 className="w-3.5 h-3.5" />
+                            )}
+                            Confirm Delete
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => setConfirmDeleteDraftId(null)}
+                            className="px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-[#DDE2DF] bg-white text-[#5F666D] hover:text-[#171A1D] cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                        </>
                       ) : (
-                        <Zap className="w-3.5 h-3.5" />
+                        <>
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => setConfirmDeleteDraftId(draft.id)}
+                            title="Delete from Death Pile"
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-[#FECACA] bg-white text-[#B91C1C] hover:bg-[#FEF2F2] disabled:opacity-50 cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Delete</span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={async () => {
+                              setPromotingDraftId(draft.id);
+                              try {
+                                await onPromoteDraft(draft.id);
+                              } finally {
+                                setPromotingDraftId(null);
+                              }
+                            }}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#0F766E] text-white hover:bg-[#0B5B55] disabled:opacity-50 cursor-pointer"
+                          >
+                            {promotingDraftId === draft.id ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Zap className="w-3.5 h-3.5" />
+                            )}
+                            Move to Active Listed →
+                          </button>
+                        </>
                       )}
-                      Move to Active Listed →
-                    </button>
+                    </div>
                   </div>
                 );
               })}

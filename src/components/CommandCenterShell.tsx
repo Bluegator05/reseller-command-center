@@ -895,6 +895,27 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
                 "Promoted out of Death Pile and listed as Newly Listed (0d) on eBay."
               );
             }}
+            onDeleteDraft={async (itemId) => {
+              const res = await fetch(
+                `/api/inventory?id=${encodeURIComponent(itemId)}`,
+                { method: "DELETE" }
+              );
+              const payload = (await res.json()) as { error?: string };
+              if (!res.ok) {
+                pushToast(
+                  "error",
+                  "Failed to Delete Item",
+                  payload.error || "Unknown error"
+                );
+                return;
+              }
+              await refreshInventory();
+              pushToast(
+                "info",
+                "Removed from Death Pile",
+                "Item permanently deleted from your unlisted backlog."
+              );
+            }}
             />
           </div>
         ) : activeTab === "extension" ? (
