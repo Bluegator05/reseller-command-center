@@ -19,6 +19,8 @@ interface JoinedListing extends MarketplaceListing {
   inventory_items: InventoryItem | InventoryItem[] | null;
 }
 
+export const maxDuration = 60;
+
 /**
  * POST /api/automations/promote
  * Auto-Promotes eligible eBay listings (>= 30 days listed by default) to a 4% Promoted Listings ad rate.
@@ -128,7 +130,9 @@ export async function POST(request: Request) {
       sku: string;
       daysListed: number;
       adRatePct: number;
+      campaignId: string;
     }> = [];
+    const failed: Array<{ sku: string; error: string }> = [];
 
     for (const listing of rows) {
       const inv = Array.isArray(listing.inventory_items)
@@ -144,38 +148,71 @@ export async function POST(request: Request) {
 
       if (!isTarget || !listing.external_listing_id) continue;
 
-      await promoteEbayListing({
-        listingId: listing.external_listing_id,
-        adRatePct,
-      });
+      try {
+        const res = await promoteEbayListing({
+          listingId: listing.external_listing_id,
+          adRatePct,
+        });
 
-      await supabase!
-        .from("marketplace_listings")
-        .update({
-          promoted_ad_rate_pct: adRatePct,
-          last_synced_at: nowIso,
-        })
-        .eq("id", listing.id);
+        await supabase!
+          .from("marketplace_listings")
+          .update({
+            promoted_ad_rate_pct: adRatePct,
+            last_synced_at: nowIso,
+          })
+          .eq("id", listing.id);
 
-      await supabase!.from("channel_jobs").insert({
-        item_id: inv.id,
-        listing_id: listing.id,
-        marketplace: "ebay",
-        action: "promote_listing",
-        execution_mode: "api",
-        payload: { adRatePct, daysListed: days },
-        status: "completed",
-        attempts: 1,
-        started_at: nowIso,
-        completed_at: new Date().toISOString(),
-      });
+        await supabase!.from("channel_jobs").insert({
+          item_id: inv.id,
+          listing_id: listing.id,
+          marketplace: "ebay",
+          action: "promote_listing",
+          execution_mode: "api",
+          payload: {
+            adRatePct,
+            daysListed: days,
+            campaignId: res.campaignId,
+            adId: res.adId,
+          },
+          status: "completed",
+          attempts: 1,
+          started_at: nowIso,
+          completed_at: new Date().toISOString(),
+        });
 
-      promoted.push({
-        listingId: listing.id,
-        sku: inv.sku,
-        daysListed: days,
-        adRatePct,
-      });
+        promoted.push({
+          listingId: listing.id,
+          sku: inv.sku,
+          daysListed: days,
+          adRatePct,
+          campaignId: res.campaignId,
+        });
+      } catch (itemErr) {
+        const errMsg =
+          itemErr instanceof Error ? itemErr.message : "Promote failed";
+        failed.push({ sku: inv.sku, error: errMsg });
+
+        await supabase!.from("channel_jobs").insert({
+          item_id: inv.id,
+          listing_id: listing.id,
+          marketplace: "ebay",
+          action: "promote_listing",
+          execution_mode: "api",
+          payload: { adRatePct, daysListed: days },
+          status: "failed",
+          attempts: 1,
+          error_message: errMsg,
+          started_at: nowIso,
+          completed_at: new Date().toISOString(),
+        });
+      }
+    }
+
+    if (promoted.length === 0 && failed.length > 0) {
+      return NextResponse.json(
+        { error: `${failed[0].sku}: ${failed[0].error}`, failed },
+        { status: 502 }
+      );
     }
 
     return NextResponse.json({
@@ -183,8 +220,13 @@ export async function POST(request: Request) {
       minDaysListed,
       adRatePct,
       promotedCount: promoted.length,
+      failedCount: failed.length,
       promoted,
-      message: `Live Auto-Promote complete: promoted ${promoted.length} listing${promoted.length === 1 ? "" : "s"} to ${adRatePct}%.`,
+      failed,
+      message:
+        promoted.length > 0
+          ? `Promoted ${promoted.length} live eBay listing${promoted.length === 1 ? "" : "s"} to ${adRatePct}% (campaign ${promoted[0].campaignId})${failed.length > 0 ? ` · ${failed.length} skipped/ineligible` : ""}.`
+          : `All ${minDaysListed}d+ eBay listings are already promoted at ${adRatePct}% or higher.`,
     });
   } catch (err) {
     const message =

@@ -782,37 +782,180 @@ export async function withdrawEbayOffer(
   );
 }
 
+let cachedCpsCampaignId: string | null = null;
+
+interface EbayCampaignRecord {
+  campaignId: string;
+  campaignName?: string;
+  campaignStatus?: string;
+  marketplaceId?: string;
+  fundingStrategy?: {
+    fundingModel?: string;
+    bidPercentage?: string;
+  };
+  campaignCriterion?: {
+    selectionRules?: unknown[];
+    autoSelectFutureInventory?: boolean;
+  };
+}
+
 /**
- * Promotes an active eBay listing via eBay Sell Marketing API (Promoted Listings Standard / CPS).
- * Defaults to a 4.0% ad rate when items cross the 30-day listing threshold.
+ * Resolves the eBay Promoted Listings General (`COST_PER_SALE`) key-based campaign ID:
+ * 1. Uses explicit `campaignId` arg or `EBAY_AD_CAMPAIGN_ID` env var if set.
+ * 2. Otherwise queries running `COST_PER_SALE` campaigns on `EBAY_US` and reuses
+ *    an existing key-based campaign (preferring "Reseller Command Center Auto-Promote").
+ * 3. If none exists, creates a new key-based `COST_PER_SALE` campaign automatically.
+ */
+async function resolveOrCreateCpsCampaignId(
+  adRatePct: number,
+  explicitCampaignId?: string
+): Promise<string> {
+  const configured =
+    explicitCampaignId?.trim() || process.env.EBAY_AD_CAMPAIGN_ID?.trim();
+  if (configured) return configured;
+  if (cachedCpsCampaignId) return cachedCpsCampaignId;
+
+  const listRes = await ebayRequest<{ campaigns?: EbayCampaignRecord[] }>(
+    `/sell/marketing/v1/ad_campaign?campaign_status=RUNNING&funding_strategy=COST_PER_SALE&limit=50`
+  );
+
+  const runningKeyBased = (listRes.campaigns ?? []).filter(
+    (c) =>
+      c.campaignStatus === "RUNNING" &&
+      (!c.marketplaceId || c.marketplaceId === "EBAY_US") &&
+      (!c.fundingStrategy?.fundingModel ||
+        c.fundingStrategy.fundingModel === "COST_PER_SALE") &&
+      !c.campaignCriterion?.selectionRules?.length &&
+      !c.campaignCriterion?.autoSelectFutureInventory
+  );
+
+  const preferred =
+    runningKeyBased.find((c) =>
+      (c.campaignName || "").toLowerCase().includes("reseller command center")
+    ) || runningKeyBased[0];
+
+  if (preferred?.campaignId) {
+    cachedCpsCampaignId = preferred.campaignId;
+    return preferred.campaignId;
+  }
+
+  // Create a dedicated key-based Promoted Listings General (CPS) campaign automatically
+  const token = await getEbayAccessToken();
+  const { apiBase } = getEbayBaseUrls();
+  const createRes = await fetch(`${apiBase}/sell/marketing/v1/ad_campaign`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "Content-Language": "en-US",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({
+      campaignName: "Reseller Command Center Auto-Promote",
+      marketplaceId: "EBAY_US",
+      startDate: new Date().toISOString(),
+      fundingStrategy: {
+        fundingModel: "COST_PER_SALE",
+        bidPercentage: adRatePct.toFixed(1),
+      },
+    }),
+    cache: "no-store",
+  });
+
+  if (!createRes.ok) {
+    const errText = await createRes.text();
+    throw new Error(
+      `Failed to create eBay Promoted Listings campaign (${createRes.status}): ${errText}`
+    );
+  }
+
+  const location = createRes.headers.get("location") || "";
+  const idFromHeader = location.split("/").filter(Boolean).at(-1);
+  if (idFromHeader) {
+    cachedCpsCampaignId = idFromHeader;
+    return idFromHeader;
+  }
+
+  // Fallback: re-fetch campaigns to pick up the newly created campaign ID
+  const afterRes = await ebayRequest<{ campaigns?: EbayCampaignRecord[] }>(
+    `/sell/marketing/v1/ad_campaign?campaign_status=RUNNING&funding_strategy=COST_PER_SALE&limit=20`
+  );
+  const created = (afterRes.campaigns ?? []).find((c) =>
+    (c.campaignName || "").toLowerCase().includes("reseller command center")
+  );
+  if (created?.campaignId) {
+    cachedCpsCampaignId = created.campaignId;
+    return created.campaignId;
+  }
+
+  throw new Error(
+    "Created eBay ad campaign but could not read its campaign ID from response."
+  );
+}
+
+/**
+ * Promotes an active eBay listing via eBay Sell Marketing API (Promoted Listings General / CPS).
+ * Automatically discovers or creates a running COST_PER_SALE campaign when
+ * `EBAY_AD_CAMPAIGN_ID` is not set, and updates the bid rate if the listing is
+ * already enrolled in a campaign.
  */
 export async function promoteEbayListing(params: {
   listingId: string;
   adRatePct?: number;
   campaignId?: string;
-}): Promise<{ adId: string; adRatePct: number }> {
-  const campaignId =
-    params.campaignId?.trim() || process.env.EBAY_AD_CAMPAIGN_ID?.trim();
-  if (!campaignId) {
-    throw new Error(
-      "Missing EBAY_AD_CAMPAIGN_ID for Promoted Listings Standard campaign."
-    );
-  }
-
+}): Promise<{ adId: string; adRatePct: number; campaignId: string }> {
   const adRate = Math.max(2, Math.min(20, roundCurrency(params.adRatePct ?? 4)));
-  const res = await ebayRequest<{ adId?: string }>(
-    `/sell/marketing/v1/ad_campaign/${encodeURIComponent(campaignId)}/ad`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        listingId: params.listingId,
-        bidPercentage: adRate.toFixed(1),
-      }),
-    }
+  const campaignId = await resolveOrCreateCpsCampaignId(
+    adRate,
+    params.campaignId
   );
 
-  return {
-    adId: res.adId || `ad-${params.listingId}`,
-    adRatePct: adRate,
-  };
+  try {
+    const res = await ebayRequest<{ adId?: string }>(
+      `/sell/marketing/v1/ad_campaign/${encodeURIComponent(campaignId)}/ad`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          listingId: params.listingId,
+          bidPercentage: adRate.toFixed(1),
+        }),
+      }
+    );
+
+    return {
+      adId: res.adId || `ad-${params.listingId}`,
+      adRatePct: adRate,
+      campaignId,
+    };
+  } catch (err) {
+    // If listing is already in a campaign, look up its existing campaign/ad and updateBid
+    const msg = err instanceof Error ? err.message : String(err);
+    if (
+      msg.includes("35048") ||
+      msg.includes("35049") ||
+      msg.toLowerCase().includes("already")
+    ) {
+      const existing = await ebayRequest<{
+        ads?: Array<{ adId?: string; campaignId?: string }>;
+      }>(
+        `/sell/marketing/v1/ad_campaign/find_campaign_by_ad_reference?listing_id=${encodeURIComponent(params.listingId)}`
+      );
+      const firstAd = existing.ads?.[0];
+      if (firstAd?.adId && firstAd?.campaignId) {
+        await ebayRequest(
+          `/sell/marketing/v1/ad_campaign/${encodeURIComponent(firstAd.campaignId)}/ad/${encodeURIComponent(firstAd.adId)}/update_bid`,
+          {
+            method: "POST",
+            body: JSON.stringify({ bidPercentage: adRate.toFixed(1) }),
+          }
+        );
+        return {
+          adId: firstAd.adId,
+          adRatePct: adRate,
+          campaignId: firstAd.campaignId,
+        };
+      }
+    }
+    throw err;
+  }
 }
