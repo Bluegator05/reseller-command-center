@@ -160,4 +160,76 @@ document.getElementById("btn-save-cfg").addEventListener("click", async () => {
   }
 });
 
+const btnScanEl = document.getElementById("btn-scan-page");
+const scanStatusEl = document.getElementById("scan-status");
+const scanReviewEl = document.getElementById("scan-review");
+
+if (btnScanEl) {
+  btnScanEl.addEventListener("click", async () => {
+    btnScanEl.disabled = true;
+    btnScanEl.textContent = "Scanning page & matching eBay SKUs...";
+    errorBarEl.style.display = "none";
+    scanStatusEl.style.display = "none";
+    scanReviewEl.innerHTML = "";
+
+    const res = await chrome.runtime.sendMessage({
+      type: "RCC_SCAN_ACTIVE_TAB",
+    });
+
+    btnScanEl.disabled = false;
+    btnScanEl.textContent = "Scan Active Listings on This Page";
+
+    if (!res?.ok) {
+      errorBarEl.style.display = "block";
+      errorBarEl.textContent = res?.error || "Scan failed";
+      if (cfgDetailsEl && errorBarEl.textContent.includes("passcode")) {
+        cfgDetailsEl.open = true;
+      }
+      return;
+    }
+
+    const review = Array.isArray(res.reviewMatches) ? res.reviewMatches : [];
+    scanStatusEl.style.display = "block";
+    scanStatusEl.innerHTML = `<strong>${String(res.marketplace || "").toUpperCase()} Scan Complete:</strong> Found ${res.scannedCount} active · <strong>${res.matchedCount} auto-linked</strong>${review.length ? ` · ${review.length} need 1-click review` : ""}${res.unmatchedCount ? ` · ${res.unmatchedCount} unmatched` : ""}. Refresh your Command Center to see live badges!`;
+
+    if (review.length > 0) {
+      for (const m of review) {
+        const row = document.createElement("div");
+        row.className = "job-row";
+        row.style.padding = "8px 0";
+        row.innerHTML = `
+          <div class="job-top">
+            <span class="sku">${Math.round(m.confidence * 100)}% match · ${m.candidateSku}</span>
+            <button type="button" class="btn btn-confirm" style="padding:3px 8px;">Link</button>
+          </div>
+          <div class="title"><strong>Page:</strong> ${m.scannedTitle} ($${Number(m.scannedPrice || 0).toFixed(0)})</div>
+          <div class="title" style="color:#0f766e;"><strong>eBay:</strong> ${m.candidateTitle}</div>
+        `;
+        const linkBtn = row.querySelector("button");
+        linkBtn.addEventListener("click", async () => {
+          linkBtn.disabled = true;
+          linkBtn.textContent = "Linking...";
+          const lr = await chrome.runtime.sendMessage({
+            type: "RCC_LINK_EXISTING_MATCH",
+            payload: {
+              itemId: m.candidateItemId,
+              marketplace: res.marketplace,
+              externalUrl: m.externalUrl,
+              externalListingId: m.externalListingId,
+              listedPrice: m.scannedPrice,
+            },
+          });
+          if (lr?.ok) {
+            linkBtn.textContent = "Linked ✓";
+          } else {
+            linkBtn.disabled = false;
+            linkBtn.textContent = "Retry";
+          }
+        });
+        scanReviewEl.appendChild(row);
+      }
+    }
+  });
+}
+
 loadState();

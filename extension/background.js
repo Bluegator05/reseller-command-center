@@ -230,6 +230,210 @@ async function fetchImageAsBase64(imageUrl) {
   };
 }
 
+/**
+ * Injected into the currently open Poshmark Closet, Mercari Selling, or Facebook
+ * Marketplace tab to extract all visible active listing cards.
+ */
+function scrapeActiveListingsFromDom(marketplace) {
+  const seen = new Set();
+  const results = [];
+
+  function extractPrice(text) {
+    const m = (text || "").match(/\$\s*([0-9,]+(?:\.[0-9]{1,2})?)/);
+    if (!m) return 0;
+    return Number(m[1].replace(/,/g, "")) || 0;
+  }
+
+  function isSoldOrInactive(containerText) {
+    const lower = (containerText || "").toLowerCase();
+    return (
+      /\bsold\b/.test(lower) ||
+      lower.includes("not for sale") ||
+      lower.includes("deactivated") ||
+      lower.includes("inactive")
+    );
+  }
+
+  if (marketplace === "poshmark") {
+    const links = Array.from(document.querySelectorAll('a[href*="/listing/"]'));
+    for (const link of links) {
+      const href = link.href || "";
+      const idMatch = href.match(/([0-9a-f]{24})(?:[/?#]|$)/i);
+      const extId = idMatch ? idMatch[1] : href;
+      if (!extId || seen.has(extId)) continue;
+
+      const card =
+        link.closest('[data-et-name="listing"], .card, .tile, article, li') ||
+        link.parentElement?.parentElement ||
+        link;
+      const cardText = card?.innerText || "";
+      if (isSoldOrInactive(cardText)) continue;
+
+      const titleEl = card?.querySelector(
+        ".tile__title, [data-et-name='listing_title'], a.tile__title"
+      );
+      const imgAlt = card?.querySelector("img")?.getAttribute("alt") || "";
+      const rawTitle =
+        titleEl?.textContent?.trim() ||
+        link.getAttribute("title")?.trim() ||
+        imgAlt.trim() ||
+        link.textContent?.trim() ||
+        "";
+      const cleanTitle = rawTitle.replace(/\s+/g, " ").trim();
+      if (cleanTitle.length < 3) continue;
+
+      seen.add(extId);
+      results.push({
+        externalListingId: extId,
+        externalUrl: href.split("?")[0],
+        title: cleanTitle,
+        price: extractPrice(cardText),
+      });
+    }
+  } else if (marketplace === "mercari") {
+    const links = Array.from(
+      document.querySelectorAll('a[href*="/us/item/m"], a[href*="/item/m"]')
+    );
+    for (const link of links) {
+      const href = link.href || "";
+      const idMatch = href.match(/\/item\/(m\d+)/i);
+      const extId = idMatch ? idMatch[1] : href;
+      if (!extId || seen.has(extId)) continue;
+
+      const card =
+        link.closest('[data-testid*="Item"], [data-testid*="Listing"], li, article') ||
+        link;
+      const cardText = card?.innerText || link.innerText || "";
+      if (isSoldOrInactive(cardText)) continue;
+
+      const imgAlt = card?.querySelector("img")?.getAttribute("alt") || "";
+      const lines = cardText
+        .split("\n")
+        .map((s) => s.trim())
+        .filter((s) => s.length >= 3 && !/^\$[\d,.]+$/.test(s));
+      const cleanTitle = (imgAlt.trim() || lines[0] || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (cleanTitle.length < 3) continue;
+
+      seen.add(extId);
+      results.push({
+        externalListingId: extId,
+        externalUrl: href.split("?")[0],
+        title: cleanTitle,
+        price: extractPrice(cardText),
+      });
+    }
+  } else if (marketplace === "facebook") {
+    const links = Array.from(
+      document.querySelectorAll('a[href*="/marketplace/item/"]')
+    );
+    for (const link of links) {
+      const href = link.href || "";
+      const idMatch = href.match(/\/marketplace\/item\/(\d+)/i);
+      const extId = idMatch ? idMatch[1] : href;
+      if (!extId || seen.has(extId)) continue;
+
+      const cardText = link.innerText || "";
+      if (isSoldOrInactive(cardText)) continue;
+
+      const imgAlt = link.querySelector("img")?.getAttribute("alt") || "";
+      const lines = cardText
+        .split("\n")
+        .map((s) => s.trim())
+        .filter((s) => s.length >= 3 && !/^\$[\d,.]+$/.test(s));
+      const cleanTitle = (lines[0] || imgAlt.trim() || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (cleanTitle.length < 3) continue;
+
+      seen.add(extId);
+      results.push({
+        externalListingId: extId,
+        externalUrl: href.split("?")[0],
+        title: cleanTitle,
+        price: extractPrice(cardText),
+      });
+    }
+  }
+
+  return results;
+}
+
+async function scanActiveTabAndImport() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id || !tab.url) {
+    throw new Error("No active browser tab found.");
+  }
+
+  let marketplace = null;
+  if (tab.url.includes("poshmark.com")) marketplace = "poshmark";
+  else if (tab.url.includes("mercari.com")) marketplace = "mercari";
+  else if (tab.url.includes("facebook.com/marketplace")) marketplace = "facebook";
+
+  if (!marketplace) {
+    throw new Error(
+      "Open your Poshmark Closet, Mercari Active Listings, or Facebook Marketplace Selling tab first, then click Scan Current Page."
+    );
+  }
+
+  const injected = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: scrapeActiveListingsFromDom,
+    args: [marketplace],
+  });
+
+  const listings = injected?.[0]?.result || [];
+  if (listings.length === 0) {
+    throw new Error(
+      `No active ${marketplace} listings detected on this page. Make sure you are on your Closet / Active Listings page and scroll down to load items.`
+    );
+  }
+
+  const config = await getConfig();
+  const base = (
+    config.apiBaseUrl || "https://reseller-command-center-black.vercel.app"
+  ).replace(/\/+$/, "");
+
+  const res = await fetch(`${base}/api/extension/import-listings`, {
+    method: "POST",
+    headers: buildBridgeHeaders(config, true),
+    credentials: "include",
+    body: JSON.stringify({ marketplace, listings }),
+  });
+
+  if (res.status === 401) {
+    throw new Error(
+      "Owner passcode required — enter your Command Center passcode in Connection Settings below."
+    );
+  }
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || `Import failed (${res.status})`);
+  }
+
+  return { ok: true, ...data };
+}
+
+async function linkExistingMatch(payload) {
+  const config = await getConfig();
+  const base = (
+    config.apiBaseUrl || "https://reseller-command-center-black.vercel.app"
+  ).replace(/\/+$/, "");
+
+  const res = await fetch(`${base}/api/extension/import-listings`, {
+    method: "POST",
+    headers: buildBridgeHeaders(config, true),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || `Link failed (${res.status})`);
+  }
+  return { ok: true, ...data };
+}
+
 chrome.runtime.onInstalled.addListener(async () => {
   const config = await getConfig();
   await configureAlarm(config);
@@ -289,6 +493,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           sendResponse({ ok: true, ...img });
           break;
         }
+        case "RCC_SCAN_ACTIVE_TAB": {
+          const scanResult = await scanActiveTabAndImport();
+          sendResponse(scanResult);
+          break;
+        }
+        case "RCC_LINK_EXISTING_MATCH": {
+          const linkResult = await linkExistingMatch(message.payload || {});
+          sendResponse(linkResult);
+          break;
+        }
         default:
           sendResponse({ ok: false, error: "Unknown message type" });
       }
@@ -299,5 +513,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       });
     }
   })();
+
   return true;
 });
