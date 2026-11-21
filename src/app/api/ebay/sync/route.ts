@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { simulateDemoEbaySync } from "@/lib/demo-store";
 import {
   fetchActiveEbayOffers,
+  fetchActivePromotedRates,
   isEbayConfigured,
   type NormalizedEbayOffer,
 } from "@/lib/ebay";
@@ -48,7 +49,10 @@ export async function POST() {
   }
 
   try {
-    const offers = await fetchActiveEbayOffers(2000);
+    const [offers, promotedRates] = await Promise.all([
+      fetchActiveEbayOffers(2000),
+      fetchActivePromotedRates(),
+    ]);
     const syncedAt = new Date().toISOString();
 
     // 1. Fetch existing inventory item IDs by SKU in chunks of 200
@@ -153,6 +157,10 @@ export async function POST() {
           views_count: offer.viewsCount,
           watchers_count: offer.watchersCount,
           impressions_count: offer.impressionsCount,
+          promoted_ad_rate_pct:
+            (offer.externalListingId
+              ? promotedRates.get(offer.externalListingId)
+              : 0) ?? 0,
           listed_at: offer.listedAt,
           last_synced_at: syncedAt,
         };

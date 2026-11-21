@@ -46,6 +46,7 @@ export interface NormalizedEbayOffer {
   viewsCount: number;
   watchersCount: number;
   impressionsCount: number;
+  promotedAdRatePct?: number;
   weightOz: number | null;
 }
 
@@ -894,10 +895,59 @@ async function resolveOrCreateCpsCampaignId(
 }
 
 /**
+ * Fetches live Promoted Listings General (`COST_PER_SALE`) ad rates for all
+ * active ads across the seller's running campaigns so Sync eBay shows real
+ * promoted percentages (e.g., 2%, 4%, 7%) instead of 0%.
+ */
+export async function fetchActivePromotedRates(): Promise<Map<string, number>> {
+  const rates = new Map<string, number>();
+  try {
+    const listRes = await ebayRequest<{ campaigns?: EbayCampaignRecord[] }>(
+      `/sell/marketing/v1/ad_campaign?campaign_status=RUNNING&funding_strategy=COST_PER_SALE&limit=50`
+    );
+
+    const campaigns = (listRes.campaigns ?? []).filter(
+      (c) => c.campaignStatus === "RUNNING"
+    );
+
+    for (const c of campaigns) {
+      for (let offset = 0; offset < 2500; offset += 500) {
+        const adsRes = await ebayRequest<{
+          ads?: Array<{
+            listingId?: string;
+            bidPercentage?: string;
+            adStatus?: string;
+          }>;
+          total?: number;
+        }>(
+          `/sell/marketing/v1/ad_campaign/${encodeURIComponent(c.campaignId)}/ad?limit=500&offset=${offset}`
+        );
+        const ads = adsRes.ads ?? [];
+        for (const ad of ads) {
+          if (!ad.listingId) continue;
+          if (ad.adStatus && ad.adStatus !== "ACTIVE") continue;
+          const pct = Number(ad.bidPercentage ?? 0);
+          if (pct > 0) {
+            rates.set(ad.listingId, pct);
+          }
+        }
+        if (ads.length < 500) break;
+      }
+    }
+  } catch (err) {
+    console.warn(
+      "[ebay] Could not fetch promoted listing rates:",
+      err instanceof Error ? err.message : err
+    );
+  }
+  return rates;
+}
+
+/**
  * Promotes an active eBay listing via eBay Sell Marketing API (Promoted Listings General / CPS).
  * Automatically discovers or creates a running COST_PER_SALE campaign when
- * `EBAY_AD_CAMPAIGN_ID` is not set, and updates the bid rate if the listing is
- * already enrolled in a campaign.
+ * `EBAY_AD_CAMPAIGN_ID` is not set, and updates the ad bid rate cleanly via
+ * `bulk_update_ads_bid_by_listing_id` if the listing is already promoted (Error 35036).
  */
 export async function promoteEbayListing(params: {
   listingId: string;
@@ -905,10 +955,43 @@ export async function promoteEbayListing(params: {
   campaignId?: string;
 }): Promise<{ adId: string; adRatePct: number; campaignId: string }> {
   const adRate = Math.max(2, Math.min(20, roundCurrency(params.adRatePct ?? 4)));
+  const bidStr = adRate.toFixed(1);
   const campaignId = await resolveOrCreateCpsCampaignId(
     adRate,
     params.campaignId
   );
+
+  const tryUpdateBidInCampaign = async (targetCampaignId: string) => {
+    const updRes = await ebayRequest<{
+      responses?: Array<{
+        statusCode?: number;
+        listingId?: string;
+        errors?: Array<{ message?: string }>;
+      }>;
+    }>(
+      `/sell/marketing/v1/ad_campaign/${encodeURIComponent(targetCampaignId)}/bulk_update_ads_bid_by_listing_id`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          requests: [
+            {
+              listingId: params.listingId,
+              bidPercentage: bidStr,
+            },
+          ],
+        }),
+      }
+    );
+    const first = updRes.responses?.[0];
+    if (!first || (first.statusCode && first.statusCode >= 200 && first.statusCode < 300)) {
+      return {
+        adId: `updated-${params.listingId}`,
+        adRatePct: adRate,
+        campaignId: targetCampaignId,
+      };
+    }
+    return null;
+  };
 
   try {
     const res = await ebayRequest<{ adId?: string }>(
@@ -917,7 +1000,7 @@ export async function promoteEbayListing(params: {
         method: "POST",
         body: JSON.stringify({
           listingId: params.listingId,
-          bidPercentage: adRate.toFixed(1),
+          bidPercentage: bidStr,
         }),
       }
     );
@@ -928,32 +1011,31 @@ export async function promoteEbayListing(params: {
       campaignId,
     };
   } catch (err) {
-    // If listing is already in a campaign, look up its existing campaign/ad and updateBid
     const msg = err instanceof Error ? err.message : String(err);
+    // Error 35036 / 35048 / 35049: Ad for this listingId already exists in a campaign
     if (
+      msg.includes("35036") ||
       msg.includes("35048") ||
       msg.includes("35049") ||
+      msg.toLowerCase().includes("already exists") ||
       msg.toLowerCase().includes("already")
     ) {
-      const existing = await ebayRequest<{
-        ads?: Array<{ adId?: string; campaignId?: string }>;
+      // 1. Try updating bid directly in the primary campaign first
+      const directUpdate = await tryUpdateBidInCampaign(campaignId).catch(
+        () => null
+      );
+      if (directUpdate) return directUpdate;
+
+      // 2. Otherwise locate which campaign owns this listing and update bid there
+      const found = await ebayRequest<{
+        campaigns?: Array<{ campaignId?: string }>;
       }>(
         `/sell/marketing/v1/ad_campaign/find_campaign_by_ad_reference?listing_id=${encodeURIComponent(params.listingId)}`
       );
-      const firstAd = existing.ads?.[0];
-      if (firstAd?.adId && firstAd?.campaignId) {
-        await ebayRequest(
-          `/sell/marketing/v1/ad_campaign/${encodeURIComponent(firstAd.campaignId)}/ad/${encodeURIComponent(firstAd.adId)}/update_bid`,
-          {
-            method: "POST",
-            body: JSON.stringify({ bidPercentage: adRate.toFixed(1) }),
-          }
-        );
-        return {
-          adId: firstAd.adId,
-          adRatePct: adRate,
-          campaignId: firstAd.campaignId,
-        };
+      const otherCampaignId = found.campaigns?.[0]?.campaignId;
+      if (otherCampaignId) {
+        const otherUpdate = await tryUpdateBidInCampaign(otherCampaignId);
+        if (otherUpdate) return otherUpdate;
       }
     }
     throw err;
