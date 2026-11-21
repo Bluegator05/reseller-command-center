@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Activity,
@@ -14,6 +14,7 @@ import {
   Lock,
   Plus,
   Puzzle,
+  Send,
   ShieldCheck,
   Smartphone,
   X,
@@ -62,9 +63,47 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
   const router = useRouter();
   const [data, setData] = useState<CommandCenterPayload>(initialData);
   const [activeTab, setActiveTab] = useState<
-    "radar" | "sourcing" | "bins" | "extension" | "sales" | "analytics" | "roadmap"
+    | "radar"
+    | "offers"
+    | "sourcing"
+    | "bins"
+    | "extension"
+    | "sales"
+    | "analytics"
+    | "roadmap"
   >("radar");
   const [lockEnabled, setLockEnabled] = useState(false);
+  const [mountNow] = useState(() => Date.now());
+  const [sentOfferIds, setSentOfferIds] = useState<Set<string>>(new Set());
+  const [eligibleOfferExternalIds, setEligibleOfferExternalIds] =
+    useState<Set<string> | null>(null);
+  const [isCheckingEligible, setIsCheckingEligible] = useState(false);
+  const [eligibleChecked, setEligibleChecked] = useState(false);
+
+  const isLiveMode = data.mode === "live";
+
+  const refreshEligibleOffers = useCallback(async () => {
+    if (!isLiveMode) return;
+    setIsCheckingEligible(true);
+    try {
+      const res = await fetch("/api/ebay/eligible-offers", {
+        cache: "no-store",
+      });
+      if (!res.ok) return;
+      const payload = (await res.json()) as {
+        mode?: string;
+        listingIds?: string[] | null;
+      };
+      if (payload.mode === "live" && Array.isArray(payload.listingIds)) {
+        setEligibleOfferExternalIds(new Set(payload.listingIds));
+        setEligibleChecked(true);
+      }
+    } catch {
+      // ignore transient network errors
+    } finally {
+      setIsCheckingEligible(false);
+    }
+  }, [isLiveMode]);
 
   useEffect(() => {
     fetch("/api/auth/status")
@@ -74,6 +113,24 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
       })
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!isLiveMode) return;
+    let cancelled = false;
+    fetch("/api/ebay/eligible-offers", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((payload: { mode?: string; listingIds?: string[] | null } | null) => {
+        if (cancelled || !payload) return;
+        if (payload.mode === "live" && Array.isArray(payload.listingIds)) {
+          setEligibleOfferExternalIds(new Set(payload.listingIds));
+          setEligibleChecked(true);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isLiveMode]);
   const [isSyncingEbay, setIsSyncingEbay] = useState(false);
   const [isSyncingEtsy, setIsSyncingEtsy] = useState(false);
   const [busyListingIds, setBusyListingIds] = useState<Set<string>>(new Set());
@@ -404,6 +461,33 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
   );
 
   const staleCount = data.items.filter((i) => i.is_stale).length;
+
+  const eligibleOfferRows = useMemo(() => {
+    const cutoff = mountNow - 96 * 60 * 60 * 1000;
+    const recentlySent = new Set<string>(sentOfferIds);
+    for (const job of data.recentJobs) {
+      if (job.action !== "send_offer" || job.status !== "completed") continue;
+      if (!job.listing_id) continue;
+      const ts = Date.parse(job.completed_at || job.created_at || "");
+      if (!Number.isNaN(ts) && ts >= cutoff) {
+        recentlySent.add(job.listing_id);
+      }
+    }
+    return data.items
+      .filter((row) => {
+        if (row.is_at_floor) return false;
+        if (recentlySent.has(row.listing_id)) return false;
+        if (eligibleOfferExternalIds !== null) {
+          return Boolean(
+            row.external_listing_id &&
+              eligibleOfferExternalIds.has(row.external_listing_id)
+          );
+        }
+        return row.watchers_count > 0;
+      })
+      .sort((a, b) => b.watchers_count - a.watchers_count);
+  }, [data.items, data.recentJobs, eligibleOfferExternalIds, mountNow, sentOfferIds]);
+
   const extensionActionableCount = data.extensionJobs.filter(
     (j) =>
       j.status === "pending" ||
@@ -448,6 +532,25 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
             {staleCount > 0 && (
               <span className="absolute top-1 right-1.5 min-w-[16px] h-4 px-1 rounded-full font-mono tabular-nums text-[9px] font-bold bg-[#B45309] text-white inline-flex items-center justify-center">
                 {staleCount}
+              </span>
+            )}
+          </button>
+
+          <button
+            id="tab-watcher-offers"
+            type="button"
+            onClick={() => setActiveTab("offers")}
+            className={`relative w-full py-2 px-1 rounded-xl flex flex-col items-center gap-1 text-[10px] font-semibold transition cursor-pointer ${
+              activeTab === "offers"
+                ? "bg-[#ECFDF5] text-[#0F766E]"
+                : "text-[#5C606B] hover:bg-[#F2F6F4] hover:text-[#14151A]"
+            }`}
+          >
+            <Send className="w-4 h-4" />
+            <span>Offers</span>
+            {eligibleOfferRows.length > 0 && (
+              <span className="absolute top-1 right-1.5 min-w-[16px] h-4 px-1 rounded-full font-mono tabular-nums text-[9px] font-bold bg-[#0F766E] text-white inline-flex items-center justify-center">
+                {eligibleOfferRows.length}
               </span>
             )}
           </button>
@@ -660,15 +763,33 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
             draftItems={data.draftItems}
             onOpenItemDetail={(row) => setDetailModalItemId(row.item_id)}
           />
+        ) : activeTab === "offers" ? (
+          <WatcherOffersPanel
+            eligibleRows={eligibleOfferRows}
+            isLive={isLiveMode}
+            isCheckingEligible={isCheckingEligible}
+            eligibleChecked={eligibleChecked}
+            isBusy={isBulkBusy}
+            onRefreshEligible={refreshEligibleOffers}
+            onSendOffer={handleExecuteAction}
+            onMarkSent={(rows) => {
+              setSentOfferIds((prev) => {
+                const next = new Set(prev);
+                for (const r of rows) next.add(r.listing_id);
+                return next;
+              });
+              setEligibleOfferExternalIds((prev) => {
+                if (!prev) return prev;
+                const next = new Set(prev);
+                for (const r of rows) {
+                  if (r.external_listing_id) next.delete(r.external_listing_id);
+                }
+                return next;
+              });
+            }}
+          />
         ) : activeTab === "radar" ? (
           <div className="space-y-4">
-            <WatcherOffersPanel
-              items={data.items}
-              recentJobs={data.recentJobs}
-              isLive={data.mode === "live"}
-              isBusy={isBulkBusy}
-              onSendOffer={handleExecuteAction}
-            />
             <StaleRadarTable
             items={data.items}
             draftItems={data.draftItems}
