@@ -232,9 +232,56 @@ async function fetchImageAsBase64(imageUrl) {
 
 /**
  * Injected into the currently open Poshmark Closet, Mercari Selling, or Facebook
- * Marketplace tab to extract all visible active listing cards.
+ * Marketplace tab. Automatically scrolls down to trigger infinite-scroll lazy
+ * loading until every active listing card is rendered, then extracts them all.
  */
-function scrapeActiveListingsFromDom(marketplace) {
+async function scrapeActiveListingsFromDom(marketplace) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const linkSelector =
+    marketplace === "poshmark"
+      ? 'a[href*="/listing/"]'
+      : marketplace === "mercari"
+        ? 'a[href*="/us/item/m"], a[href*="/item/m"]'
+        : 'a[href*="/marketplace/item/"]';
+
+  // Auto-scroll to load all lazy-loaded items on Poshmark / Mercari / FB
+  let lastCount = document.querySelectorAll(linkSelector).length;
+  let lastHeight = document.body.scrollHeight;
+  let stablePasses = 0;
+
+  for (let step = 0; step < 40; step++) {
+    window.scrollTo({
+      top: document.body.scrollHeight,
+      behavior: "instant",
+    });
+
+    // Click Mercari/Poshmark "Load More" button if present
+    const loadMoreBtn = Array.from(document.querySelectorAll("button")).find(
+      (b) => {
+        const txt = (b.textContent || "").trim().toLowerCase();
+        return txt === "load more" || txt === "show more" || txt === "see more";
+      }
+    );
+    if (loadMoreBtn && !loadMoreBtn.disabled) {
+      loadMoreBtn.click();
+    }
+
+    await sleep(850);
+
+    const nextCount = document.querySelectorAll(linkSelector).length;
+    const nextHeight = document.body.scrollHeight;
+    if (nextCount === lastCount && nextHeight === lastHeight) {
+      stablePasses += 1;
+      if (stablePasses >= 2) break;
+    } else {
+      stablePasses = 0;
+      lastCount = nextCount;
+      lastHeight = nextHeight;
+    }
+  }
+
+  window.scrollTo({ top: 0, behavior: "instant" });
+
   const seen = new Set();
   const results = [];
 
@@ -412,6 +459,7 @@ async function scanActiveTabAndImport() {
     throw new Error(data.error || `Import failed (${res.status})`);
   }
 
+  await refreshJobsCache();
   return { ok: true, ...data };
 }
 
@@ -431,7 +479,29 @@ async function linkExistingMatch(payload) {
   if (!res.ok) {
     throw new Error(data.error || `Link failed (${res.status})`);
   }
+  await refreshJobsCache();
   return { ok: true, ...data };
+}
+
+async function deleteExtensionJob(jobId) {
+  const config = await getConfig();
+  const base = (
+    config.apiBaseUrl || "https://reseller-command-center-black.vercel.app"
+  ).replace(/\/+$/, "");
+
+  const res = await fetch(
+    `${base}/api/extension/jobs?id=${encodeURIComponent(jobId)}`,
+    {
+      method: "DELETE",
+      headers: buildBridgeHeaders(config),
+      credentials: "include",
+    }
+  );
+  if (!res.ok) {
+    throw new Error(`Cancel job failed (${res.status})`);
+  }
+  await refreshJobsCache();
+  return { ok: true };
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -486,6 +556,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           await updateJobStatus(message.jobId, message.status, message.extra || {});
           await refreshJobsCache();
           sendResponse({ ok: true });
+          break;
+        }
+        case "RCC_DELETE_JOB": {
+          const delResult = await deleteExtensionJob(message.jobId);
+          sendResponse(delResult);
           break;
         }
         case "RCC_FETCH_IMAGE_BLOB": {

@@ -63,6 +63,22 @@ function renderJobs(jobs) {
 
     const actionsEl = row.querySelector(".actions");
 
+    const cancelBtn = document.createElement("button");
+    cancelBtn.className = "btn";
+    cancelBtn.style.color = "#b91c1c";
+    cancelBtn.style.borderColor = "#fecaca";
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.addEventListener("click", async () => {
+      cancelBtn.disabled = true;
+      cancelBtn.textContent = "Removing...";
+      await chrome.runtime.sendMessage({
+        type: "RCC_DELETE_JOB",
+        jobId: job.id,
+      });
+      await loadState();
+    });
+    actionsEl.appendChild(cancelBtn);
+
     if (job.status === "needs_user_confirm") {
       const confirmBtn = document.createElement("button");
       confirmBtn.className = "btn btn-confirm";
@@ -167,7 +183,7 @@ const scanReviewEl = document.getElementById("scan-review");
 if (btnScanEl) {
   btnScanEl.addEventListener("click", async () => {
     btnScanEl.disabled = true;
-    btnScanEl.textContent = "Scanning page & matching eBay SKUs...";
+    btnScanEl.textContent = "Auto-scrolling page & matching all SKUs...";
     errorBarEl.style.display = "none";
     scanStatusEl.style.display = "none";
     scanReviewEl.innerHTML = "";
@@ -177,7 +193,7 @@ if (btnScanEl) {
     });
 
     btnScanEl.disabled = false;
-    btnScanEl.textContent = "Scan Active Listings on This Page";
+    btnScanEl.textContent = "Auto-Scroll & Scan All Listings";
 
     if (!res?.ok) {
       errorBarEl.style.display = "block";
@@ -187,6 +203,8 @@ if (btnScanEl) {
       }
       return;
     }
+
+    await loadState();
 
     const review = Array.isArray(res.reviewMatches) ? res.reviewMatches : [];
     scanStatusEl.style.display = "block";

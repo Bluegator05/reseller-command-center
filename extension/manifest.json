@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Reseller Command Center — Companion Extension",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Listens to Reseller Command Center extension jobs to auto-fill Poshmark, Mercari, and Facebook Marketplace listings and scan existing active listings to link them automatically.",
   "permissions": [
     "storage",

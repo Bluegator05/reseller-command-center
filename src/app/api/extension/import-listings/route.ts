@@ -174,6 +174,15 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
 
+    // Clear any stale pending create jobs for this already-listed item+marketplace
+    await supabase
+      .from("channel_jobs")
+      .delete()
+      .eq("item_id", body.itemId)
+      .eq("marketplace", marketplace)
+      .eq("action", "create")
+      .in("status", ["pending", "processing", "needs_user_confirm"]);
+
     return NextResponse.json({
       mode: "direct_link",
       linked: true,
@@ -319,6 +328,19 @@ export async function POST(request: Request) {
     if (upsertErr) {
       return NextResponse.json({ error: upsertErr.message }, { status: 500 });
     }
+  }
+
+  // Clear any pending create jobs for items we just confirmed are already listed
+  const linkedItemIds = Array.from(usedItemIds);
+  for (let i = 0; i < linkedItemIds.length; i += 100) {
+    const idChunk = linkedItemIds.slice(i, i + 100);
+    await supabase
+      .from("channel_jobs")
+      .delete()
+      .in("item_id", idChunk)
+      .eq("marketplace", marketplace)
+      .eq("action", "create")
+      .in("status", ["pending", "processing", "needs_user_confirm"]);
   }
 
   return NextResponse.json({

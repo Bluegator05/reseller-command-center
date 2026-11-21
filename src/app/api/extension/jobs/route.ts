@@ -24,8 +24,8 @@ const EXTENSION_CHANNELS: MarketplaceType[] = [
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PATCH, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, x-owner-passcode",
 };
 
 export async function OPTIONS() {
@@ -398,6 +398,48 @@ export async function PATCH(request: Request) {
 
   return NextResponse.json(
     { mode: "demo", job: updated },
+    { headers: CORS_HEADERS }
+  );
+}
+
+/**
+ * DELETE /api/extension/jobs?id=<jobId>
+ * Cancels and removes a queued extension job (e.g., if the item was already listed).
+ */
+export async function DELETE(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const jobId = searchParams.get("id")?.trim();
+  if (!jobId) {
+    return NextResponse.json(
+      { error: "Missing required id query parameter" },
+      { status: 400, headers: CORS_HEADERS }
+    );
+  }
+
+  const supabase = getSupabaseServerClient();
+  const useLive = Boolean(supabase && isSupabaseConfigured());
+
+  if (useLive && supabase) {
+    const { error } = await supabase
+      .from("channel_jobs")
+      .delete()
+      .eq("id", jobId);
+    if (error) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: 400, headers: CORS_HEADERS }
+      );
+    }
+    return NextResponse.json(
+      { mode: "live", deletedId: jobId },
+      { headers: CORS_HEADERS }
+    );
+  }
+
+  const store = getDemoStore();
+  store.jobs = store.jobs.filter((j) => j.id !== jobId);
+  return NextResponse.json(
+    { mode: "demo", deletedId: jobId },
     { headers: CORS_HEADERS }
   );
 }

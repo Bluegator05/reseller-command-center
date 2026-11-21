@@ -11,6 +11,7 @@ import {
   Puzzle,
   ShieldCheck,
   Terminal,
+  Trash2,
 } from "lucide-react";
 import type { ChannelJob, JobStatusType } from "@/lib/types";
 
@@ -23,6 +24,7 @@ interface ExtensionQueuePanelProps {
     externalUrl?: string;
     listedPrice?: number;
   }) => Promise<void>;
+  onDeleteJob?: (jobId: string) => Promise<void>;
 }
 
 const CHANNEL_BADGE: Record<string, string> = {
@@ -64,6 +66,7 @@ export function ExtensionQueuePanel({
   jobs,
   recentJobs = [],
   onUpdateJobStatus,
+  onDeleteJob,
 }: ExtensionQueuePanelProps) {
   const [busyJobId, setBusyJobId] = useState<string | null>(null);
 
@@ -327,27 +330,48 @@ export function ExtensionQueuePanel({
                     </p>
                   </div>
 
-                  <button
-                    type="button"
-                    disabled={isBusy}
-                    onClick={() => handleSimulateRun(job)}
-                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-50 transition cursor-pointer shrink-0 ${
-                      job.action === "delist"
-                        ? "bg-[#B91C1C] hover:bg-[#991B1B]"
-                        : "bg-[#14151A] hover:bg-[#272A34]"
-                    }`}
-                  >
-                    {isBusy ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Play className="w-3.5 h-3.5" />
+                  <div className="flex items-center gap-2 shrink-0">
+                    {onDeleteJob && (
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={async () => {
+                          setBusyJobId(job.id);
+                          try {
+                            await onDeleteJob(job.id);
+                          } finally {
+                            setBusyJobId(null);
+                          }
+                        }}
+                        title="Cancel and remove from queue"
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-[#FECACA] bg-white text-[#B91C1C] hover:bg-[#FEF2F2] disabled:opacity-50 transition cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Cancel</span>
+                      </button>
                     )}
-                    {job.action === "delist"
-                      ? "Execute Delist Now"
-                      : job.marketplace === "facebook"
-                        ? "Simulate Auto-Fill (Pauses for Confirm)"
-                        : "Simulate Extension Auto-Fill"}
-                  </button>
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={() => handleSimulateRun(job)}
+                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-50 transition cursor-pointer ${
+                        job.action === "delist"
+                          ? "bg-[#B91C1C] hover:bg-[#991B1B]"
+                          : "bg-[#14151A] hover:bg-[#272A34]"
+                      }`}
+                    >
+                      {isBusy ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Play className="w-3.5 h-3.5" />
+                      )}
+                      {job.action === "delist"
+                        ? "Execute Delist Now"
+                        : job.marketplace === "facebook"
+                          ? "Simulate Auto-Fill (Pauses for Confirm)"
+                          : "Simulate Extension Auto-Fill"}
+                    </button>
+                  </div>
                 </div>
               );
             })}

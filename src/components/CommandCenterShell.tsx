@@ -923,6 +923,26 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
             jobs={data.extensionJobs}
             recentJobs={data.recentJobs}
             onUpdateJobStatus={handleUpdateExtensionJob}
+            onDeleteJob={async (jobId: string) => {
+              const res = await fetch(
+                `/api/extension/jobs?id=${encodeURIComponent(jobId)}`,
+                { method: "DELETE" }
+              );
+              if (!res.ok) {
+                pushToast(
+                  "error",
+                  "Failed to Cancel Job",
+                  "Could not remove queued job."
+                );
+                return;
+              }
+              await refreshInventory();
+              pushToast(
+                "info",
+                "Extension Job Canceled",
+                "Removed from queue."
+              );
+            }}
           />
         ) : activeTab === "sales" ? (
           <SalesLedgerPanel
