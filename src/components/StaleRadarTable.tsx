@@ -260,7 +260,9 @@ export function StaleRadarTable({
   const [density, setDensity] = useState<"gallery" | "compact">("gallery");
   const [autoPromoteEnabled, setAutoPromoteEnabled] = useState(true);
   const [isPromoting, setIsPromoting] = useState(false);
-  const [showDeathPile, setShowDeathPile] = useState(false);
+  const [showDeathPile, setShowDeathPile] = useState(
+    () => items.length === 0 && draftItems.length > 0
+  );
   const [promotingDraftId, setPromotingDraftId] = useState<string | null>(null);
   const [mountNow] = useState(() => Date.now());
 

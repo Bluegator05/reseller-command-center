@@ -11,12 +11,13 @@ const EBAY_WEB_BASE = {
   SANDBOX: "https://sandbox.ebay.com/itm",
 } as const;
 
-const EBAY_OAUTH_SCOPES = [
+export const EBAY_OAUTH_SCOPES = [
   "https://api.ebay.com/oauth/api_scope",
   "https://api.ebay.com/oauth/api_scope/sell.inventory",
   "https://api.ebay.com/oauth/api_scope/sell.marketing",
   "https://api.ebay.com/oauth/api_scope/sell.account",
   "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly",
+  "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
 ].join(" ");
 
 interface CachedEbayToken {
@@ -156,6 +157,87 @@ async function ebayRequest<T>(
   return (await response.json()) as T;
 }
 
+/**
+ * Calls eBay Trading API (`ws/api.dll`) using the same OAuth access token via
+ * `X-EBAY-API-IAF-TOKEN`, enabling full support for listings created in
+ * eBay Seller Hub and the eBay mobile app (including real WatchCount, HitCount,
+ * and exact StartTime).
+ */
+async function ebayTradingRequest(
+  callName: string,
+  innerXml: string
+): Promise<string> {
+  const token = await getEbayAccessToken();
+  const { apiBase } = getEbayBaseUrls();
+  const xmlPayload = `<?xml version="1.0" encoding="utf-8"?>
+<${callName}Request xmlns="urn:ebay:apis:eBLBaseComponents">
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <WarningLevel>High</WarningLevel>
+  ${innerXml}
+</${callName}Request>`;
+
+  const response = await fetch(`${apiBase}/ws/api.dll`, {
+    method: "POST",
+    headers: {
+      "X-EBAY-API-SITEID": "0",
+      "X-EBAY-API-COMPATIBILITY-LEVEL": "1355",
+      "X-EBAY-API-CALL-NAME": callName,
+      "X-EBAY-API-IAF-TOKEN": token,
+      "Content-Type": "text/xml; charset=utf-8",
+    },
+    body: xmlPayload,
+    cache: "no-store",
+  });
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `eBay Trading API ${callName} failed (${response.status}): ${text.slice(0, 240)}`
+    );
+  }
+
+  const ack = extractXmlTag(text, "Ack");
+  if (ack && ack !== "Success" && ack !== "Warning") {
+    const longMsg =
+      extractXmlTag(text, "LongMessage") ||
+      extractXmlTag(text, "ShortMessage") ||
+      "Trading API returned Failure";
+    throw new Error(`eBay ${callName} error: ${decodeXmlEntities(longMsg)}`);
+  }
+
+  return text;
+}
+
+function decodeXmlEntities(input: string): string {
+  return input
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .trim();
+}
+
+function extractXmlTag(xml: string, tagName: string): string | null {
+  const re = new RegExp(`<${tagName}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tagName}>`, "i");
+  const m = xml.match(re);
+  return m ? decodeXmlEntities(m[1]) : null;
+}
+
+function extractAllXmlTags(xml: string, tagName: string): string[] {
+  const re = new RegExp(
+    `<${tagName}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tagName}>`,
+    "gi"
+  );
+  const out: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    out.push(m[1]);
+  }
+  return out;
+}
+
 function stripHtmlTags(html: string): string {
   return html
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ")
@@ -198,87 +280,243 @@ interface EbayOfferRecord {
 }
 
 /**
- * Pulls active eBay Inventory items and their published offers using Sell Inventory API.
- * Enriches traffic metrics when Sell Analytics traffic report is accessible.
+ * Pulls active Seller Hub / Mobile App / Legacy listings via eBay Trading API
+ * `GetMyeBaySelling`, capturing real WatchCount, HitCount, and exact StartTime.
  */
-export async function fetchActiveEbayOffers(
-  limit = 100
+async function fetchActiveTradingListings(
+  limit = 200
 ): Promise<NormalizedEbayOffer[]> {
   const { webBase } = getEbayBaseUrls();
-  const invRes = await ebayRequest<{
-    inventoryItems?: EbayInventoryItemRecord[];
-  }>(`/sell/inventory/v1/inventory_item?limit=${Math.min(limit, 200)}&offset=0`);
-
-  const inventoryItems = invRes.inventoryItems ?? [];
   const normalized: NormalizedEbayOffer[] = [];
+  const entriesPerPage = Math.min(limit, 200);
+  const maxPages = Math.max(1, Math.ceil(limit / entriesPerPage));
 
-  for (const inv of inventoryItems) {
-    try {
-      const offerRes = await ebayRequest<{ offers?: EbayOfferRecord[] }>(
-        `/sell/inventory/v1/offer?sku=${encodeURIComponent(inv.sku)}`
-      );
+  for (let page = 1; page <= maxPages; page++) {
+    const xml = await ebayTradingRequest(
+      "GetMyeBaySelling",
+      `<ActiveList>
+        <Include>true</Include>
+        <Pagination>
+          <EntriesPerPage>${entriesPerPage}</EntriesPerPage>
+          <PageNumber>${page}</PageNumber>
+        </Pagination>
+      </ActiveList>
+      <DetailLevel>ReturnAll</DetailLevel>`
+    );
 
-      const publishedOffers = (offerRes.offers ?? []).filter(
-        (o) =>
-          o.status === "PUBLISHED" || o.listing?.listingStatus === "ACTIVE"
-      );
+    const activeListBlock = extractXmlTag(xml, "ActiveList") || xml;
+    const itemBlocks = extractAllXmlTags(activeListBlock, "Item");
+    if (itemBlocks.length === 0) break;
 
-      for (const offer of publishedOffers) {
-        const listingId = offer.listing?.listingId || null;
-        const priceVal = Number(offer.pricingSummary?.price?.value || 0);
-        const descriptionHtml =
-          offer.listingDescription || inv.product?.description || "";
-        const weightVal = inv.packageWeightAndSize?.weight?.value ?? null;
-        const weightUnit = inv.packageWeightAndSize?.weight?.unit;
-        const weightOz =
-          weightVal !== null
-            ? weightUnit === "POUND"
-              ? roundCurrency(weightVal * 16)
-              : weightVal
-            : null;
+    for (const block of itemBlocks) {
+      const itemId = extractXmlTag(block, "ItemID");
+      if (!itemId) continue;
 
-        normalized.push({
-          sku: inv.sku,
-          title: inv.product?.title || `SKU ${inv.sku}`,
-          descriptionHtml,
-          descriptionPlain: stripHtmlTags(descriptionHtml),
-          condition: inv.condition || "USED_EXCELLENT",
-          brand: inv.product?.brand || null,
-          categoryHint: offer.categoryId || null,
-          imageUrls: inv.product?.imageUrls ?? [],
-          itemSpecifics: inv.product?.aspects ?? {},
-          externalOfferId: offer.offerId,
-          externalListingId: listingId || offer.offerId,
-          externalUrl: listingId ? `${webBase}/${listingId}` : null,
-          listedPrice: roundCurrency(priceVal),
-          shippingPrice: 0,
-          listedAt: offer.listingStartDate || new Date().toISOString(),
-          viewsCount: 0,
-          watchersCount: 0,
-          impressionsCount: 0,
-          weightOz,
-        });
+      const rawSku = extractXmlTag(block, "SKU");
+      const sku = rawSku && rawSku.length > 0 ? rawSku : `EBAY-${itemId}`;
+      const title = extractXmlTag(block, "Title") || `eBay Item #${itemId}`;
+
+      const sellingStatusBlock = extractXmlTag(block, "SellingStatus") || "";
+      const currentPriceStr =
+        extractXmlTag(sellingStatusBlock, "CurrentPrice") ||
+        extractXmlTag(block, "BuyItNowPrice") ||
+        extractXmlTag(block, "StartPrice") ||
+        "0";
+      const listedPrice = roundCurrency(Number(currentPriceStr) || 0);
+
+      const shippingBlock = extractXmlTag(block, "ShippingDetails") || "";
+      const shipCostStr =
+        extractXmlTag(shippingBlock, "ShippingServiceCost") || "0";
+      const shippingPrice = roundCurrency(Number(shipCostStr) || 0);
+
+      const listingDetailsBlock = extractXmlTag(block, "ListingDetails") || "";
+      const startTime =
+        extractXmlTag(listingDetailsBlock, "StartTime") ||
+        new Date().toISOString();
+      const viewItemUrl =
+        extractXmlTag(listingDetailsBlock, "ViewItemURL") ||
+        `${webBase}/${itemId}`;
+
+      const watchCount = Number(extractXmlTag(block, "WatchCount") || 0) || 0;
+      const hitCount = Number(extractXmlTag(block, "HitCount") || 0) || 0;
+
+      const picBlock = extractXmlTag(block, "PictureDetails") || "";
+      const picUrls = extractAllXmlTags(picBlock, "PictureURL")
+        .map((u) => decodeXmlEntities(u))
+        .filter(Boolean);
+      const galleryUrl = extractXmlTag(picBlock, "GalleryURL");
+      if (picUrls.length === 0 && galleryUrl) {
+        picUrls.push(galleryUrl);
       }
-    } catch {
-      // Skip SKUs that do not yet have published offers
-      continue;
+
+      const categoryBlock = extractXmlTag(block, "PrimaryCategory") || "";
+      const categoryHint = extractXmlTag(categoryBlock, "CategoryName");
+      const condition =
+        extractXmlTag(block, "ConditionDisplayName") || "Pre-owned";
+
+      normalized.push({
+        sku,
+        title,
+        descriptionHtml: "",
+        descriptionPlain: "",
+        condition,
+        brand: null,
+        categoryHint,
+        imageUrls: picUrls,
+        itemSpecifics: {},
+        externalOfferId: itemId,
+        externalListingId: itemId,
+        externalUrl: viewItemUrl,
+        listedPrice,
+        shippingPrice,
+        listedAt: startTime,
+        viewsCount: hitCount,
+        watchersCount: watchCount,
+        impressionsCount: hitCount,
+        weightOz: null,
+      });
     }
+
+    const totalPages =
+      Number(
+        extractXmlTag(
+          extractXmlTag(activeListBlock, "PaginationResult") || "",
+          "TotalNumberOfPages"
+        ) || 1
+      ) || 1;
+    if (page >= totalPages || normalized.length >= limit) break;
   }
 
-  return normalized;
+  return normalized.slice(0, limit);
 }
 
 /**
- * Resolves an eBay Sell Inventory API offerId.
- * Because `marketplace_listings.external_listing_id` stores the public 12-digit
- * eBay Item Number (needed for item URLs & Negotiation API), we look up the
- * underlying offerId by SKU when needed.
+ * Pulls active eBay listings from BOTH Trading API (Seller Hub / Mobile App,
+ * with real WatchCount, HitCount & StartTime) AND Sell Inventory API, merging
+ * them without duplicates so 100% of active eBay listings sync cleanly.
  */
-async function resolveEbayOfferId(
+export async function fetchActiveEbayOffers(
+  limit = 200
+): Promise<NormalizedEbayOffer[]> {
+  const { webBase } = getEbayBaseUrls();
+  const byListingId = new Map<string, NormalizedEbayOffer>();
+  const bySku = new Map<string, NormalizedEbayOffer>();
+  let tradingError: Error | null = null;
+
+  // 1. Primary pull: Trading API GetMyeBaySelling (covers Seller Hub + App + real Watchers/Views)
+  try {
+    const tradingItems = await fetchActiveTradingListings(limit);
+    for (const item of tradingItems) {
+      if (item.externalListingId) byListingId.set(item.externalListingId, item);
+      bySku.set(item.sku, item);
+    }
+  } catch (err) {
+    tradingError = err instanceof Error ? err : new Error(String(err));
+    console.warn("[ebay] Trading API GetMyeBaySelling warning:", tradingError.message);
+  }
+
+  // 2. Secondary pull / enrichment: Sell Inventory API
+  try {
+    const invRes = await ebayRequest<{
+      inventoryItems?: EbayInventoryItemRecord[];
+    }>(`/sell/inventory/v1/inventory_item?limit=${Math.min(limit, 200)}&offset=0`);
+
+    const inventoryItems = invRes.inventoryItems ?? [];
+    for (const inv of inventoryItems) {
+      try {
+        const offerRes = await ebayRequest<{ offers?: EbayOfferRecord[] }>(
+          `/sell/inventory/v1/offer?sku=${encodeURIComponent(inv.sku)}`
+        );
+
+        const publishedOffers = (offerRes.offers ?? []).filter(
+          (o) =>
+            o.status === "PUBLISHED" || o.listing?.listingStatus === "ACTIVE"
+        );
+
+        for (const offer of publishedOffers) {
+          const listingId = offer.listing?.listingId || null;
+          const priceVal = Number(offer.pricingSummary?.price?.value || 0);
+          const descriptionHtml =
+            offer.listingDescription || inv.product?.description || "";
+          const weightVal = inv.packageWeightAndSize?.weight?.value ?? null;
+          const weightUnit = inv.packageWeightAndSize?.weight?.unit;
+          const weightOz =
+            weightVal !== null
+              ? weightUnit === "POUND"
+                ? roundCurrency(weightVal * 16)
+                : weightVal
+              : null;
+
+          const existing =
+            (listingId && byListingId.get(listingId)) || bySku.get(inv.sku);
+
+          if (existing) {
+            // Enrich Trading API listing with Inventory API specifics/weight/description
+            existing.externalOfferId = offer.offerId;
+            if (descriptionHtml) {
+              existing.descriptionHtml = descriptionHtml;
+              existing.descriptionPlain = stripHtmlTags(descriptionHtml);
+            }
+            if (inv.product?.brand) existing.brand = inv.product.brand;
+            if (weightOz !== null) existing.weightOz = weightOz;
+            if (inv.product?.aspects) existing.itemSpecifics = inv.product.aspects;
+            if (
+              existing.imageUrls.length === 0 &&
+              inv.product?.imageUrls?.length
+            ) {
+              existing.imageUrls = inv.product.imageUrls;
+            }
+          } else {
+            const record: NormalizedEbayOffer = {
+              sku: inv.sku,
+              title: inv.product?.title || `SKU ${inv.sku}`,
+              descriptionHtml,
+              descriptionPlain: stripHtmlTags(descriptionHtml),
+              condition: inv.condition || "USED_EXCELLENT",
+              brand: inv.product?.brand || null,
+              categoryHint: offer.categoryId || null,
+              imageUrls: inv.product?.imageUrls ?? [],
+              itemSpecifics: inv.product?.aspects ?? {},
+              externalOfferId: offer.offerId,
+              externalListingId: listingId || offer.offerId,
+              externalUrl: listingId ? `${webBase}/${listingId}` : null,
+              listedPrice: roundCurrency(priceVal),
+              shippingPrice: 0,
+              listedAt: offer.listingStartDate || new Date().toISOString(),
+              viewsCount: 0,
+              watchersCount: 0,
+              impressionsCount: 0,
+              weightOz,
+            };
+            if (record.externalListingId) {
+              byListingId.set(record.externalListingId, record);
+            }
+            bySku.set(record.sku, record);
+          }
+        }
+      } catch {
+        continue;
+      }
+    }
+  } catch (invErr) {
+    // If both Trading API and Inventory API failed, surface the error
+    if (bySku.size === 0) {
+      throw tradingError ?? (invErr instanceof Error ? invErr : new Error(String(invErr)));
+    }
+  }
+
+  return Array.from(bySku.values());
+}
+
+/**
+ * Resolves an eBay Sell Inventory API offerId (returns null if the listing is a
+ * Seller Hub / Trading API listing with no Inventory API offer).
+ */
+async function resolveInventoryOfferId(
   offerOrListingId: string,
   sku?: string
-): Promise<string> {
-  if (sku) {
+): Promise<string | null> {
+  if (sku && !sku.startsWith("EBAY-")) {
     try {
       const res = await ebayRequest<{ offers?: EbayOfferRecord[] }>(
         `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}`
@@ -295,15 +533,16 @@ async function resolveEbayOfferId(
         );
       if (match?.offerId) return match.offerId;
     } catch {
-      // Fall back to passed ID
+      // Not an Inventory API SKU
     }
   }
-  return offerOrListingId;
+  return null;
 }
 
 /**
- * Updates an active eBay offer price via Sell Inventory API.
- * Fetches the full offer payload first so eBay required fields are preserved.
+ * Updates an active eBay listing price.
+ * Uses Sell Inventory API if managed as an Offer, or Trading API
+ * `ReviseFixedPriceItem` for standard Seller Hub / mobile app listings.
  */
 export async function updateEbayOfferPrice(params: {
   offerId: string;
@@ -312,48 +551,64 @@ export async function updateEbayOfferPrice(params: {
   currency?: string;
 }): Promise<{ offerId: string; updatedPrice: number }> {
   const { offerId: rawId, sku, newPrice, currency = "USD" } = params;
-  const offerId = await resolveEbayOfferId(rawId, sku);
   const formattedPrice = roundCurrency(newPrice).toFixed(2);
+  const invOfferId = await resolveInventoryOfferId(rawId, sku);
 
-  const existingOffer = await ebayRequest<Record<string, unknown>>(
-    `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`
+  if (invOfferId) {
+    const existingOffer = await ebayRequest<Record<string, unknown>>(
+      `/sell/inventory/v1/offer/${encodeURIComponent(invOfferId)}`
+    );
+
+    const existingPricing =
+      (existingOffer.pricingSummary as Record<string, unknown> | undefined) ||
+      {};
+
+    const updatedPayload = {
+      ...existingOffer,
+      pricingSummary: {
+        ...existingPricing,
+        price: {
+          value: formattedPrice,
+          currency,
+        },
+      },
+    };
+
+    await ebayRequest(
+      `/sell/inventory/v1/offer/${encodeURIComponent(invOfferId)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(updatedPayload),
+      }
+    );
+
+    return {
+      offerId: invOfferId,
+      updatedPrice: Number(formattedPrice),
+    };
+  }
+
+  // Fallback for Seller Hub / Trading API listings (12-digit ItemID)
+  await ebayTradingRequest(
+    "ReviseFixedPriceItem",
+    `<Item>
+      <ItemID>${rawId}</ItemID>
+      <StartPrice currencyID="${currency}">${formattedPrice}</StartPrice>
+    </Item>`
   );
 
-  const existingPricing =
-    (existingOffer.pricingSummary as Record<string, unknown> | undefined) || {};
-
-  const updatedPayload = {
-    ...existingOffer,
-    pricingSummary: {
-      ...existingPricing,
-      price: {
-        value: formattedPrice,
-        currency,
-      },
-    },
-  };
-
-  await ebayRequest(`/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`, {
-    method: "PUT",
-    body: JSON.stringify(updatedPayload),
-  });
-
   return {
-    offerId,
+    offerId: rawId,
     updatedPrice: Number(formattedPrice),
   };
 }
 
 /**
- * Executes TRUE End & Sell Similar on eBay (NOT eBay's legacy Relist):
- * 1. Fetches the full active offer payload.
- * 2. Withdraws (ends) the stale listing via `/offer/{offerId}/withdraw`.
- * 3. Deletes the withdrawn offer via `DELETE /offer/{offerId}` so eBay clears
- *    the old offer entity (preventing Error 25002 on duplicate SKU/marketplace).
- * 4. Creates a brand-new Offer via `POST /sell/inventory/v1/offer`.
- * 5. Publishes the new Offer via `POST /offer/{newOfferId}/publish`, forcing
- *    eBay to assign a brand-new 12-digit eBay Item Number (`listingId`) and
- *    fresh "Newly Listed" Cassini search boost.
+ * Executes TRUE End & Sell Similar on eBay so eBay assigns a brand-new 12-digit
+ * eBay Item Number and fresh "Newly Listed" Cassini boost.
+ * - For Inventory API offers: withdraw -> delete -> create fresh offer -> publish.
+ * - For Seller Hub / Trading API listings: EndFixedPriceItem -> RelistFixedPriceItem
+ *   (which mints a brand-new 12-digit ItemID with optional updated StartPrice).
  */
 export async function endAndSellSimilarEbayOffer(params: {
   offerId: string;
@@ -367,68 +622,96 @@ export async function endAndSellSimilarEbayOffer(params: {
   newExternalUrl: string;
 }> {
   const { offerId: rawId, sku, newPrice } = params;
-  const offerId = await resolveEbayOfferId(rawId, sku);
   const { webBase } = getEbayBaseUrls();
+  const invOfferId = await resolveInventoryOfferId(rawId, sku);
 
-  const existingOffer = await ebayRequest<Record<string, unknown>>(
-    `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`
-  );
+  if (invOfferId) {
+    const existingOffer = await ebayRequest<Record<string, unknown>>(
+      `/sell/inventory/v1/offer/${encodeURIComponent(invOfferId)}`
+    );
 
-  const previousListingId =
-    ((existingOffer.listing as Record<string, unknown> | undefined)
-      ?.listingId as string | undefined) ?? null;
+    const previousListingId =
+      ((existingOffer.listing as Record<string, unknown> | undefined)
+        ?.listingId as string | undefined) ?? null;
 
-  // 1. End (withdraw) the stale active listing
-  await ebayRequest(
-    `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/withdraw`,
-    { method: "POST" }
-  );
+    await ebayRequest(
+      `/sell/inventory/v1/offer/${encodeURIComponent(invOfferId)}/withdraw`,
+      { method: "POST" }
+    );
 
-  // 2. Delete the withdrawn offer entity so eBay allows a brand-new offer for this SKU
-  await ebayRequest(`/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`, {
-    method: "DELETE",
-  });
+    await ebayRequest(
+      `/sell/inventory/v1/offer/${encodeURIComponent(invOfferId)}`,
+      { method: "DELETE" }
+    );
 
-  // 3. Strip read-only identifiers and create a completely fresh offer (Sell Similar)
-  const clonePayload: Record<string, unknown> = { ...existingOffer };
-  delete clonePayload.offerId;
-  delete clonePayload.status;
-  delete clonePayload.listing;
-  delete clonePayload.listingStartDate;
+    const clonePayload: Record<string, unknown> = { ...existingOffer };
+    delete clonePayload.offerId;
+    delete clonePayload.status;
+    delete clonePayload.listing;
+    delete clonePayload.listingStartDate;
 
-  if (typeof newPrice === "number" && newPrice > 0) {
-    const existingPricing =
-      (clonePayload.pricingSummary as Record<string, unknown> | undefined) ||
-      {};
-    clonePayload.pricingSummary = {
-      ...existingPricing,
-      price: {
-        value: roundCurrency(newPrice).toFixed(2),
-        currency: "USD",
-      },
+    if (typeof newPrice === "number" && newPrice > 0) {
+      const existingPricing =
+        (clonePayload.pricingSummary as Record<string, unknown> | undefined) ||
+        {};
+      clonePayload.pricingSummary = {
+        ...existingPricing,
+        price: {
+          value: roundCurrency(newPrice).toFixed(2),
+          currency: "USD",
+        },
+      };
+    }
+
+    const created = await ebayRequest<{ offerId: string }>(
+      `/sell/inventory/v1/offer`,
+      {
+        method: "POST",
+        body: JSON.stringify(clonePayload),
+      }
+    );
+
+    const published = await ebayRequest<{ listingId: string }>(
+      `/sell/inventory/v1/offer/${encodeURIComponent(created.offerId)}/publish`,
+      { method: "POST" }
+    );
+
+    return {
+      previousOfferId: invOfferId,
+      previousListingId,
+      newOfferId: created.offerId,
+      newListingId: published.listingId,
+      newExternalUrl: `${webBase}/${published.listingId}`,
     };
   }
 
-  const created = await ebayRequest<{ offerId: string }>(
-    `/sell/inventory/v1/offer`,
-    {
-      method: "POST",
-      body: JSON.stringify(clonePayload),
-    }
+  // Seller Hub / Trading API path: EndFixedPriceItem -> RelistFixedPriceItem (fresh 12-digit ItemID)
+  await ebayTradingRequest(
+    "EndFixedPriceItem",
+    `<ItemID>${rawId}</ItemID>
+     <EndingReason>NotAvailable</EndingReason>`
   );
 
-  // 4. Publish the brand-new offer to receive a brand-new eBay Item Number
-  const published = await ebayRequest<{ listingId: string }>(
-    `/sell/inventory/v1/offer/${encodeURIComponent(created.offerId)}/publish`,
-    { method: "POST" }
+  const priceOverrideXml =
+    typeof newPrice === "number" && newPrice > 0
+      ? `<StartPrice currencyID="USD">${roundCurrency(newPrice).toFixed(2)}</StartPrice>`
+      : "";
+
+  const relistXml = await ebayTradingRequest(
+    "RelistFixedPriceItem",
+    `<Item>
+      <ItemID>${rawId}</ItemID>
+      ${priceOverrideXml}
+    </Item>`
   );
 
+  const newListingId = extractXmlTag(relistXml, "ItemID") || rawId;
   return {
-    previousOfferId: offerId,
-    previousListingId,
-    newOfferId: created.offerId,
-    newListingId: published.listingId,
-    newExternalUrl: `${webBase}/${published.listingId}`,
+    previousOfferId: rawId,
+    previousListingId: rawId,
+    newOfferId: newListingId,
+    newListingId,
+    newExternalUrl: `${webBase}/${newListingId}`,
   };
 }
 
@@ -473,13 +756,26 @@ export async function sendEbayOfferToWatchers(params: {
 }
 
 /**
- * Withdraws (ends) an active eBay offer via Sell Inventory API.
- * Used by Phase 4 anti-double-sell when an item sells on another marketplace.
+ * Ends an active eBay listing (supports both Inventory API offers and Seller Hub
+ * Trading API ItemIDs). Used by Phase 4 anti-double-sell when an item sells elsewhere.
  */
-export async function withdrawEbayOffer(offerId: string): Promise<void> {
-  await ebayRequest(
-    `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/withdraw`,
-    { method: "POST" }
+export async function withdrawEbayOffer(
+  offerOrListingId: string,
+  sku?: string
+): Promise<void> {
+  const invOfferId = await resolveInventoryOfferId(offerOrListingId, sku);
+  if (invOfferId) {
+    await ebayRequest(
+      `/sell/inventory/v1/offer/${encodeURIComponent(invOfferId)}/withdraw`,
+      { method: "POST" }
+    );
+    return;
+  }
+
+  await ebayTradingRequest(
+    "EndFixedPriceItem",
+    `<ItemID>${offerOrListingId}</ItemID>
+     <EndingReason>NotAvailable</EndingReason>`
   );
 }
 

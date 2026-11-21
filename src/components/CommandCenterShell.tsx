@@ -640,12 +640,9 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
                 error?: string;
               };
               if (!res.ok) {
-                pushToast(
-                  "error",
-                  "Failed to Save Item",
-                  result.error || "Unknown error"
-                );
-                return;
+                const errMsg = result.error || "Unknown error";
+                pushToast("error", "Failed to Save Item", errMsg);
+                throw new Error(errMsg);
               }
               await refreshInventory();
               pushToast(
