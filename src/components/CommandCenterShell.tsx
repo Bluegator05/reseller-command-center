@@ -419,7 +419,7 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
   return (
     <div className="min-h-screen flex bg-[#F7F9F8]">
       {/* Persistent Left Icon Navigation Rail (Single Source of Navigation) */}
-      <aside className="flex flex-col items-center w-[72px] shrink-0 bg-white border-r border-[#E4E4DD] py-3 px-1.5 sticky top-0 h-screen z-40">
+      <aside className="flex flex-col items-center w-[72px] shrink-0 bg-white border-r border-[#E4E4DD] py-3 px-1.5 sticky top-0 h-screen overflow-y-auto z-40">
         <button
           type="button"
           onClick={() => setActiveTab("radar")}

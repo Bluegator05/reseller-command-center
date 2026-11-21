@@ -58,7 +58,12 @@ export async function POST(request: Request) {
   const mimeType = dataUrlMatch?.[1] || body.mimeType || "image/jpeg";
   const cleanBase64 = dataUrlMatch?.[2] || rawB64;
 
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  const apiKey = (
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
+    ""
+  ).trim();
   const model = process.env.GEMINI_MODEL?.trim() || "gemini-2.5-flash";
 
   if (apiKey) {
@@ -109,7 +114,19 @@ Inspect this item photo${body.hint ? ` (reseller hint: "${body.hint}")` : ""} an
       );
 
       if (!res.ok) {
-        throw new Error(`Gemini Vision HTTP ${res.status}`);
+        const errBody = await res.text().catch(() => "");
+        let detail = `Gemini Vision HTTP ${res.status} (${model})`;
+        try {
+          const parsedErr = JSON.parse(errBody) as {
+            error?: { message?: string };
+          };
+          if (parsedErr.error?.message) {
+            detail = `${detail}: ${parsedErr.error.message}`;
+          }
+        } catch {
+          if (errBody) detail = `${detail}: ${errBody.slice(0, 180)}`;
+        }
+        return NextResponse.json({ error: detail }, { status: 502 });
       }
 
       const json = (await res.json()) as {
@@ -117,7 +134,21 @@ Inspect this item photo${body.hint ? ` (reseller hint: "${body.hint}")` : ""} an
           content?: { parts?: Array<{ text?: string }> };
         }>;
       };
-      const rawText = json.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      const rawText = (
+        json.candidates?.[0]?.content?.parts?.[0]?.text || ""
+      )
+        .trim()
+        .replace(/^```(?:json)?\s*/i, "")
+        .replace(/\s*```$/i, "")
+        .trim();
+
+      if (!rawText) {
+        return NextResponse.json(
+          { error: `Gemini (${model}) returned an empty response for this photo.` },
+          { status: 502 }
+        );
+      }
+
       const parsed = JSON.parse(rawText) as Partial<ImageCompResponse>;
       const query = (
         parsed.ebaySearchQuery ||
@@ -155,7 +186,12 @@ Inspect this item photo${body.hint ? ` (reseller hint: "${body.hint}")` : ""} an
 
       return NextResponse.json(payload);
     } catch (err) {
-      console.error("Gemini vision comp failed, falling back to heuristic:", err);
+      const msg =
+        err instanceof Error ? err.message : "Gemini Vision request failed";
+      return NextResponse.json(
+        { error: `Gemini Vision error (${model}): ${msg}` },
+        { status: 502 }
+      );
     }
   }
 
