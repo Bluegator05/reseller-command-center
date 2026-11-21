@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock,
+  History,
   Loader2,
   Play,
   Puzzle,
@@ -15,6 +16,7 @@ import type { ChannelJob, JobStatusType } from "@/lib/types";
 
 interface ExtensionQueuePanelProps {
   jobs: ChannelJob[];
+  recentJobs?: ChannelJob[];
   onUpdateJobStatus: (params: {
     jobId: string;
     status: JobStatusType;
@@ -41,8 +43,26 @@ function formatTime(iso: string | null): string {
   });
 }
 
+function getActionLabel(job: ChannelJob): string {
+  switch (job.action) {
+    case "update_price":
+      return "Price Drop";
+    case "end_and_sell_similar":
+      return "End & Sell Similar";
+    case "send_offer":
+      return "Send Offer";
+    case "promote_listing":
+      return "Promoted Listings";
+    case "delist":
+      return "Auto-Delist";
+    case "create":
+      return `Cross-List → ${job.marketplace}`;
+  }
+}
+
 export function ExtensionQueuePanel({
   jobs,
+  recentJobs = [],
   onUpdateJobStatus,
 }: ExtensionQueuePanelProps) {
   const [busyJobId, setBusyJobId] = useState<string | null>(null);
@@ -374,6 +394,85 @@ export function ExtensionQueuePanel({
           </div>
         </section>
       )}
+
+      {/* Recent Channel Jobs Execution Log (All API & Extension Jobs) */}
+      <section className="bg-white border border-[#E5E8E6] rounded-xl shadow-[0_1px_2px_rgba(20,21,26,0.03)] overflow-hidden">
+        <div className="px-4 py-3 border-b border-[#EEF1EF] bg-[#F8FAF9] flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <History className="w-4 h-4 text-[#0F766E]" />
+            <h3 className="text-xs font-semibold uppercase tracking-[0.06em] text-[#171A1D]">
+              Recent Channel Jobs Log
+            </h3>
+          </div>
+          <span className="font-mono text-[11px] text-[#5F666D]">
+            channel_jobs · {recentJobs.length} recent
+          </span>
+        </div>
+
+        {recentJobs.length === 0 ? (
+          <div className="px-4 py-6 text-xs text-[#5F666D]">
+            No API interventions or cross-lists executed yet.
+          </div>
+        ) : (
+          <div className="divide-y divide-[#F1F4F2]">
+            {recentJobs.slice(0, 20).map((job) => {
+              const payload = job.payload || {};
+              const detailText =
+                job.action === "update_price" &&
+                typeof payload.previousPrice === "number" &&
+                typeof payload.newPrice === "number"
+                  ? `$${payload.previousPrice.toFixed(2)} → $${payload.newPrice.toFixed(2)}${payload.wasClamped ? " (floor clamped)" : ""}`
+                  : job.action === "end_and_sell_similar" &&
+                      typeof payload.newExternalListingId === "string"
+                    ? `Relisted as #${payload.newExternalListingId}`
+                    : job.action === "send_offer" &&
+                        typeof payload.offerPrice === "number"
+                      ? `Offer $${payload.offerPrice.toFixed(2)} to ${payload.watchersCount ?? "?"} watcher(s)`
+                      : job.action === "promote_listing"
+                        ? `Promoted to ${String(payload.adRatePct ?? 4)}% ad rate (${String(payload.daysListed ?? "30+")}d rule)`
+                        : job.action === "create" &&
+                            typeof payload.price === "number"
+                          ? `Listed #${payload.externalListingId ?? "draft"} at $${payload.price.toFixed(2)}`
+                          : job.action === "delist"
+                            ? `Anti-double-sell delist (${String(payload.reason ?? "sold")})`
+                            : job.error_message || "Executed";
+
+              return (
+                <div
+                  key={job.id}
+                  className="px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <CheckCircle2
+                      className={`w-3.5 h-3.5 shrink-0 ${
+                        job.status === "failed"
+                          ? "text-[#B91C1C]"
+                          : "text-[#0F766E]"
+                      }`}
+                    />
+                    <code className="font-mono font-medium text-[#171A1D] bg-[#F2F4F3] px-1.5 py-0.5 rounded shrink-0">
+                      {job.item_sku || job.item_id.slice(0, 8)}
+                    </code>
+                    <span className="font-semibold text-[#171A1D] shrink-0">
+                      {getActionLabel(job)}
+                    </span>
+                    <span className="text-[#5F666D] truncate">{detailText}</span>
+                  </div>
+                  <div className="flex items-center gap-2 text-[11px] font-mono tabular-nums text-[#8A929A]">
+                    <span className="uppercase">{job.marketplace}</span>
+                    <span>·</span>
+                    <span className="uppercase">{job.execution_mode}</span>
+                    <span>·</span>
+                    <span>
+                      {formatTime(job.completed_at || job.created_at)}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
     </div>
   );
 }

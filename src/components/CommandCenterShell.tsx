@@ -793,7 +793,6 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
             <StaleRadarTable
             items={data.items}
             draftItems={data.draftItems}
-            recentJobs={data.recentJobs}
             extensionJobs={data.extensionJobs}
             channelCounts={data.channelCounts}
             busyListingIds={busyListingIds}
@@ -901,6 +900,7 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
         ) : activeTab === "extension" ? (
           <ExtensionQueuePanel
             jobs={data.extensionJobs}
+            recentJobs={data.recentJobs}
             onUpdateJobStatus={handleUpdateExtensionJob}
           />
         ) : activeTab === "sales" ? (
