@@ -382,11 +382,21 @@ export async function POST(request: Request) {
           });
         } catch (err) {
           const msg = err instanceof Error ? err.message : "Send offer failed";
+          const isAlreadyActive =
+            msg.includes("150019") ||
+            msg.toLowerCase().includes("seller-initiated negotiation");
+
           await supabase!
             .from("channel_jobs")
             .update({
-              status: "failed",
-              error_message: msg,
+              status: isAlreadyActive ? "completed" : "failed",
+              error_message: isAlreadyActive ? null : msg,
+              payload: {
+                offerPct,
+                offerPrice: calc.nextPrice,
+                watchersCount: listing.watchers_count,
+                alreadyActiveOnEbay: isAlreadyActive,
+              },
               completed_at: new Date().toISOString(),
             })
             .eq("id", jobId);
@@ -397,13 +407,15 @@ export async function POST(request: Request) {
             sku: inv.sku,
             title: inv.title,
             action,
-            status: "failed",
+            status: isAlreadyActive ? "skipped" : "failed",
             previousPrice: currentPrice,
-            newPrice: currentPrice,
+            newPrice: isAlreadyActive ? calc.nextPrice : currentPrice,
             floorPrice,
             wasClampedToFloor: false,
             jobId,
-            message: msg,
+            message: isAlreadyActive
+              ? "Active offer already live on eBay — removed from queue"
+              : msg,
           });
         }
       }

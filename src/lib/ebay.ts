@@ -725,6 +725,42 @@ export async function endAndSellSimilarEbayOffer(params: {
 }
 
 /**
+ * Queries eBay's Negotiation API (`find_eligible_items`) to return ONLY the
+ * exact 12-digit eBay listingIds that currently have eligible interested buyers
+ * and do NOT already have an active seller-initiated offer.
+ */
+export async function fetchEligibleOfferListingIds(
+  maxItems = 1000
+): Promise<string[]> {
+  const ids: string[] = [];
+  const pageSize = 200;
+
+  for (let offset = 0; offset < maxItems; offset += pageSize) {
+    const res = await ebayRequest<{
+      eligibleItems?: Array<{ listingId?: string }>;
+      total?: number;
+    }>(
+      `/sell/negotiation/v1/find_eligible_items?limit=${pageSize}&offset=${offset}`,
+      {
+        headers: {
+          "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+        },
+      }
+    );
+
+    const batch = (res.eligibleItems ?? [])
+      .map((i) => i.listingId)
+      .filter((id): id is string => Boolean(id));
+    ids.push(...batch);
+
+    const total = res.total ?? batch.length;
+    if (batch.length < pageSize || ids.length >= total) break;
+  }
+
+  return Array.from(new Set(ids));
+}
+
+/**
  * Sends a targeted discount offer to interested buyers/watchers via eBay Negotiation API.
  */
 export async function sendEbayOfferToWatchers(params: {

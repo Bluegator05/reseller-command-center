@@ -664,6 +664,8 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
           <div className="space-y-4">
             <WatcherOffersPanel
               items={data.items}
+              recentJobs={data.recentJobs}
+              isLive={data.mode === "live"}
               isBusy={isBulkBusy}
               onSendOffer={handleExecuteAction}
             />
