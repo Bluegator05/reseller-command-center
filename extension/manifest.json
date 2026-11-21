@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "Reseller Command Center — Companion Extension",
+  "version": "0.3.0",
+  "description": "Listens to Reseller Command Center extension jobs to auto-fill Poshmark, Mercari, and Facebook Marketplace listings with CDN photo Blob injection.",
+  "permissions": [
+    "storage",
+    "alarms",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://poshmark.com/*",
+    "https://www.mercari.com/*",
+    "https://www.facebook.com/*",
+    "https://*.supabase.co/*",
+    "http://localhost:3000/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Reseller Command Center Companion"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://poshmark.com/*"],
+      "js": ["content/dom-helpers.js", "content/poshmark.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.mercari.com/*"],
+      "js": ["content/dom-helpers.js", "content/mercari.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.facebook.com/marketplace/*"],
+      "js": ["content/dom-helpers.js", "content/facebook.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

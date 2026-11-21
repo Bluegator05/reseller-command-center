@@ -1,0 +1,18 @@
+{
+  "name": "Reseller Command Center",
+  "short_name": "Reseller Hub",
+  "description": "Multi-channel reseller command center for eBay, Etsy, Poshmark, Mercari, and Facebook Marketplace.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F7F9F8",
+  "theme_color": "#0F766E",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

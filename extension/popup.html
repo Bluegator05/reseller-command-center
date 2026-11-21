@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Reseller Command Center Companion</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 380px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f7f7f4;
+      color: #14151a;
+      font-size: 12px;
+    }
+    header {
+      background: #ffffff;
+      border-bottom: 1px solid #e4e4dd;
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .brand { font-weight: 700; font-size: 13px; letter-spacing: -0.01em; }
+    .sub { color: #5c606b; font-size: 11px; margin-top: 2px; }
+    .btn {
+      border: 1px solid #dcdcd5;
+      background: #ffffff;
+      color: #14151a;
+      padding: 5px 10px;
+      border-radius: 7px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn:hover { background: #f1f1ec; }
+    .btn-primary {
+      background: #14151a;
+      color: #ffffff;
+      border-color: #14151a;
+    }
+    .btn-primary:hover { background: #272a34; }
+    .btn-confirm {
+      background: #0f766e;
+      color: #ffffff;
+      border-color: #0f766e;
+    }
+    main { padding: 12px 14px; display: flex; flex-direction: column; gap: 12px; }
+    .card {
+      background: #ffffff;
+      border: 1px solid #e4e4dd;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .card-head {
+      background: #faf9f6;
+      border-bottom: 1px solid #ecece6;
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .card-body { padding: 10px 12px; }
+    .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+    .field label { font-size: 11px; color: #5c606b; font-weight: 500; }
+    .field input, .field select {
+      border: 1px solid #dcdcd5;
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 11px;
+      background: #faf9f6;
+      color: #14151a;
+    }
+    .job-row {
+      padding: 10px 12px;
+      border-bottom: 1px solid #f1f1ec;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .job-row:last-child { border-bottom: none; }
+    .job-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+    .pill {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 5px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .pill-pending { background: #eff6ff; color: #1d4ed8; }
+    .pill-confirm { background: #fffbeb; color: #b45309; border: 1px solid #fde68a; }
+    .pill-done { background: #ecfdf5; color: #0f766e; }
+    .sku { font-family: ui-monospace, monospace; font-weight: 600; font-size: 11px; }
+    .title { color: #444854; font-size: 11px; line-height: 1.35; }
+    .actions { display: flex; gap: 6px; justify-content: flex-end; }
+    .empty { padding: 16px 12px; text-align: center; color: #5c606b; font-size: 11px; }
+    .error-bar {
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+      color: #b91c1c;
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 11px;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <div class="brand">Reseller Command Center</div>
+      <div id="poll-meta" class="sub">Phase 3 Companion · MV3</div>
+    </div>
+    <button id="btn-poll" class="btn btn-primary" type="button">Poll Queue</button>
+  </header>
+
+  <main>
+    <div id="error-bar" class="error-bar"></div>
+
+    <div class="card">
+      <div class="card-head">
+        <span>Extension Job Queue</span>
+        <span id="job-count">0 jobs</span>
+      </div>
+      <div id="jobs-container">
+        <div class="empty">Loading channel_jobs...</div>
+      </div>
+    </div>
+
+    <details class="card">
+      <summary class="card-head" style="cursor:pointer;">Connection Settings</summary>
+      <div class="card-body">
+        <div class="field">
+          <label for="cfg-mode">Queue Source</label>
+          <select id="cfg-mode">
+            <option value="api_bridge">Command Center API (/api/extension/jobs)</option>
+            <option value="supabase">Direct Supabase PostgREST</option>
+          </select>
+        </div>
+        <div id="bridge-fields" class="field">
+          <label for="cfg-api-url">Command Center URL</label>
+          <input id="cfg-api-url" type="text" placeholder="http://localhost:3000" />
+        </div>
+        <div id="supabase-fields" style="display:none;">
+          <div class="field">
+            <label for="cfg-sb-url">Supabase URL</label>
+            <input id="cfg-sb-url" type="text" placeholder="https://xxxx.supabase.co" />
+          </div>
+          <div class="field">
+            <label for="cfg-sb-key">Supabase Anon Key</label>
+            <input id="cfg-sb-key" type="password" placeholder="eyJ..." />
+          </div>
+        </div>
+        <button id="btn-save-cfg" class="btn btn-primary" type="button" style="width:100%;">Save &amp; Reconnect</button>
+      </div>
+    </details>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>
