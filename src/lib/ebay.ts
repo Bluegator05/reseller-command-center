@@ -155,7 +155,12 @@ async function ebayRequest<T>(
     return {} as T;
   }
 
-  return (await response.json()) as T;
+  const rawText = await response.text();
+  if (!rawText.trim()) {
+    return {} as T;
+  }
+
+  return JSON.parse(rawText) as T;
 }
 
 /**
