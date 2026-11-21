@@ -131,7 +131,7 @@
       </div>
     </div>
 
-    <details class="card">
+    <details id="cfg-details" class="card">
       <summary class="card-head" style="cursor:pointer;">Connection Settings</summary>
       <div class="card-body">
         <div class="field">
@@ -141,9 +141,15 @@
             <option value="supabase">Direct Supabase PostgREST</option>
           </select>
         </div>
-        <div id="bridge-fields" class="field">
-          <label for="cfg-api-url">Command Center URL</label>
-          <input id="cfg-api-url" type="text" placeholder="http://localhost:3000" />
+        <div id="bridge-fields">
+          <div class="field">
+            <label for="cfg-api-url">Command Center URL</label>
+            <input id="cfg-api-url" type="text" placeholder="https://reseller-command-center-black.vercel.app" />
+          </div>
+          <div class="field">
+            <label for="cfg-passcode">Owner Passcode</label>
+            <input id="cfg-passcode" type="password" placeholder="Your Vercel Owner Lock passcode" />
+          </div>
         </div>
         <div id="supabase-fields" style="display:none;">
           <div class="field">

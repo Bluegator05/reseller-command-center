@@ -18,7 +18,8 @@ const MARKETPLACE_CREATE_URLS = {
 
 const DEFAULT_CONFIG = {
   mode: "api_bridge", // "api_bridge" | "supabase"
-  apiBaseUrl: "http://localhost:3000",
+  apiBaseUrl: "https://reseller-command-center-black.vercel.app",
+  ownerPasscode: "",
   supabaseUrl: "",
   supabaseAnonKey: "",
   autoPoll: true,
@@ -47,6 +48,15 @@ async function configureAlarm(config) {
   }
 }
 
+function buildBridgeHeaders(config, includeJson = false) {
+  const headers = {};
+  if (includeJson) headers["Content-Type"] = "application/json";
+  if (config.ownerPasscode && config.ownerPasscode.trim()) {
+    headers["x-owner-passcode"] = config.ownerPasscode.trim();
+  }
+  return headers;
+}
+
 async function fetchExtensionJobs() {
   const config = await getConfig();
 
@@ -68,8 +78,18 @@ async function fetchExtensionJobs() {
     }));
   }
 
-  const base = (config.apiBaseUrl || "http://localhost:3000").replace(/\/+$/, "");
-  const res = await fetch(`${base}/api/extension/jobs`);
+  const base = (
+    config.apiBaseUrl || "https://reseller-command-center-black.vercel.app"
+  ).replace(/\/+$/, "");
+  const res = await fetch(`${base}/api/extension/jobs`, {
+    headers: buildBridgeHeaders(config),
+    credentials: "include",
+  });
+  if (res.status === 401) {
+    throw new Error(
+      "Owner passcode required — open Connection Settings below and enter your Command Center passcode."
+    );
+  }
   if (!res.ok) throw new Error(`API bridge fetch failed (${res.status})`);
   const data = await res.json();
   return data.jobs || [];
@@ -105,12 +125,20 @@ async function updateJobStatus(jobId, status, extra = {}) {
     return res.json();
   }
 
-  const base = (config.apiBaseUrl || "http://localhost:3000").replace(/\/+$/, "");
+  const base = (
+    config.apiBaseUrl || "https://reseller-command-center-black.vercel.app"
+  ).replace(/\/+$/, "");
   const res = await fetch(`${base}/api/extension/jobs`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: buildBridgeHeaders(config, true),
+    credentials: "include",
     body: JSON.stringify({ jobId, status, ...extra }),
   });
+  if (res.status === 401) {
+    throw new Error(
+      "Owner passcode required — open Connection Settings below and enter your Command Center passcode."
+    );
+  }
   if (!res.ok) throw new Error(`API bridge update failed (${res.status})`);
   return res.json();
 }

@@ -5,6 +5,8 @@ const errorBarEl = document.getElementById("error-bar");
 
 const modeEl = document.getElementById("cfg-mode");
 const apiUrlEl = document.getElementById("cfg-api-url");
+const passcodeEl = document.getElementById("cfg-passcode");
+const cfgDetailsEl = document.getElementById("cfg-details");
 const sbUrlEl = document.getElementById("cfg-sb-url");
 const sbKeyEl = document.getElementById("cfg-sb-key");
 const bridgeFieldsEl = document.getElementById("bridge-fields");
@@ -12,7 +14,7 @@ const supabaseFieldsEl = document.getElementById("supabase-fields");
 
 function toggleModeFields() {
   const isSb = modeEl.value === "supabase";
-  bridgeFieldsEl.style.display = isSb ? "none" : "flex";
+  bridgeFieldsEl.style.display = isSb ? "none" : "block";
   supabaseFieldsEl.style.display = isSb ? "block" : "none";
 }
 
@@ -100,10 +102,20 @@ async function loadState() {
   if (!res?.ok) return;
 
   modeEl.value = res.config.mode || "api_bridge";
-  apiUrlEl.value = res.config.apiBaseUrl || "http://localhost:3000";
+  apiUrlEl.value =
+    res.config.apiBaseUrl || "https://reseller-command-center-black.vercel.app";
+  passcodeEl.value = res.config.ownerPasscode || "";
   sbUrlEl.value = res.config.supabaseUrl || "";
   sbKeyEl.value = res.config.supabaseAnonKey || "";
   toggleModeFields();
+
+  if (
+    cfgDetailsEl &&
+    modeEl.value === "api_bridge" &&
+    (!passcodeEl.value || (res.lastError && res.lastError.includes("passcode")))
+  ) {
+    cfgDetailsEl.open = true;
+  }
 
   if (res.lastPollAt) {
     pollMetaEl.textContent = `Synced ${new Date(res.lastPollAt).toLocaleTimeString()}`;
@@ -128,16 +140,24 @@ document.getElementById("btn-poll").addEventListener("click", async () => {
 });
 
 document.getElementById("btn-save-cfg").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-save-cfg");
+  btn.textContent = "Connecting...";
   await chrome.runtime.sendMessage({
     type: "RCC_SAVE_CONFIG",
     config: {
       mode: modeEl.value,
       apiBaseUrl: apiUrlEl.value.trim(),
+      ownerPasscode: passcodeEl.value.trim(),
       supabaseUrl: sbUrlEl.value.trim(),
       supabaseAnonKey: sbKeyEl.value.trim(),
     },
   });
+  await chrome.runtime.sendMessage({ type: "RCC_POLL_NOW" });
   await loadState();
+  btn.textContent = "Save & Reconnect";
+  if (cfgDetailsEl && !errorBarEl.textContent) {
+    cfgDetailsEl.open = false;
+  }
 });
 
 loadState();

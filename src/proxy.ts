@@ -3,6 +3,7 @@ import {
   isOwnerLockEnabled,
   OWNER_COOKIE_NAME,
   verifyOwnerSessionToken,
+  verifyPasscodeInput,
 } from "@/lib/auth";
 
 const PUBLIC_PATHS = [
@@ -26,6 +27,7 @@ function isPublicPath(pathname: string): boolean {
  * Next.js 16 Proxy guard for Owner Lock.
  * - Inactive when COMMAND_CENTER_PASSCODE is unset (local dev/demo).
  * - Enforces signed HttpOnly cookie on all UI + private API routes when set in Vercel.
+ * - Allows Mac Mini Companion Extension calls to `/api/extension/jobs` when `x-owner-passcode` matches.
  * - Keeps eBay/Etsy webhooks & inbound order email endpoints accessible for signature-verified delivery.
  */
 export async function proxy(request: NextRequest) {
@@ -36,6 +38,13 @@ export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   if (isPublicPath(pathname)) {
     return NextResponse.next();
+  }
+
+  if (pathname.startsWith("/api/extension/")) {
+    const extPasscode = request.headers.get("x-owner-passcode")?.trim();
+    if (extPasscode && verifyPasscodeInput(extPasscode)) {
+      return NextResponse.next();
+    }
   }
 
   const token = request.cookies.get(OWNER_COOKIE_NAME)?.value;

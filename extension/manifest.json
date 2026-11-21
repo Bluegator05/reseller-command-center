@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Reseller Command Center — Companion Extension",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Listens to Reseller Command Center extension jobs to auto-fill Poshmark, Mercari, and Facebook Marketplace listings with CDN photo Blob injection.",
   "permissions": [
     "storage",
@@ -10,6 +10,9 @@
     "scripting"
   ],
   "host_permissions": [
+    "https://reseller-command-center-black.vercel.app/*",
+    "https://*.vercel.app/*",
+    "https://i.ebayimg.com/*",
     "https://poshmark.com/*",
     "https://www.mercari.com/*",
     "https://www.facebook.com/*",
