@@ -438,7 +438,7 @@ export function SourcingCompsPanel({
                       >
                         <Sparkles className="w-3 h-3" />
                         {visionResult.mode === "gemini"
-                          ? "Gemini Vision Match"
+                          ? `Gemini Vision · ${visionResult.modelUsed}`
                           : "Photo Attached — Add GEMINI_API_KEY in Vercel for Auto-ID"}
                       </span>
                       {visionResult.mode === "gemini" && (

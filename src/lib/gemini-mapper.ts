@@ -1,3 +1,4 @@
+import { generateGeminiJson, getGeminiApiKey } from "./gemini-client";
 import { DEFAULT_EBAY_FEE_PCT, roundCurrency } from "./stale-engine";
 import { getEnvReadiness } from "./supabase";
 import type {
@@ -344,16 +345,10 @@ export async function mapItemForMarketplace(params: {
     return heuristic;
   }
 
-  const apiKey = (
-    process.env.GEMINI_API_KEY ||
-    process.env.GOOGLE_API_KEY ||
-    process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
-    ""
-  ).trim();
+  const apiKey = getGeminiApiKey();
   if (!apiKey) {
     return heuristic;
   }
-  const model = process.env.GEMINI_MODEL?.trim() || "gemini-2.5-flash";
   const maxLen = MARKETPLACE_TITLE_LIMITS[params.targetMarketplace];
 
   const prompt = [
@@ -385,73 +380,23 @@ export async function mapItemForMarketplace(params: {
   ].join("\n");
 
   try {
-    const generationConfig: Record<string, unknown> = {
-      temperature: 0.25,
-      responseMimeType: "application/json",
-    };
-    if (model.includes("2.5")) {
-      generationConfig.thinkingConfig = { thinkingBudget: 0 };
-    }
-
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig,
-        }),
-        cache: "no-store",
-      }
-    );
-
-    if (!response.ok) {
-      throw new Error(`Gemini API returned HTTP ${response.status}`);
-    }
-
-    const data = (await response.json()) as {
-      candidates?: Array<{
-        content?: {
-          parts?: Array<{ text?: string; thought?: boolean }>;
-        };
-      }>;
-    };
-
-    const parts = data.candidates?.[0]?.content?.parts ?? [];
-    const rawJoined = parts
-      .filter((p) => !p.thought && typeof p.text === "string")
-      .map((p) => p.text ?? "")
-      .join("\n")
-      .trim()
-      .replace(/^```(?:json)?\s*/i, "")
-      .replace(/\s*```$/i, "")
-      .trim();
-
-    const firstBrace = rawJoined.indexOf("{");
-    const lastBrace = rawJoined.lastIndexOf("}");
-    const rawText =
-      firstBrace !== -1 && lastBrace > firstBrace
-        ? rawJoined.slice(firstBrace, lastBrace + 1)
-        : rawJoined;
-
-    if (!rawText) {
-      throw new Error("Empty Gemini response");
-    }
-
-    const parsed = JSON.parse(rawText) as {
+    const { data: parsed, modelUsed } = await generateGeminiJson<{
       mappedTitle?: string;
       descriptionPlain?: string;
       categoryPath?: string;
       whenMade?: string;
       tags?: string[];
       translationNotes?: string[];
-    };
+    }>({
+      task: "mapper",
+      apiKey,
+      parts: [{ text: prompt }],
+    });
 
     return {
       ...heuristic,
       mapperMode: "gemini",
-      modelUsed: model,
+      modelUsed,
       mappedTitle: (parsed.mappedTitle || heuristic.mappedTitle)
         .slice(0, maxLen)
         .trim(),

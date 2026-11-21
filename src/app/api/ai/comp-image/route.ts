@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { generateGeminiJson, getGeminiApiKey } from "@/lib/gemini-client";
 
 export interface ImageCompResponse {
   mode: "gemini" | "demo";
@@ -25,9 +26,10 @@ export const maxDuration = 30;
 /**
  * POST /api/ai/comp-image
  * Accepts a base64 JPEG/WebP/PNG snapshot from iPhone camera or desktop upload,
- * identifies the item with Gemini 2.5 Flash multimodal vision, and returns an
- * optimized eBay Sold Comps query, estimated price range, package weight/dims,
- * Media Mail eligibility, and in-store condition checkpoints.
+ * identifies the item with Gemini 4 Hydrogen multimodal vision (falling back to
+ * Gemini 3.8 Flash / 3.5 Flash-Lite if needed), and returns an optimized eBay
+ * Sold Comps query, estimated price range, package weight/dims, Media Mail
+ * eligibility, and in-store condition checkpoints.
  */
 export async function POST(request: Request) {
   let body: {
@@ -60,23 +62,18 @@ export async function POST(request: Request) {
   const mimeType = dataUrlMatch?.[1] || body.mimeType || "image/jpeg";
   const cleanBase64 = dataUrlMatch?.[2] || rawB64;
 
-  const apiKey = (
-    process.env.GEMINI_API_KEY ||
-    process.env.GOOGLE_API_KEY ||
-    process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
-    ""
-  ).trim();
-  const model = process.env.GEMINI_MODEL?.trim() || "gemini-2.5-flash";
+  const apiKey = getGeminiApiKey();
 
   if (apiKey) {
     try {
       const prompt = `You are an expert eBay reseller sourcing assistant standing in a thrift store or estate sale.
-Inspect this item photo${body.hint ? ` (reseller hint: "${body.hint}")` : ""} and return ONLY valid JSON with these exact keys:
+Inspect this item photo${body.hint ? ` (reseller hint: "${body.hint}")` : ""} carefully. Read any visible brand names, model numbers, labels, tags, or markings. Do NOT invent a brand or model number if it is not clearly visible in the photo — describe the exact visible item type/material/features instead.
+Return ONLY valid JSON with these exact keys:
 {
-  "itemTitle": "Concise eBay-ready item title (max 75 chars, include brand/model/size if visible)",
+  "itemTitle": "Concise eBay-ready item title (max 75 chars, include brand/model/size only if clearly visible)",
   "ebaySearchQuery": "Clean 4-7 word search query optimized for eBay Sold Comps (no filler words)",
-  "brand": "Brand name or Unbranded",
-  "category": "Short category (e.g. Film Camera, Mens Outerwear, Vintage Electronics, Cookware, Books/Media)",
+  "brand": "Exact visible brand name, or Unbranded",
+  "category": "Short category (e.g. Film Camera, Mens Outerwear, Vintage Electronics, Cookware, Safety Signage, Books/Media)",
   "estLowPrice": number (conservative USD sold price),
   "estMedianPrice": number (typical USD sold price),
   "estHighPrice": number (top condition USD sold price),
@@ -84,92 +81,25 @@ Inspect this item photo${body.hint ? ` (reseller hint: "${body.hint}")` : ""} an
   "estLengthIn": number (packaged box length in inches),
   "estWidthIn": number (packaged box width in inches),
   "estHeightIn": number (packaged box height in inches),
-  "isMediaEligible": boolean (true ONLY for books, vinyl records, CDs, DVDs, VHS, sheet music; false for video games/electronics/apparel),
+  "isMediaEligible": boolean (true ONLY for books, vinyl records, CDs, DVDs, VHS, sheet music; false for video games/electronics/apparel/signs),
   "inspectionTips": ["Short in-store flaw/test check #1", "Short check #2", "Short check #3"]
 }`;
 
-      const generationConfig: Record<string, unknown> = {
-        temperature: 0.2,
-        responseMimeType: "application/json",
-      };
-      if (model.includes("2.5")) {
-        generationConfig.thinkingConfig = { thinkingBudget: 0 };
-      }
-
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [
-              {
-                parts: [
-                  { text: prompt },
-                  {
-                    inline_data: {
-                      mime_type: mimeType,
-                      data: cleanBase64,
-                    },
-                  },
-                ],
+      const { data: parsed, modelUsed } =
+        await generateGeminiJson<Partial<ImageCompResponse>>({
+          task: "vision",
+          apiKey,
+          parts: [
+            { text: prompt },
+            {
+              inline_data: {
+                mime_type: mimeType,
+                data: cleanBase64,
               },
-            ],
-            generationConfig,
-          }),
-        }
-      );
+            },
+          ],
+        });
 
-      if (!res.ok) {
-        const errBody = await res.text().catch(() => "");
-        let detail = `Gemini Vision HTTP ${res.status} (${model})`;
-        try {
-          const parsedErr = JSON.parse(errBody) as {
-            error?: { message?: string };
-          };
-          if (parsedErr.error?.message) {
-            detail = `${detail}: ${parsedErr.error.message}`;
-          }
-        } catch {
-          if (errBody) detail = `${detail}: ${errBody.slice(0, 180)}`;
-        }
-        return NextResponse.json({ error: detail }, { status: 502 });
-      }
-
-      const json = (await res.json()) as {
-        candidates?: Array<{
-          content?: {
-            parts?: Array<{ text?: string; thought?: boolean }>;
-          };
-        }>;
-      };
-      const parts = json.candidates?.[0]?.content?.parts ?? [];
-      const rawJoined = parts
-        .filter((p) => !p.thought && typeof p.text === "string")
-        .map((p) => p.text ?? "")
-        .join("\n")
-        .trim()
-        .replace(/^```(?:json)?\s*/i, "")
-        .replace(/\s*```$/i, "")
-        .trim();
-
-      const firstBrace = rawJoined.indexOf("{");
-      const lastBrace = rawJoined.lastIndexOf("}");
-      const rawText =
-        firstBrace !== -1 && lastBrace > firstBrace
-          ? rawJoined.slice(firstBrace, lastBrace + 1)
-          : rawJoined;
-
-      if (!rawText) {
-        return NextResponse.json(
-          {
-            error: `Gemini (${model}) returned an empty response for this photo.`,
-          },
-          { status: 502 }
-        );
-      }
-
-      const parsed = JSON.parse(rawText) as Partial<ImageCompResponse>;
       const query = (
         parsed.ebaySearchQuery ||
         parsed.itemTitle ||
@@ -179,7 +109,7 @@ Inspect this item photo${body.hint ? ` (reseller hint: "${body.hint}")` : ""} an
 
       const payload: ImageCompResponse = {
         mode: "gemini",
-        modelUsed: model,
+        modelUsed,
         itemTitle: (parsed.itemTitle || query).slice(0, 80),
         ebaySearchQuery: query,
         brand: parsed.brand || "Unbranded",
@@ -209,7 +139,7 @@ Inspect this item photo${body.hint ? ` (reseller hint: "${body.hint}")` : ""} an
       const msg =
         err instanceof Error ? err.message : "Gemini Vision request failed";
       return NextResponse.json(
-        { error: `Gemini Vision error (${model}): ${msg}` },
+        { error: `Gemini Vision error: ${msg}` },
         { status: 502 }
       );
     }
@@ -235,7 +165,7 @@ Inspect this item photo${body.hint ? ` (reseller hint: "${body.hint}")` : ""} an
     estHeightIn: 0,
     isMediaEligible: false,
     inspectionTips: [
-      "Photo attached! Add GEMINI_API_KEY in Vercel Environment Variables to enable automatic Gemini 2.5 Flash Vision identification from iPhone photos.",
+      "Photo attached! Add GEMINI_API_KEY in Vercel Environment Variables to enable automatic Gemini 4 Hydrogen Vision identification from iPhone photos.",
       "Until connected, type the item brand/model below to open eBay Sold Comps and run profit + shipping math.",
     ],
     ebaySoldUrl: hintClean
