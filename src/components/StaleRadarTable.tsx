@@ -43,6 +43,7 @@ interface StaleRadarTableProps {
   channelCounts: Record<MarketplaceType, number>;
   busyListingIds: Set<string>;
   isBulkBusy: boolean;
+  isLive?: boolean;
   onExecuteAction: (request: EbayActionRequest) => Promise<void>;
   onOpenCrossList: (row: StaleRadarRow, target?: CrossListTarget) => void;
   onBulkCrossListEtsy: (itemIds: string[]) => Promise<void>;
@@ -52,6 +53,11 @@ interface StaleRadarTableProps {
     status: JobStatusType;
     listedPrice?: number;
   }) => Promise<void>;
+  onDeleteExtensionJob?: (jobId: string) => Promise<void>;
+  onUnlinkMarketplace?: (
+    itemId: string,
+    marketplace: CrossListTarget
+  ) => Promise<void>;
   onRunAutoPromote: (params?: {
     minDaysListed?: number;
     adRatePct?: number;
@@ -212,11 +218,14 @@ export function StaleRadarTable({
   channelCounts,
   busyListingIds,
   isBulkBusy,
+  isLive = false,
   onExecuteAction,
   onOpenCrossList,
   onBulkCrossListEtsy,
   onListEverywhere,
   onUpdateExtensionJob,
+  onDeleteExtensionJob,
+  onUnlinkMarketplace,
   onRunAutoPromote,
   onOpenItemDetail,
   onPromoteDraft,
@@ -238,6 +247,8 @@ export function StaleRadarTable({
   const [confirmDeleteDraftId, setConfirmDeleteDraftId] = useState<
     string | null
   >(null);
+  const [confirmUnlinkKey, setConfirmUnlinkKey] = useState<string | null>(null);
+  const [unlinkingKey, setUnlinkingKey] = useState<string | null>(null);
   const [mountNow] = useState(() => Date.now());
 
   const [notesMap, setNotesMap] = useStoredMap<Record<string, string>>(
@@ -1355,6 +1366,42 @@ export function StaleRadarTable({
                                     {row.promoted_ad_rate_pct}%
                                   </span>
                                 )}
+                                {!isEbay && onUnlinkMarketplace && (() => {
+                                  const uKey = `${row.item_id}:${ch.key}`;
+                                  const isUnlinking = unlinkingKey === uKey;
+                                  const isConfirming = confirmUnlinkKey === uKey;
+                                  return isConfirming ? (
+                                    <button
+                                      type="button"
+                                      disabled={isUnlinking}
+                                      onClick={async () => {
+                                        setUnlinkingKey(uKey);
+                                        try {
+                                          await onUnlinkMarketplace(
+                                            row.item_id,
+                                            ch.key as CrossListTarget
+                                          );
+                                          setConfirmUnlinkKey(null);
+                                        } finally {
+                                          setUnlinkingKey(null);
+                                        }
+                                      }}
+                                      title={`Confirm unlink from ${ch.label}`}
+                                      className="px-1.5 py-1 rounded-md text-[10px] font-semibold bg-[#B91C1C] text-white hover:bg-[#991B1B] transition cursor-pointer disabled:opacity-50"
+                                    >
+                                      {isUnlinking ? "..." : "Unlink?"}
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => setConfirmUnlinkKey(uKey)}
+                                      title={`Unlink ${ch.label} listing (if delisted or not actually live)`}
+                                      className="p-1 rounded-md text-[#9CA3AF] hover:text-[#B91C1C] hover:bg-[#FEF2F2] transition cursor-pointer"
+                                    >
+                                      <X className="w-3 h-3" />
+                                    </button>
+                                  );
+                                })()}
                               </div>
                             </div>
                           );
@@ -1393,26 +1440,49 @@ export function StaleRadarTable({
                                   <Package className="w-7 h-7 text-[#C9D0CC]" />
                                 )}
                               </div>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  onUpdateExtensionJob({
-                                    jobId: queuedJob.id,
-                                    status:
-                                      !isConfirm && ch.key === "facebook"
-                                        ? "needs_user_confirm"
-                                        : "completed",
-                                    listedPrice: queuedPrice,
-                                  })
-                                }
-                                className={`w-full max-w-[126px] text-center py-1 rounded-md text-[11px] font-semibold transition cursor-pointer ${
-                                  isConfirm
-                                    ? "bg-[#FEF3C7] text-[#92400E] border border-[#F59E0B] hover:bg-[#FDE68A]"
-                                    : "bg-[#EFF6FF] text-[#1D4ED8] hover:bg-[#DBEAFE]"
-                                }`}
-                              >
-                                {isConfirm ? "Confirm Pub ✓" : "Run Ext ▶"}
-                              </button>
+                              <div className="w-full max-w-[126px] flex items-center justify-center gap-1">
+                                {isLive && !isConfirm ? (
+                                  <span
+                                    title="Open the pinned Chrome/Arc Extension icon in your browser toolbar and click Auto-Fill"
+                                    className="flex-1 text-center py-1 px-1.5 rounded-md text-[10px] font-semibold bg-[#ECFDF5] text-[#0F766E] border border-[#A7F3D0]"
+                                  >
+                                    Use Ext Icon
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      onUpdateExtensionJob({
+                                        jobId: queuedJob.id,
+                                        status:
+                                          !isConfirm && ch.key === "facebook"
+                                            ? "needs_user_confirm"
+                                            : "completed",
+                                        listedPrice: queuedPrice,
+                                      })
+                                    }
+                                    className={`flex-1 text-center py-1 rounded-md text-[11px] font-semibold transition cursor-pointer ${
+                                      isConfirm
+                                        ? "bg-[#FEF3C7] text-[#92400E] border border-[#F59E0B] hover:bg-[#FDE68A]"
+                                        : "bg-[#EFF6FF] text-[#1D4ED8] hover:bg-[#DBEAFE]"
+                                    }`}
+                                  >
+                                    {isConfirm ? "Confirm Pub ✓" : "Run Ext ▶"}
+                                  </button>
+                                )}
+                                {onDeleteExtensionJob && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      onDeleteExtensionJob(queuedJob.id)
+                                    }
+                                    title="Cancel queued extension job"
+                                    className="p-1 rounded-md text-[#9CA3AF] hover:text-[#B91C1C] hover:bg-[#FEF2F2] transition cursor-pointer"
+                                  >
+                                    <X className="w-3 h-3" />
+                                  </button>
+                                )}
+                              </div>
                             </div>
                           );
                         }

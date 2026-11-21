@@ -18,6 +18,7 @@ import type { ChannelJob, JobStatusType } from "@/lib/types";
 interface ExtensionQueuePanelProps {
   jobs: ChannelJob[];
   recentJobs?: ChannelJob[];
+  isLive?: boolean;
   onUpdateJobStatus: (params: {
     jobId: string;
     status: JobStatusType;
@@ -65,6 +66,7 @@ function getActionLabel(job: ChannelJob): string {
 export function ExtensionQueuePanel({
   jobs,
   recentJobs = [],
+  isLive = false,
   onUpdateJobStatus,
   onDeleteJob,
 }: ExtensionQueuePanelProps) {
@@ -350,27 +352,36 @@ export function ExtensionQueuePanel({
                         <span>Cancel</span>
                       </button>
                     )}
-                    <button
-                      type="button"
-                      disabled={isBusy}
-                      onClick={() => handleSimulateRun(job)}
-                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-50 transition cursor-pointer ${
-                        job.action === "delist"
-                          ? "bg-[#B91C1C] hover:bg-[#991B1B]"
-                          : "bg-[#14151A] hover:bg-[#272A34]"
-                      }`}
-                    >
-                      {isBusy ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <Play className="w-3.5 h-3.5" />
-                      )}
-                      {job.action === "delist"
-                        ? "Execute Delist Now"
-                        : job.marketplace === "facebook"
-                          ? "Simulate Auto-Fill (Pauses for Confirm)"
-                          : "Simulate Extension Auto-Fill"}
-                    </button>
+                    {isLive ? (
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#ECFDF5] text-[#0F766E] border border-[#A7F3D0]">
+                        <Puzzle className="w-3.5 h-3.5" />
+                        <span>
+                          Run from Chrome/Arc Extension Icon → Auto-Fill
+                        </span>
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() => handleSimulateRun(job)}
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-50 transition cursor-pointer ${
+                          job.action === "delist"
+                            ? "bg-[#B91C1C] hover:bg-[#991B1B]"
+                            : "bg-[#14151A] hover:bg-[#272A34]"
+                        }`}
+                      >
+                        {isBusy ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Play className="w-3.5 h-3.5" />
+                        )}
+                        {job.action === "delist"
+                          ? "Execute Delist Now"
+                          : job.marketplace === "facebook"
+                            ? "Simulate Auto-Fill (Pauses for Confirm)"
+                            : "Simulate Extension Auto-Fill"}
+                      </button>
+                    )}
                   </div>
                 </div>
               );

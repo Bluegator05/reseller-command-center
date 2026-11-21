@@ -797,6 +797,7 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
             channelCounts={data.channelCounts}
             busyListingIds={busyListingIds}
             isBulkBusy={isBulkBusy}
+            isLive={isLiveMode}
             onExecuteAction={handleExecuteAction}
             onOpenCrossList={(row, target = "etsy") =>
               setCrossListState({ row, target })
@@ -843,6 +844,47 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
               );
             }}
             onUpdateExtensionJob={handleUpdateExtensionJob}
+            onDeleteExtensionJob={async (jobId: string) => {
+              const res = await fetch(
+                `/api/extension/jobs?id=${encodeURIComponent(jobId)}`,
+                { method: "DELETE" }
+              );
+              if (!res.ok) {
+                pushToast(
+                  "error",
+                  "Failed to Cancel Job",
+                  "Could not remove queued job."
+                );
+                return;
+              }
+              await refreshInventory();
+              pushToast(
+                "info",
+                "Extension Job Canceled",
+                "Removed from queue."
+              );
+            }}
+            onUnlinkMarketplace={async (itemId, marketplace) => {
+              const res = await fetch(
+                `/api/extension/import-listings?itemId=${encodeURIComponent(itemId)}&marketplace=${encodeURIComponent(marketplace)}`,
+                { method: "DELETE" }
+              );
+              const payload = (await res.json()) as { error?: string };
+              if (!res.ok) {
+                pushToast(
+                  "error",
+                  "Failed to Unlink Listing",
+                  payload.error || "Unknown error"
+                );
+                return;
+              }
+              await refreshInventory();
+              pushToast(
+                "info",
+                `Unlinked from ${marketplace.charAt(0).toUpperCase() + marketplace.slice(1)}`,
+                "You can now cross-list this item fresh from the Inventory tab."
+              );
+            }}
             onRunAutoPromote={async (params) => {
               const res = await fetch("/api/automations/promote", {
                 method: "POST",
@@ -922,6 +964,7 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
           <ExtensionQueuePanel
             jobs={data.extensionJobs}
             recentJobs={data.recentJobs}
+            isLive={isLiveMode}
             onUpdateJobStatus={handleUpdateExtensionJob}
             onDeleteJob={async (jobId: string) => {
               const res = await fetch(
@@ -1045,6 +1088,14 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
         onClose={() => setCrossListState(null)}
         onPublishedEtsy={handleDrawerPublishedEtsy}
         onQueuedExtension={handleDrawerQueuedExtension}
+        onUnlinked={async (marketplace) => {
+          await refreshInventory();
+          pushToast(
+            "info",
+            `Unlinked from ${marketplace.charAt(0).toUpperCase() + marketplace.slice(1)}`,
+            "Listing link removed. You can now queue it fresh."
+          );
+        }}
       />
 
       <ItemDetailModal

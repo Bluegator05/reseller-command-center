@@ -353,3 +353,40 @@ export async function POST(request: Request) {
     autoLinked: autoLinkedSummary.slice(0, 20),
   });
 }
+
+/**
+ * DELETE /api/extension/import-listings?itemId=<uuid>&marketplace=<channel>
+ * Unlinks a non-eBay marketplace_listings record (e.g., after a manual delist or accidental link).
+ */
+export async function DELETE(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const itemId = searchParams.get("itemId")?.trim();
+  const marketplace = searchParams.get("marketplace")?.trim();
+
+  if (!itemId || !marketplace || marketplace === "ebay") {
+    return NextResponse.json(
+      { error: "Provide valid itemId and non-eBay marketplace" },
+      { status: 400 }
+    );
+  }
+
+  const supabase = getSupabaseServerClient();
+  if (!supabase || !isSupabaseConfigured()) {
+    return NextResponse.json(
+      { error: "Supabase must be connected" },
+      { status: 400 }
+    );
+  }
+
+  const { error } = await supabase
+    .from("marketplace_listings")
+    .delete()
+    .eq("item_id", itemId)
+    .eq("marketplace", marketplace);
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 400 });
+  }
+
+  return NextResponse.json({ unlinked: true, itemId, marketplace });
+}

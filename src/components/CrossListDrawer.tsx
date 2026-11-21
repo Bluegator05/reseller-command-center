@@ -34,6 +34,7 @@ interface CrossListDrawerProps {
     sku: string;
     price: number;
   }) => Promise<void>;
+  onUnlinked?: (marketplace: CrossListTarget) => Promise<void>;
 }
 
 const TARGET_CHANNELS: Array<{
@@ -68,6 +69,7 @@ export function CrossListDrawer({
   onClose,
   onPublishedEtsy,
   onQueuedExtension,
+  onUnlinked,
 }: CrossListDrawerProps) {
   const [overrideTarget, setOverrideTarget] = useState<{
     key: string;
@@ -93,6 +95,7 @@ export function CrossListDrawer({
       onClose={onClose}
       onPublishedEtsy={onPublishedEtsy}
       onQueuedExtension={onQueuedExtension}
+      onUnlinked={onUnlinked}
     />
   );
 }
@@ -104,6 +107,7 @@ function CrossListDrawerInner({
   onClose,
   onPublishedEtsy,
   onQueuedExtension,
+  onUnlinked,
 }: {
   row: StaleRadarRow;
   target: CrossListTarget;
@@ -115,9 +119,11 @@ function CrossListDrawerInner({
     sku: string;
     price: number;
   }) => Promise<void>;
+  onUnlinked?: (marketplace: CrossListTarget) => Promise<void>;
 }) {
   const [isLoadingMap, setIsLoadingMap] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isUnlinking, setIsUnlinking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState<CrossListDraftPayload | null>(null);
 
@@ -389,6 +395,54 @@ function CrossListDrawerInner({
                   {error}
                 </div>
               )}
+
+              {(() => {
+                const existing = row.cross_listings.find(
+                  (c) => c.marketplace === target
+                );
+                if (!existing) return null;
+                return (
+                  <div className="flex flex-wrap items-center justify-between gap-2.5 p-3 rounded-xl bg-[#ECFDF5] border border-[#A7F3D0] text-xs text-[#065F46]">
+                    <span>
+                      Already marked <strong>Live</strong> on{" "}
+                      <span className="capitalize">{target}</span> ($
+                      {existing.listed_price.toFixed(2)}). If this wasn&apos;t
+                      actually posted or was delisted, unlink it here.
+                    </span>
+                    <button
+                      type="button"
+                      disabled={isUnlinking}
+                      onClick={async () => {
+                        setIsUnlinking(true);
+                        setError(null);
+                        try {
+                          const res = await fetch(
+                            `/api/extension/import-listings?itemId=${encodeURIComponent(row.item_id)}&marketplace=${encodeURIComponent(target)}`,
+                            { method: "DELETE" }
+                          );
+                          const data = (await res.json()) as { error?: string };
+                          if (!res.ok) {
+                            throw new Error(data.error || "Failed to unlink");
+                          }
+                          await onUnlinked?.(target);
+                          onClose();
+                        } catch (err) {
+                          setError(
+                            err instanceof Error
+                              ? err.message
+                              : "Failed to unlink listing"
+                          );
+                        } finally {
+                          setIsUnlinking(false);
+                        }
+                      }}
+                      className="px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-white border border-[#FECACA] text-[#B91C1C] hover:bg-[#FEF2F2] disabled:opacity-50 transition cursor-pointer shrink-0"
+                    >
+                      {isUnlinking ? "Unlinking..." : "Unlink Listing"}
+                    </button>
+                  </div>
+                );
+              })()}
 
               {target === "facebook" && (
                 <div className="flex items-start gap-2.5 p-3 rounded-xl bg-[#FFFBEB] border border-[#FDE68A] text-xs text-[#92400E]">
