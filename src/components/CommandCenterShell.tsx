@@ -345,12 +345,17 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
       marketplace: Exclude<MarketplaceType, "ebay">;
       sku: string;
       price: number;
+      launchedLocally?: boolean;
     }) => {
       await refreshInventory();
       pushToast(
         "success",
-        `${params.sku} Queued for ${params.marketplace.toUpperCase()}`,
-        `Added to Chrome/Arc Companion Extension queue at $${params.price.toFixed(2)}.`
+        params.launchedLocally
+          ? `Opening ${params.marketplace.toUpperCase()} & Auto-Filling`
+          : `${params.sku} Sent to Mac Mini Auto-Pilot`,
+        params.launchedLocally
+          ? `Uploading all eBay photos & filling ${params.sku} at $${params.price.toFixed(2)} in a new tab.`
+          : `Mac Mini Auto-Pilot will upload all eBay photos and save a ${params.marketplace} Draft at $${params.price.toFixed(2)} within ~30s.`
       );
     },
     [pushToast, refreshInventory]

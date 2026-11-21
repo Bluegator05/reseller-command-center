@@ -1,6 +1,7 @@
 /**
- * Mercari DOM Auto-Filler Content Script (Phase 3)
+ * Mercari DOM Auto-Filler Content Script (v0.7.0)
  * Targets https://www.mercari.com/sell/
+ * Supports both Interactive 1-Click Mode (iMac/MacBook Air) and Mac Mini Auto-Pilot Save Draft Mode.
  */
 (function initMercariAgent() {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -9,17 +10,35 @@
     }
 
     (async () => {
-      const { waitForSelector, setNativeValue, injectImageBlobs, showRccHud } =
-        window.__rccHelpers;
+      const {
+        waitForSelector,
+        setNativeValue,
+        injectImageBlobs,
+        sleep,
+        clickButtonByText,
+        showRccHud,
+      } = window.__rccHelpers;
       const job = message.job;
       const payload = job.payload || {};
+      const isAutoPilot = Boolean(message.autoPilot);
+      const shouldSaveDraft = Boolean(message.autoPilot && message.autoPilotSaveDraft);
 
       try {
         showRccHud({
-          title: `Mercari Auto-Fill (${payload.sku || "SKU"})`,
-          message: "Filling title (<=80 chars), description, price, and injecting photos...",
+          title: `${isAutoPilot ? "Auto-Pilot · " : ""}Mercari (${payload.sku || "SKU"})`,
+          message: `Uploading ${(payload.imageUrls || []).length} eBay photos & filling listing details...`,
           tone: "info",
         });
+
+        const fileInput = await waitForSelector(
+          ['input[type="file"][multiple]', 'input[type="file"]'],
+          4000
+        );
+        const uploadedCount = await injectImageBlobs(
+          fileInput,
+          payload.imageUrls || [],
+          12
+        );
 
         const titleInput = await waitForSelector([
           'input[data-testid="Title"]',
@@ -54,8 +73,42 @@
           setNativeValue(priceInput, Math.round(Number(payload.suggestedPrice)));
         }
 
-        const fileInput = await waitForSelector('input[type="file"]', 3000);
-        const uploadedCount = await injectImageBlobs(fileInput, payload.imageUrls || []);
+        if (shouldSaveDraft) {
+          showRccHud({
+            title: `Auto-Pilot · Saving Mercari Draft (${payload.sku || "SKU"})`,
+            message: `Uploaded ${uploadedCount} photos. Waiting for photo upload, then clicking Save draft...`,
+            tone: "info",
+          });
+
+          await sleep(Math.min(7000, Math.max(2500, uploadedCount * 450)));
+
+          const saved = await clickButtonByText(
+            [/^save draft$/i, /^save as draft$/i, /save.*draft/i],
+            4000
+          );
+
+          if (saved) {
+            await sleep(2500);
+            await chrome.runtime.sendMessage({
+              type: "RCC_JOB_STATUS_UPDATE",
+              jobId: job.id,
+              status: "needs_user_confirm",
+              extra: {
+                listedPrice: payload.suggestedPrice,
+                errorMessage: `Saved as Mercari Draft (${uploadedCount} photos) — open Mercari app on iPhone/Mac → Drafts, confirm Shipping & tap List!`,
+              },
+            });
+            showRccHud({
+              title: `Mercari Draft Saved (${payload.sku || "SKU"})`,
+              message: `Ready in your Mercari Drafts on iPhone & Mac (${uploadedCount} photos). Closing worker tab...`,
+              tone: "success",
+            });
+            await sleep(2000);
+            chrome.runtime.sendMessage({ type: "RCC_CLOSE_SENDER_TAB" });
+            sendResponse({ ok: true, savedDraft: true });
+            return;
+          }
+        }
 
         showRccHud({
           title: `Mercari Ready (${payload.sku || "SKU"})`,

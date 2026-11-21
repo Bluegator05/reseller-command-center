@@ -33,6 +33,7 @@ interface CrossListDrawerProps {
     marketplace: CrossListTarget;
     sku: string;
     price: number;
+    launchedLocally?: boolean;
   }) => Promise<void>;
   onUnlinked?: (marketplace: CrossListTarget) => Promise<void>;
 }
@@ -118,6 +119,7 @@ function CrossListDrawerInner({
     marketplace: CrossListTarget;
     sku: string;
     price: number;
+    launchedLocally?: boolean;
   }) => Promise<void>;
   onUnlinked?: (marketplace: CrossListTarget) => Promise<void>;
 }) {
@@ -126,6 +128,11 @@ function CrossListDrawerInner({
   const [isUnlinking, setIsUnlinking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState<CrossListDraftPayload | null>(null);
+  const [localExtensionReady, setLocalExtensionReady] = useState(
+    () =>
+      typeof document !== "undefined" &&
+      Boolean(document.documentElement.dataset.rccExtensionVersion)
+  );
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -134,6 +141,19 @@ function CrossListDrawerInner({
   const [tags, setTags] = useState<string[]>([]);
   const [newTagInput, setNewTagInput] = useState("");
   const [publishImmediately, setPublishImmediately] = useState(true);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handleMsg = (event: MessageEvent) => {
+      if (event.source !== window) return;
+      if (event.data?.type === "RCC_EXTENSION_READY") {
+        setLocalExtensionReady(true);
+      }
+    };
+    window.addEventListener("message", handleMsg);
+    window.postMessage({ type: "RCC_PING_EXTENSION" }, window.location.origin);
+    return () => window.removeEventListener("message", handleMsg);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -267,15 +287,33 @@ function CrossListDrawerInner({
           }),
         });
 
-        const payload = (await res.json()) as { error?: string };
+        const payload = (await res.json()) as {
+          jobs?: Array<Record<string, unknown>>;
+          error?: string;
+        };
         if (!res.ok) {
           throw new Error(payload.error || "Failed to queue extension job");
+        }
+
+        const createdJob = payload.jobs?.[0];
+        const canLaunchLocally = Boolean(
+          localExtensionReady &&
+            createdJob &&
+            typeof window !== "undefined"
+        );
+
+        if (canLaunchLocally && createdJob) {
+          window.postMessage(
+            { type: "RCC_LOCAL_DISPATCH_JOB", job: createdJob },
+            window.location.origin
+          );
         }
 
         await onQueuedExtension({
           marketplace: target,
           sku: row.sku,
           price: round2(parsedPrice),
+          launchedLocally: canLaunchLocally,
         });
         onClose();
       }
@@ -768,7 +806,11 @@ function CrossListDrawerInner({
           ) : (
             <span className="inline-flex items-center gap-1.5 text-xs text-[#5C606B]">
               <Puzzle className="w-3.5 h-3.5 text-[#0F766E]" />
-              <span>Dispatched to Chrome/Arc Extension Queue</span>
+              <span>
+                {localExtensionReady
+                  ? "Extension active on this Mac — opens & fills in 1 click"
+                  : "Sends to Mac Mini Auto-Pilot (saves Poshmark/Mercari Draft)"}
+              </span>
             </span>
           )}
 
@@ -795,10 +837,14 @@ function CrossListDrawerInner({
               {isSubmitting
                 ? isEtsy
                   ? "Publishing to Etsy..."
-                  : "Queueing Job..."
+                  : localExtensionReady
+                    ? "Opening & Auto-Filling..."
+                    : "Sending to Auto-Pilot..."
                 : isEtsy
                   ? `Publish to Etsy ($${parsedPrice.toFixed(2)})`
-                  : `Queue for ${TARGET_CHANNELS.find((c) => c.key === target)?.label} ($${parsedPrice.toFixed(2)})`}
+                  : localExtensionReady
+                    ? `Open & Auto-Fill ${TARGET_CHANNELS.find((c) => c.key === target)?.label} ($${parsedPrice.toFixed(2)})`
+                    : `Queue for ${TARGET_CHANNELS.find((c) => c.key === target)?.label} Auto-Pilot ($${parsedPrice.toFixed(2)})`}
             </button>
           </div>
         </div>

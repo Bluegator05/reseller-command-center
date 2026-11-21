@@ -245,17 +245,35 @@ export function ExtensionQueuePanel({
                       {String(job.payload?.mappedTitle || job.item_title || "")}
                     </p>
                     <p className="text-xs text-[#5C606B] mt-0.5">
-                      DOM form &amp; CDN photos injected — paused before Publish
-                      click for account safety. Confirm once published on
-                      Facebook Marketplace.
+                      {job.error_message ||
+                        "DOM form & CDN photos injected — confirm once published on the marketplace."}
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    disabled={isBusy}
-                    onClick={() => handleConfirmPublished(job)}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold bg-[#0F766E] text-white hover:bg-[#115E59] disabled:opacity-50 transition cursor-pointer shrink-0"
-                  >
+                  <div className="flex items-center gap-2 shrink-0">
+                    {onDeleteJob && (
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={async () => {
+                          setBusyJobId(job.id);
+                          try {
+                            await onDeleteJob(job.id);
+                          } finally {
+                            setBusyJobId(null);
+                          }
+                        }}
+                        className="inline-flex items-center gap-1 px-2.5 py-2 rounded-lg text-xs font-medium bg-white border border-[#FECACA] text-[#B91C1C] hover:bg-[#FEF2F2] disabled:opacity-50 transition cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Cancel</span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={() => handleConfirmPublished(job)}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold bg-[#0F766E] text-white hover:bg-[#115E59] disabled:opacity-50 transition cursor-pointer"
+                    >
                     {isBusy ? (
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
                     ) : (
@@ -263,6 +281,7 @@ export function ExtensionQueuePanel({
                     )}
                     Confirm Published
                   </button>
+                  </div>
                 </div>
               );
             })}

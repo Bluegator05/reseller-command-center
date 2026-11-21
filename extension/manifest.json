@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Reseller Command Center — Companion Extension",
-  "version": "0.6.0",
-  "description": "Listens to Reseller Command Center extension jobs to auto-fill Poshmark, Mercari, and Facebook Marketplace listings and scan existing active listings to link them automatically.",
+  "version": "0.7.0",
+  "description": "1-click instant cross-listing on iMac/MacBook Air + unattended Mac Mini Auto-Pilot for iPhone queuing + full-closet scanner for Poshmark, Mercari, and Facebook Marketplace.",
   "permissions": [
     "storage",
     "alarms",
@@ -29,6 +29,15 @@
     "type": "module"
   },
   "content_scripts": [
+    {
+      "matches": [
+        "https://reseller-command-center-black.vercel.app/*",
+        "https://*.vercel.app/*",
+        "http://localhost:3000/*"
+      ],
+      "js": ["content/command-center.js"],
+      "run_at": "document_idle"
+    },
     {
       "matches": ["https://poshmark.com/*"],
       "js": ["content/dom-helpers.js", "content/poshmark.js"],

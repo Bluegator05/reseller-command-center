@@ -64,7 +64,7 @@
    * Downloads master CDN images through the MV3 background service worker
    * (bypassing page CORS) and injects them into a file input via DataTransfer.
    */
-  async function injectImageBlobs(fileInput, imageUrls) {
+  async function injectImageBlobs(fileInput, imageUrls, maxPhotos = 16) {
     if (!fileInput || !Array.isArray(imageUrls) || imageUrls.length === 0) {
       return 0;
     }
@@ -72,7 +72,7 @@
     const dt = new DataTransfer();
     let count = 0;
 
-    for (let i = 0; i < Math.min(imageUrls.length, 12); i++) {
+    for (let i = 0; i < Math.min(imageUrls.length, maxPhotos); i++) {
       const url = imageUrls[i];
       try {
         const res = await chrome.runtime.sendMessage({
@@ -104,9 +104,42 @@
 
     if (count > 0) {
       fileInput.files = dt.files;
+      fileInput.dispatchEvent(new Event("input", { bubbles: true }));
       fileInput.dispatchEvent(new Event("change", { bubbles: true }));
     }
     return count;
+  }
+
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  /**
+   * Waits for a visible button/link matching any regex or exact text pattern and clicks it.
+   */
+  async function clickButtonByText(patterns, timeoutMs = 4000) {
+    const start = Date.now();
+    const list = Array.isArray(patterns) ? patterns : [patterns];
+    while (Date.now() - start < timeoutMs) {
+      const candidates = Array.from(
+        document.querySelectorAll('button, a, [role="button"]')
+      );
+      for (const el of candidates) {
+        if (el.disabled) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        const txt = (el.textContent || "").replace(/\s+/g, " ").trim();
+        const matched = list.some((p) =>
+          p instanceof RegExp ? p.test(txt) : txt.toLowerCase() === String(p).toLowerCase()
+        );
+        if (matched) {
+          el.click();
+          return true;
+        }
+      }
+      await sleep(250);
+    }
+    return false;
   }
 
   function showRccHud({ title, message, tone = "info", actionLabel, onAction }) {
@@ -164,6 +197,8 @@
     waitForSelector,
     setNativeValue,
     injectImageBlobs,
+    sleep,
+    clickButtonByText,
     showRccHud,
   };
 })();

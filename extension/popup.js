@@ -11,6 +11,16 @@ const sbUrlEl = document.getElementById("cfg-sb-url");
 const sbKeyEl = document.getElementById("cfg-sb-key");
 const bridgeFieldsEl = document.getElementById("bridge-fields");
 const supabaseFieldsEl = document.getElementById("supabase-fields");
+const autoPilotEl = document.getElementById("cfg-autopilot");
+const autoPilotBadgeEl = document.getElementById("autopilot-badge");
+
+function updateAutoPilotBadge(enabled) {
+  if (!autoPilotBadgeEl) return;
+  autoPilotBadgeEl.textContent = enabled
+    ? "Mac Mini Auto-Pilot ON"
+    : "1-Click Interactive";
+  autoPilotBadgeEl.style.color = enabled ? "#b45309" : "#0f766e";
+}
 
 function toggleModeFields() {
   const isSb = modeEl.value === "supabase";
@@ -19,6 +29,18 @@ function toggleModeFields() {
 }
 
 modeEl.addEventListener("change", toggleModeFields);
+
+if (autoPilotEl) {
+  autoPilotEl.addEventListener("change", async () => {
+    const enabled = Boolean(autoPilotEl.checked);
+    updateAutoPilotBadge(enabled);
+    await chrome.runtime.sendMessage({
+      type: "RCC_SAVE_CONFIG",
+      config: { autoPilot: enabled, autoPilotSaveDraft: true },
+    });
+    await loadState();
+  });
+}
 
 function renderJobs(jobs) {
   const activeJobs = (jobs || []).filter(
@@ -55,9 +77,9 @@ function renderJobs(jobs) {
     row.innerHTML = `
       <div class="job-top">
         <span class="sku">${isDelist ? "⚠ DELIST · " : ""}${job.item_sku || job.item_id.slice(0, 8)} · ${job.marketplace.toUpperCase()} ${price}</span>
-        <span class="pill ${pillCls}">${isDelist ? "URGENT DELIST" : job.status.replace(/_/g, " ")}</span>
+        <span class="pill ${pillCls}">${isDelist ? "URGENT DELIST" : job.status === "needs_user_confirm" ? "DRAFT / CONFIRM" : job.status.replace(/_/g, " ")}</span>
       </div>
-      <div class="title">${isDelist ? `Sold on another channel (${job.payload?.reason || "auto-delist"}) — end listing immediately` : job.payload?.mappedTitle || job.item_title || "Cross-list job"}</div>
+      <div class="title">${isDelist ? `Sold on another channel (${job.payload?.reason || "auto-delist"}) — end listing immediately` : job.error_message && job.status === "needs_user_confirm" ? job.error_message : job.payload?.mappedTitle || job.item_title || "Cross-list job"}</div>
       <div class="actions"></div>
     `;
 
@@ -103,7 +125,11 @@ function renderJobs(jobs) {
       runBtn.addEventListener("click", async () => {
         runBtn.disabled = true;
         runBtn.textContent = "Opening tab...";
-        await chrome.runtime.sendMessage({ type: "RCC_RUN_JOB", job });
+        await chrome.runtime.sendMessage({
+          type: "RCC_RUN_JOB",
+          job,
+          autoPilot: false,
+        });
         window.close();
       });
       actionsEl.appendChild(runBtn);
@@ -123,6 +149,10 @@ async function loadState() {
   passcodeEl.value = res.config.ownerPasscode || "";
   sbUrlEl.value = res.config.supabaseUrl || "";
   sbKeyEl.value = res.config.supabaseAnonKey || "";
+  if (autoPilotEl) {
+    autoPilotEl.checked = Boolean(res.config.autoPilot);
+  }
+  updateAutoPilotBadge(Boolean(res.config.autoPilot));
   toggleModeFields();
 
   if (
@@ -166,6 +196,8 @@ document.getElementById("btn-save-cfg").addEventListener("click", async () => {
       ownerPasscode: passcodeEl.value.trim(),
       supabaseUrl: sbUrlEl.value.trim(),
       supabaseAnonKey: sbKeyEl.value.trim(),
+      autoPilot: Boolean(autoPilotEl?.checked),
+      autoPilotSaveDraft: true,
     },
   });
   await chrome.runtime.sendMessage({ type: "RCC_POLL_NOW" });

@@ -24,7 +24,11 @@ const DEFAULT_CONFIG = {
   supabaseAnonKey: "",
   autoPoll: true,
   pollIntervalMinutes: 0.5,
+  autoPilot: false, // Turn ON on Mac Mini only; keep OFF on iMac / MacBook Air
+  autoPilotSaveDraft: true, // Auto-click Save Draft on Poshmark & Mercari so drafts appear on iPhone
 };
+
+let autoPilotBusy = false;
 
 async function getConfig() {
   const stored = await chrome.storage.local.get(["rccConfig"]);
@@ -41,7 +45,7 @@ async function saveConfig(partial) {
 
 async function configureAlarm(config) {
   await chrome.alarms.clear(POLL_ALARM_NAME);
-  if (config.autoPoll) {
+  if (config.autoPoll || config.autoPilot) {
     chrome.alarms.create(POLL_ALARM_NAME, {
       periodInMinutes: Math.max(0.5, Number(config.pollIntervalMinutes) || 0.5),
     });
@@ -143,28 +147,72 @@ async function updateJobStatus(jobId, status, extra = {}) {
   return res.json();
 }
 
-async function updateBadgeCount(jobs) {
+async function updateBadgeCount(jobs, config) {
   const actionable = jobs.filter(
     (j) => j.status === "pending" || j.status === "needs_user_confirm"
   );
   const needsConfirm = jobs.some((j) => j.status === "needs_user_confirm");
-  await chrome.action.setBadgeText({
-    text: actionable.length > 0 ? String(actionable.length) : "",
-  });
+  const badgeText =
+    actionable.length > 0
+      ? String(actionable.length)
+      : config?.autoPilot
+        ? "AP"
+        : "";
+  await chrome.action.setBadgeText({ text: badgeText });
   await chrome.action.setBadgeBackgroundColor({
-    color: needsConfirm ? "#B45309" : "#1D4ED8",
+    color: needsConfirm
+      ? "#B45309"
+      : actionable.length > 0
+        ? "#1D4ED8"
+        : "#0F766E",
   });
 }
 
-async function refreshJobsCache() {
+async function runAutoPilotCycle(jobs, config) {
+  if (!config?.autoPilot || autoPilotBusy) return;
+  const now = Date.now();
+  // Give a local iMac/MacBook Air interactive browser a 12-second head start to claim jobs first
+  const candidate = [...(jobs || [])]
+    .filter(
+      (j) =>
+        j.status === "pending" &&
+        j.action === "create" &&
+        (j.marketplace === "poshmark" || j.marketplace === "mercari") &&
+        now - Date.parse(j.created_at || 0) >= 12000
+    )
+    .sort((a, b) => Date.parse(a.created_at || 0) - Date.parse(b.created_at || 0))[0];
+
+  if (!candidate) return;
+
+  autoPilotBusy = true;
   try {
+    await dispatchJobToTab(candidate, {
+      autoPilot: true,
+      autoPilotSaveDraft: config.autoPilotSaveDraft !== false,
+    });
+  } catch (err) {
+    console.warn("[RCC Auto-Pilot] Job dispatch warning:", err);
+  } finally {
+    // Cooldown before picking up the next queued item
+    setTimeout(() => {
+      autoPilotBusy = false;
+    }, 6000);
+  }
+}
+
+async function refreshJobsCache(allowAutoPilot = false) {
+  try {
+    const config = await getConfig();
     const jobs = await fetchExtensionJobs();
     await chrome.storage.local.set({
       rccJobs: jobs,
       rccLastPollAt: new Date().toISOString(),
       rccLastError: null,
     });
-    await updateBadgeCount(jobs);
+    await updateBadgeCount(jobs, config);
+    if (allowAutoPilot && config.autoPilot) {
+      runAutoPilotCycle(jobs, config);
+    }
     return { ok: true, jobs };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -177,7 +225,7 @@ async function refreshJobsCache() {
  * Opens the target marketplace listing page and dispatches the job payload
  * once the content script finishes loading.
  */
-async function dispatchJobToTab(job) {
+async function dispatchJobToTab(job, options = {}) {
   const targetUrl =
     job.action === "delist" && job.payload?.externalUrl
       ? job.payload.externalUrl
@@ -195,7 +243,7 @@ async function dispatchJobToTab(job) {
     const listener = (tabId, changeInfo) => {
       if (tabId === tab.id && changeInfo.status === "complete") {
         chrome.tabs.onUpdated.removeListener(listener);
-        setTimeout(resolve, 1200);
+        setTimeout(resolve, 1400);
       }
     };
     chrome.tabs.onUpdated.addListener(listener);
@@ -204,9 +252,11 @@ async function dispatchJobToTab(job) {
   await chrome.tabs.sendMessage(tab.id, {
     type: "RCC_EXECUTE_JOB",
     job,
+    autoPilot: Boolean(options.autoPilot),
+    autoPilotSaveDraft: Boolean(options.autoPilotSaveDraft),
   });
 
-  await refreshJobsCache();
+  await refreshJobsCache(false);
   return { ok: true, tabId: tab.id };
 }
 
@@ -507,16 +557,16 @@ async function deleteExtensionJob(jobId) {
 chrome.runtime.onInstalled.addListener(async () => {
   const config = await getConfig();
   await configureAlarm(config);
-  await refreshJobsCache();
+  await refreshJobsCache(false);
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === POLL_ALARM_NAME) {
-    refreshJobsCache();
+    refreshJobsCache(true);
   }
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     try {
       switch (message.type) {
@@ -538,23 +588,37 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
         case "RCC_SAVE_CONFIG": {
           const config = await saveConfig(message.config || {});
-          const refreshed = await refreshJobsCache();
+          const refreshed = await refreshJobsCache(Boolean(config.autoPilot));
           sendResponse({ ok: true, config, ...refreshed });
           break;
         }
         case "RCC_POLL_NOW": {
-          const result = await refreshJobsCache();
+          const result = await refreshJobsCache(true);
           sendResponse(result);
           break;
         }
         case "RCC_RUN_JOB": {
-          const result = await dispatchJobToTab(message.job);
+          const config = await getConfig();
+          const result = await dispatchJobToTab(message.job, {
+            autoPilot: Boolean(message.autoPilot),
+            autoPilotSaveDraft:
+              message.autoPilotSaveDraft !== undefined
+                ? Boolean(message.autoPilotSaveDraft)
+                : config.autoPilotSaveDraft !== false,
+          });
           sendResponse(result);
+          break;
+        }
+        case "RCC_CLOSE_SENDER_TAB": {
+          if (sender?.tab?.id) {
+            await chrome.tabs.remove(sender.tab.id);
+          }
+          sendResponse({ ok: true });
           break;
         }
         case "RCC_JOB_STATUS_UPDATE": {
           await updateJobStatus(message.jobId, message.status, message.extra || {});
-          await refreshJobsCache();
+          await refreshJobsCache(false);
           sendResponse({ ok: true });
           break;
         }
