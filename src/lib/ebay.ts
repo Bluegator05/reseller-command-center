@@ -284,7 +284,7 @@ interface EbayOfferRecord {
  * `GetMyeBaySelling`, capturing real WatchCount, HitCount, and exact StartTime.
  */
 async function fetchActiveTradingListings(
-  limit = 200
+  limit = 2000
 ): Promise<NormalizedEbayOffer[]> {
   const { webBase } = getEbayBaseUrls();
   const normalized: NormalizedEbayOffer[] = [];
@@ -396,7 +396,7 @@ async function fetchActiveTradingListings(
  * them without duplicates so 100% of active eBay listings sync cleanly.
  */
 export async function fetchActiveEbayOffers(
-  limit = 200
+  limit = 2000
 ): Promise<NormalizedEbayOffer[]> {
   const { webBase } = getEbayBaseUrls();
   const byListingId = new Map<string, NormalizedEbayOffer>();
@@ -407,6 +407,9 @@ export async function fetchActiveEbayOffers(
   try {
     const tradingItems = await fetchActiveTradingListings(limit);
     for (const item of tradingItems) {
+      if (bySku.has(item.sku) && item.externalListingId) {
+        item.sku = `${item.sku}-${item.externalListingId.slice(-5)}`;
+      }
       if (item.externalListingId) byListingId.set(item.externalListingId, item);
       bySku.set(item.sku, item);
     }

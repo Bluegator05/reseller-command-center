@@ -1,14 +1,29 @@
 import { NextResponse } from "next/server";
 import { simulateDemoEbaySync } from "@/lib/demo-store";
-import { fetchActiveEbayOffers, isEbayConfigured } from "@/lib/ebay";
+import {
+  fetchActiveEbayOffers,
+  isEbayConfigured,
+  type NormalizedEbayOffer,
+} from "@/lib/ebay";
 import { roundCurrency } from "@/lib/stale-engine";
 import { getSupabaseServerClient, isSupabaseConfigured } from "@/lib/supabase";
 import type { EbaySyncResponse } from "@/lib/types";
 
+export const maxDuration = 60;
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
 /**
  * POST /api/ebay/sync
- * Pulls active eBay offers into Supabase `inventory_items` and `marketplace_listings`.
- * When live eBay/Supabase credentials are not configured yet, runs against the interactive demo store.
+ * Pulls ALL active eBay listings (up to 2,000 via paginated Trading API + Sell
+ * Inventory API) into Supabase `inventory_items` and `marketplace_listings`
+ * using batched inserts/upserts so 500–2,000 listings complete in a few seconds.
  */
 export async function POST() {
   const supabase = getSupabaseServerClient();
@@ -33,100 +48,122 @@ export async function POST() {
   }
 
   try {
-    const offers = await fetchActiveEbayOffers(200);
+    const offers = await fetchActiveEbayOffers(2000);
     const syncedAt = new Date().toISOString();
-    let createdCount = 0;
-    let updatedCount = 0;
+
+    // 1. Fetch existing inventory item IDs by SKU in chunks of 200
+    const skuToId = new Map<string, string>();
+    const allSkus = offers.map((o) => o.sku);
+    for (const skuChunk of chunkArray(allSkus, 200)) {
+      const { data: existingRows, error: lookupError } = await supabase!
+        .from("inventory_items")
+        .select("id, sku")
+        .in("sku", skuChunk);
+      if (lookupError) throw lookupError;
+      for (const row of existingRows ?? []) {
+        skuToId.set(row.sku as string, row.id as string);
+      }
+    }
+
+    const newOffers: NormalizedEbayOffer[] = [];
+    const existingOffers: Array<{ id: string; offer: NormalizedEbayOffer }> = [];
 
     for (const offer of offers) {
-      const { data: existingItem, error: lookupError } = await supabase!
-        .from("inventory_items")
-        .select("id, cogs, target_price, floor_price")
-        .eq("sku", offer.sku)
-        .maybeSingle();
-
-      if (lookupError) {
-        throw lookupError;
-      }
-
-      let itemId: string;
-
-      if (existingItem) {
-        itemId = existingItem.id;
-        updatedCount += 1;
-
-        const { error: updateItemError } = await supabase!
-          .from("inventory_items")
-          .update({
-            title: offer.title,
-            description_html: offer.descriptionHtml || null,
-            description_plain: offer.descriptionPlain || null,
-            condition: offer.condition,
-            brand: offer.brand,
-            category_hint: offer.categoryHint,
-            weight_oz: offer.weightOz,
-            item_specifics: offer.itemSpecifics,
-            image_urls: offer.imageUrls,
-            status: "active",
-            updated_at: syncedAt,
-          })
-          .eq("id", itemId);
-
-        if (updateItemError) throw updateItemError;
+      const existingId = skuToId.get(offer.sku);
+      if (existingId) {
+        existingOffers.push({ id: existingId, offer });
       } else {
-        createdCount += 1;
-        const defaultFloor = roundCurrency(offer.listedPrice * 0.7);
+        newOffers.push(offer);
+      }
+    }
 
-        const { data: insertedItem, error: insertItemError } = await supabase!
-          .from("inventory_items")
-          .insert({
-            sku: offer.sku,
+    // 2. Batch-insert brand-new SKUs in chunks of 100
+    for (const batch of chunkArray(newOffers, 100)) {
+      const rows = batch.map((offer) => ({
+        sku: offer.sku,
+        title: offer.title,
+        description_html: offer.descriptionHtml || null,
+        description_plain: offer.descriptionPlain || null,
+        condition: offer.condition,
+        brand: offer.brand,
+        category_hint: offer.categoryHint,
+        cogs: 0,
+        target_price: offer.listedPrice,
+        floor_price: roundCurrency(offer.listedPrice * 0.7),
+        weight_oz: offer.weightOz,
+        item_specifics: offer.itemSpecifics,
+        image_urls: offer.imageUrls,
+        status: "active",
+        acquired_at: offer.listedAt,
+        updated_at: syncedAt,
+      }));
+
+      const { data: inserted, error: insertErr } = await supabase!
+        .from("inventory_items")
+        .insert(rows)
+        .select("id, sku");
+      if (insertErr) throw insertErr;
+      for (const row of inserted ?? []) {
+        skuToId.set(row.sku as string, row.id as string);
+      }
+    }
+
+    // 3. Update existing SKUs in parallel chunks of 20 (preserving user COGS/bins/notes/floor)
+    for (const batch of chunkArray(existingOffers, 20)) {
+      await Promise.all(
+        batch.map(async ({ id, offer }) => {
+          const patch: Record<string, unknown> = {
             title: offer.title,
-            description_html: offer.descriptionHtml || null,
-            description_plain: offer.descriptionPlain || null,
             condition: offer.condition,
-            brand: offer.brand,
             category_hint: offer.categoryHint,
-            cogs: 0,
-            target_price: offer.listedPrice,
-            floor_price: defaultFloor,
-            weight_oz: offer.weightOz,
-            item_specifics: offer.itemSpecifics,
             image_urls: offer.imageUrls,
             status: "active",
-            acquired_at: offer.listedAt,
             updated_at: syncedAt,
-          })
-          .select("id")
-          .single();
+          };
+          if (offer.descriptionHtml) patch.description_html = offer.descriptionHtml;
+          if (offer.descriptionPlain) patch.description_plain = offer.descriptionPlain;
+          if (offer.brand) patch.brand = offer.brand;
+          if (offer.weightOz !== null) patch.weight_oz = offer.weightOz;
+          if (Object.keys(offer.itemSpecifics).length > 0) {
+            patch.item_specifics = offer.itemSpecifics;
+          }
 
-        if (insertItemError || !insertedItem) {
-          throw insertItemError || new Error(`Failed to insert SKU ${offer.sku}`);
-        }
-        itemId = insertedItem.id;
-      }
+          const { error: updErr } = await supabase!
+            .from("inventory_items")
+            .update(patch)
+            .eq("id", id);
+          if (updErr) throw updErr;
+        })
+      );
+    }
 
-      const { error: upsertListingError } = await supabase!
+    // 4. Batch-upsert marketplace_listings in chunks of 100
+    const listingRows = offers
+      .map((offer) => {
+        const itemId = skuToId.get(offer.sku);
+        if (!itemId) return null;
+        return {
+          item_id: itemId,
+          marketplace: "ebay",
+          external_listing_id: offer.externalListingId,
+          external_url: offer.externalUrl,
+          listed_price: offer.listedPrice,
+          shipping_price: offer.shippingPrice,
+          status: "active",
+          views_count: offer.viewsCount,
+          watchers_count: offer.watchersCount,
+          impressions_count: offer.impressionsCount,
+          listed_at: offer.listedAt,
+          last_synced_at: syncedAt,
+        };
+      })
+      .filter((r): r is NonNullable<typeof r> => r !== null);
+
+    for (const batch of chunkArray(listingRows, 100)) {
+      const { error: upsertErr } = await supabase!
         .from("marketplace_listings")
-        .upsert(
-          {
-            item_id: itemId,
-            marketplace: "ebay",
-            external_listing_id: offer.externalListingId,
-            external_url: offer.externalUrl,
-            listed_price: offer.listedPrice,
-            shipping_price: offer.shippingPrice,
-            status: "active",
-            views_count: offer.viewsCount,
-            watchers_count: offer.watchersCount,
-            impressions_count: offer.impressionsCount,
-            listed_at: offer.listedAt,
-            last_synced_at: syncedAt,
-          },
-          { onConflict: "item_id,marketplace" }
-        );
-
-      if (upsertListingError) throw upsertListingError;
+        .upsert(batch, { onConflict: "item_id,marketplace" });
+      if (upsertErr) throw upsertErr;
     }
 
     await supabase!.from("marketplace_accounts").upsert(
@@ -143,10 +180,10 @@ export async function POST() {
     const response: EbaySyncResponse = {
       mode: "live",
       syncedCount: offers.length,
-      createdCount,
-      updatedCount,
+      createdCount: newOffers.length,
+      updatedCount: existingOffers.length,
       syncedAt,
-      message: `Live eBay sync complete: ${createdCount} created, ${updatedCount} updated.`,
+      message: `Live eBay sync complete: ${offers.length} total listings (${newOffers.length} new, ${existingOffers.length} updated).`,
     };
 
     return NextResponse.json(response);

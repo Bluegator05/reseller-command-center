@@ -29,19 +29,33 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
 
   if (supabase && envReadiness.isSupabaseReady) {
     try {
+      const fetchAllActiveListings = async (): Promise<JoinedListingRecord[]> => {
+        const all: JoinedListingRecord[] = [];
+        const pageSize = 1000;
+        for (let from = 0; from < 5000; from += pageSize) {
+          const { data: page, error } = await supabase
+            .from("marketplace_listings")
+            .select("*, inventory_items(*)")
+            .in("status", ["active", "draft"])
+            .order("listed_at", { ascending: true })
+            .range(from, from + pageSize - 1);
+          if (error) throw error;
+          const rows = (page ?? []) as JoinedListingRecord[];
+          all.push(...rows);
+          if (rows.length < pageSize) break;
+        }
+        return all;
+      };
+
       const [
-        allListingsRes,
+        joinedRows,
         accountsRes,
         jobsRes,
         ordersRes,
         draftsRes,
         expensesRes,
       ] = await Promise.all([
-        supabase
-          .from("marketplace_listings")
-          .select("*, inventory_items(*)")
-          .in("status", ["active", "draft"])
-          .order("listed_at", { ascending: true }),
+        fetchAllActiveListings(),
         supabase.from("marketplace_accounts").select("*"),
         supabase
           .from("channel_jobs")
@@ -67,16 +81,11 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
           .limit(500),
       ]);
 
-      if (allListingsRes.error) {
-        throw allListingsRes.error;
-      }
-
       const accounts = (accountsRes.data ?? []) as MarketplaceAccount[];
       const ebayFeePct =
         accounts.find((a) => a.marketplace === "ebay")?.default_fee_pct ??
         DEFAULT_EBAY_FEE_PCT;
 
-      const joinedRows = (allListingsRes.data ?? []) as JoinedListingRecord[];
       const crossMap = new Map<string, CrossChannelListingSummary[]>();
       const etsyListings: MarketplaceListing[] = [];
       const channelCounts = emptyChannelCounts();
