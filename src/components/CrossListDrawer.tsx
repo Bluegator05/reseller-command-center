@@ -551,6 +551,45 @@ function CrossListDrawerInner({
                 })()}
               </div>
 
+              {/* Synced eBay Photos Preview */}
+              {(() => {
+                const photos =
+                  draft.imageUrls && draft.imageUrls.length > 0
+                    ? draft.imageUrls
+                    : row.image_urls || [];
+                if (photos.length === 0) return null;
+                return (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-[#14151A]">
+                        Photos Ready to Transfer ({photos.length})
+                      </span>
+                      <span className="text-[11px] font-mono text-[#0F766E]">
+                        Full-res eBay gallery
+                      </span>
+                    </div>
+                    <div className="flex gap-2 overflow-x-auto pb-1">
+                      {photos.slice(0, 16).map((url, idx) => (
+                        <div
+                          key={`${url}-${idx}`}
+                          className="relative w-14 h-14 rounded-lg border border-[#E4E4DD] bg-white overflow-hidden shrink-0 flex items-center justify-center p-0.5"
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={url}
+                            alt={`Photo ${idx + 1}`}
+                            className="w-full h-full object-contain"
+                          />
+                          <span className="absolute bottom-0.5 right-0.5 px-1 rounded bg-[#14151A]/75 text-white text-[9px] font-mono">
+                            {idx + 1}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Mapped Title */}
               <div>
                 <div className="flex items-center justify-between mb-1.5">

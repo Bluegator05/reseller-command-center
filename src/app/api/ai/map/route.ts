@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getDemoStore } from "@/lib/demo-store";
+import { fetchEbayItemDetails } from "@/lib/ebay";
 import { mapItemForMarketplace } from "@/lib/gemini-mapper";
 import { getSupabaseServerClient, isSupabaseConfigured } from "@/lib/supabase";
 import type {
@@ -12,6 +13,8 @@ import type {
  * POST /api/ai/map
  * Generates an AI-translated cross-listing payload (title, stripped plain text description,
  * Etsy taxonomy, SEO tags, and fee-adjusted pricing) for an inventory item.
+ * Automatically enriches full high-res photos & description from eBay `GetItem` if only
+ * a single thumbnail was synced from `GetMyeBaySelling`.
  */
 export async function POST(request: Request) {
   let body: { itemId?: string; targetMarketplace?: MarketplaceType };
@@ -32,6 +35,7 @@ export async function POST(request: Request) {
   const supabase = getSupabaseServerClient();
   let item: InventoryItem | null = null;
   let ebayListedPrice = 0;
+  let ebayExternalListingId: string | null = null;
   let targetAccount: MarketplaceAccount | undefined;
 
   if (supabase && isSupabaseConfigured()) {
@@ -39,7 +43,7 @@ export async function POST(request: Request) {
       supabase.from("inventory_items").select("*").eq("id", itemId).maybeSingle(),
       supabase
         .from("marketplace_listings")
-        .select("listed_price")
+        .select("listed_price, external_listing_id")
         .eq("item_id", itemId)
         .eq("marketplace", "ebay")
         .maybeSingle(),
@@ -55,7 +59,57 @@ export async function POST(request: Request) {
       ebayListedPrice = Number(
         listingRes.data?.listed_price ?? item.target_price
       );
+      ebayExternalListingId =
+        (listingRes.data?.external_listing_id as string | null) ?? null;
       targetAccount = (acctRes.data as MarketplaceAccount | null) ?? undefined;
+
+      // Auto-enrich full photo gallery + description + brand from eBay GetItem on demand
+      const needsEnrich =
+        ebayExternalListingId &&
+        ((item.image_urls?.length ?? 0) <= 1 ||
+          !item.description_plain?.trim() ||
+          !item.brand);
+
+      if (needsEnrich && ebayExternalListingId) {
+        const details = await fetchEbayItemDetails(ebayExternalListingId);
+        if (details) {
+          const mergedImages =
+            details.imageUrls.length >= (item.image_urls?.length ?? 0) &&
+            details.imageUrls.length > 0
+              ? details.imageUrls
+              : item.image_urls;
+          const mergedDescPlain =
+            item.description_plain?.trim() || details.descriptionPlain || null;
+          const mergedDescHtml =
+            item.description_html?.trim() || details.descriptionHtml || null;
+          const mergedBrand = item.brand || details.brand || null;
+          const mergedSpecifics =
+            Object.keys(details.itemSpecifics).length > 0
+              ? { ...(item.item_specifics || {}), ...details.itemSpecifics }
+              : item.item_specifics;
+
+          item = {
+            ...item,
+            image_urls: mergedImages,
+            description_plain: mergedDescPlain,
+            description_html: mergedDescHtml,
+            brand: mergedBrand,
+            item_specifics: mergedSpecifics,
+          };
+
+          await supabase
+            .from("inventory_items")
+            .update({
+              image_urls: mergedImages,
+              description_plain: mergedDescPlain,
+              description_html: mergedDescHtml,
+              brand: mergedBrand,
+              item_specifics: mergedSpecifics,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", item.id);
+        }
+      }
     }
   }
 
@@ -89,7 +143,10 @@ export async function POST(request: Request) {
       targetMarketplace,
       targetAccount,
     });
-    return NextResponse.json(draft);
+    return NextResponse.json({
+      ...draft,
+      imageUrls: item.image_urls || [],
+    });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Failed to map listing payload";

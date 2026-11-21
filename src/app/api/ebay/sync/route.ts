@@ -56,26 +56,46 @@ export async function POST() {
     const syncedAt = new Date().toISOString();
 
     // 1. Fetch existing inventory item IDs by SKU in chunks of 200
-    const skuToId = new Map<string, string>();
+    const skuToExisting = new Map<
+      string,
+      { id: string; imageCount: number }
+    >();
     const allSkus = offers.map((o) => o.sku);
     for (const skuChunk of chunkArray(allSkus, 200)) {
       const { data: existingRows, error: lookupError } = await supabase!
         .from("inventory_items")
-        .select("id, sku")
+        .select("id, sku, image_urls")
         .in("sku", skuChunk);
       if (lookupError) throw lookupError;
       for (const row of existingRows ?? []) {
-        skuToId.set(row.sku as string, row.id as string);
+        const imgs = Array.isArray(row.image_urls) ? row.image_urls : [];
+        skuToExisting.set(row.sku as string, {
+          id: row.id as string,
+          imageCount: imgs.length,
+        });
       }
     }
 
+    const skuToId = new Map<string, string>();
+    for (const [sku, meta] of skuToExisting.entries()) {
+      skuToId.set(sku, meta.id);
+    }
+
     const newOffers: NormalizedEbayOffer[] = [];
-    const existingOffers: Array<{ id: string; offer: NormalizedEbayOffer }> = [];
+    const existingOffers: Array<{
+      id: string;
+      existingImageCount: number;
+      offer: NormalizedEbayOffer;
+    }> = [];
 
     for (const offer of offers) {
-      const existingId = skuToId.get(offer.sku);
-      if (existingId) {
-        existingOffers.push({ id: existingId, offer });
+      const existing = skuToExisting.get(offer.sku);
+      if (existing) {
+        existingOffers.push({
+          id: existing.id,
+          existingImageCount: existing.imageCount,
+          offer,
+        });
       } else {
         newOffers.push(offer);
       }
@@ -112,18 +132,20 @@ export async function POST() {
       }
     }
 
-    // 3. Update existing SKUs in parallel chunks of 20 (preserving user COGS/bins/notes/floor)
+    // 3. Update existing SKUs in parallel chunks of 20 (preserving user COGS/bins/notes/floor & enriched full photo galleries)
     for (const batch of chunkArray(existingOffers, 20)) {
       await Promise.all(
-        batch.map(async ({ id, offer }) => {
+        batch.map(async ({ id, existingImageCount, offer }) => {
           const patch: Record<string, unknown> = {
             title: offer.title,
             condition: offer.condition,
             category_hint: offer.categoryHint,
-            image_urls: offer.imageUrls,
             status: "active",
             updated_at: syncedAt,
           };
+          if (offer.imageUrls.length >= existingImageCount && offer.imageUrls.length > 0) {
+            patch.image_urls = offer.imageUrls;
+          }
           if (offer.descriptionHtml) patch.description_html = offer.descriptionHtml;
           if (offer.descriptionPlain) patch.description_plain = offer.descriptionPlain;
           if (offer.brand) patch.brand = offer.brand;

@@ -4,6 +4,7 @@ import {
   recordDemoJob,
   updateDemoExtensionJob,
 } from "@/lib/demo-store";
+import { fetchEbayItemDetails } from "@/lib/ebay";
 import { mapItemForMarketplace } from "@/lib/gemini-mapper";
 import { roundCurrency } from "@/lib/stale-engine";
 import { getSupabaseServerClient, isSupabaseConfigured } from "@/lib/supabase";
@@ -144,7 +145,7 @@ export async function POST(request: Request) {
           .maybeSingle(),
         supabase
           .from("marketplace_listings")
-          .select("listed_price")
+          .select("listed_price, external_listing_id")
           .eq("item_id", itemId)
           .eq("marketplace", "ebay")
           .maybeSingle(),
@@ -159,6 +160,55 @@ export async function POST(request: Request) {
         item = itemRes.data as InventoryItem;
         ebayPrice = Number(listingRes.data?.listed_price ?? item.target_price);
         targetAccount = (acctRes.data as MarketplaceAccount | null) ?? undefined;
+
+        const ebayExtId =
+          (listingRes.data?.external_listing_id as string | null) ?? null;
+        if (
+          action === "create" &&
+          ebayExtId &&
+          ((item.image_urls?.length ?? 0) <= 1 ||
+            !item.description_plain?.trim() ||
+            !item.brand)
+        ) {
+          const details = await fetchEbayItemDetails(ebayExtId);
+          if (details) {
+            const mergedImages =
+              details.imageUrls.length >= (item.image_urls?.length ?? 0) &&
+              details.imageUrls.length > 0
+                ? details.imageUrls
+                : item.image_urls;
+            const mergedDescPlain =
+              item.description_plain?.trim() || details.descriptionPlain || null;
+            const mergedDescHtml =
+              item.description_html?.trim() || details.descriptionHtml || null;
+            const mergedBrand = item.brand || details.brand || null;
+            const mergedSpecifics =
+              Object.keys(details.itemSpecifics).length > 0
+                ? { ...(item.item_specifics || {}), ...details.itemSpecifics }
+                : item.item_specifics;
+
+            item = {
+              ...item,
+              image_urls: mergedImages,
+              description_plain: mergedDescPlain,
+              description_html: mergedDescHtml,
+              brand: mergedBrand,
+              item_specifics: mergedSpecifics,
+            };
+
+            await supabase
+              .from("inventory_items")
+              .update({
+                image_urls: mergedImages,
+                description_plain: mergedDescPlain,
+                description_html: mergedDescHtml,
+                brand: mergedBrand,
+                item_specifics: mergedSpecifics,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", item.id);
+          }
+        }
       }
     }
 

@@ -248,9 +248,122 @@ function stripHtmlTags(html: string): string {
   return html
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ")
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(?:p|div|li|tr|h[1-6])>/gi, "\n")
     .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+function upgradeEbayImageUrl(url: string): string {
+  const clean = decodeXmlEntities(url).trim();
+  if (!clean) return "";
+  if (/i\.ebayimg\.com/i.test(clean)) {
+    return clean
+      .replace(/\/s-l(?:64|96|140|200|225|300|400|500)\.(jpg|jpeg|png|webp)/i, "/s-l1600.$1")
+      .replace(/\$_(?:1|12|35)\.(JPG|JPEG|PNG)/i, "$_57.$1");
+  }
+  return clean;
+}
+
+export interface EbayFullItemDetails {
+  itemId: string;
+  imageUrls: string[];
+  descriptionHtml: string;
+  descriptionPlain: string;
+  brand: string | null;
+  condition: string | null;
+  categoryHint: string | null;
+  itemSpecifics: Record<string, string[]>;
+}
+
+/**
+ * Fetches full listing details from eBay Trading API `GetItem` — including ALL
+ * full-resolution photos (`<PictureURL>` array, up to 24), full HTML/plain
+ * description, Brand, and Item Specifics (`GetMyeBaySelling` only returns 1
+ * thumbnail `<GalleryURL>` and no description).
+ */
+export async function fetchEbayItemDetails(
+  itemId: string
+): Promise<EbayFullItemDetails | null> {
+  const cleanId = itemId.trim();
+  if (!cleanId || !/^\d+$/.test(cleanId)) return null;
+  if (!isEbayConfigured()) return null;
+
+  try {
+    const xml = await ebayTradingRequest(
+      "GetItem",
+      `<ItemID>${cleanId}</ItemID>
+      <DetailLevel>ReturnAll</DetailLevel>
+      <IncludeItemSpecifics>true</IncludeItemSpecifics>`
+    );
+
+    const itemBlock = extractXmlTag(xml, "Item") || xml;
+    const picBlock = extractXmlTag(itemBlock, "PictureDetails") || "";
+    const rawPics = extractAllXmlTags(picBlock, "PictureURL")
+      .map(upgradeEbayImageUrl)
+      .filter(Boolean);
+    const gallery = extractXmlTag(picBlock, "GalleryURL");
+    if (rawPics.length === 0 && gallery) {
+      const upgraded = upgradeEbayImageUrl(gallery);
+      if (upgraded) rawPics.push(upgraded);
+    }
+
+    // Deduplicate while preserving eBay's exact photo order
+    const seen = new Set<string>();
+    const imageUrls: string[] = [];
+    for (const u of rawPics) {
+      if (!seen.has(u)) {
+        seen.add(u);
+        imageUrls.push(u);
+      }
+    }
+
+    const descriptionHtml = extractXmlTag(itemBlock, "Description") || "";
+    const conditionDesc = extractXmlTag(itemBlock, "ConditionDescription") || "";
+    const strippedBody = stripHtmlTags(descriptionHtml);
+    const descriptionPlain = conditionDesc && !strippedBody.includes(conditionDesc)
+      ? `Condition notes: ${conditionDesc}\n\n${strippedBody}`.trim()
+      : strippedBody;
+
+    const specificsBlock = extractXmlTag(itemBlock, "ItemSpecifics") || "";
+    const nvlBlocks = extractAllXmlTags(specificsBlock, "NameValueList");
+    const itemSpecifics: Record<string, string[]> = {};
+    for (const nvl of nvlBlocks) {
+      const name = extractXmlTag(nvl, "Name");
+      const vals = extractAllXmlTags(nvl, "Value")
+        .map((v) => decodeXmlEntities(v))
+        .filter(Boolean);
+      if (name && vals.length > 0) {
+        itemSpecifics[name] = vals;
+      }
+    }
+
+    const brand =
+      itemSpecifics["Brand"]?.[0] ||
+      itemSpecifics["Manufacturer"]?.[0] ||
+      itemSpecifics["Designer"]?.[0] ||
+      null;
+    const condition = extractXmlTag(itemBlock, "ConditionDisplayName");
+    const categoryBlock = extractXmlTag(itemBlock, "PrimaryCategory") || "";
+    const categoryHint = extractXmlTag(categoryBlock, "CategoryName");
+
+    return {
+      itemId: cleanId,
+      imageUrls,
+      descriptionHtml,
+      descriptionPlain,
+      brand,
+      condition,
+      categoryHint,
+      itemSpecifics,
+    };
+  } catch (err) {
+    console.warn(`[ebay] GetItem(${cleanId}) warning:`, err);
+    return null;
+  }
 }
 
 interface EbayInventoryItemRecord {

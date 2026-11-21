@@ -449,6 +449,7 @@ export interface CrossListDraftPayload {
   tags: string[];
   pricing: CrossListPriceBreakdown;
   translationNotes: string[];
+  imageUrls?: string[];
 }
 
 export interface EtsyCrossListRequest {
