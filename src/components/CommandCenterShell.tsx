@@ -132,6 +132,7 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
     };
   }, [isLiveMode]);
   const [isSyncingEbay, setIsSyncingEbay] = useState(false);
+  const [isSyncingEbaySales, setIsSyncingEbaySales] = useState(false);
   const [isSyncingEtsy, setIsSyncingEtsy] = useState(false);
   const [busyListingIds, setBusyListingIds] = useState<Set<string>>(new Set());
   const [isBulkBusy, setIsBulkBusy] = useState(false);
@@ -221,6 +222,42 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
       setIsSyncingEbay(false);
     }
   }, [pushToast, refreshInventory]);
+
+  const handleSyncEbaySales = useCallback(
+    async (daysBack = 365) => {
+      setIsSyncingEbaySales(true);
+      try {
+        const res = await fetch("/api/ebay/sync-sales", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ daysBack }),
+        });
+        const payload = (await res.json()) as {
+          importedCount?: number;
+          updatedCount?: number;
+          totalFetched?: number;
+          message?: string;
+          error?: string;
+        };
+        if (!res.ok) throw new Error(payload.error || "eBay sales import failed");
+        await refreshInventory();
+        pushToast(
+          "success",
+          `eBay Sales Synced (${payload.totalFetched ?? 0} orders checked)`,
+          payload.message || "Sales ledger updated."
+        );
+      } catch (error) {
+        pushToast(
+          "error",
+          "eBay Sales Import Failed",
+          error instanceof Error ? error.message : "Unknown error"
+        );
+      } finally {
+        setIsSyncingEbaySales(false);
+      }
+    },
+    [pushToast, refreshInventory]
+  );
 
   const handleSyncEtsy = useCallback(async () => {
     setIsSyncingEtsy(true);
@@ -1045,6 +1082,9 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
           <SalesLedgerPanel
             activeItems={data.items}
             salesOrders={data.salesOrders}
+            isLiveMode={isLiveMode}
+            isSyncingEbaySales={isSyncingEbaySales}
+            onSyncEbaySales={handleSyncEbaySales}
             onTriggerWebhookSale={handleTriggerWebhookSale}
             onTriggerInboundEmail={handleTriggerInboundEmail}
             onUpdateSalesOrder={async (req: SalesOrderUpdateRequest) => {

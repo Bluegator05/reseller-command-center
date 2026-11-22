@@ -47,6 +47,25 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
         return all;
       };
 
+      const fetchAllSalesOrders = async () => {
+        const all: unknown[] = [];
+        const pageSize = 1000;
+        for (let from = 0; from < 2000; from += pageSize) {
+          const { data: page, error } = await supabase
+            .from("sales_orders")
+            .select(
+              "*, inventory_items(sku, title, cogs, prep_cost, source_location, source_type, acquired_at, bin_location, weight_oz, length_in, width_in, height_in)"
+            )
+            .order("sold_at", { ascending: false })
+            .range(from, from + pageSize - 1);
+          if (error) throw error;
+          const rows = page ?? [];
+          all.push(...rows);
+          if (rows.length < pageSize) break;
+        }
+        return { data: all };
+      };
+
       const [
         joinedRows,
         accountsRes,
@@ -62,13 +81,7 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
           .select("*, inventory_items(sku, title)")
           .order("created_at", { ascending: false })
           .limit(50),
-        supabase
-          .from("sales_orders")
-          .select(
-            "*, inventory_items(sku, title, cogs, prep_cost, source_location, source_type, acquired_at, bin_location, weight_oz, length_in, width_in, height_in)"
-          )
-          .order("sold_at", { ascending: false })
-          .limit(500),
+        fetchAllSalesOrders(),
         supabase
           .from("inventory_items")
           .select("*")

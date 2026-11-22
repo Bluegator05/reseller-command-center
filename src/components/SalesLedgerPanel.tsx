@@ -11,6 +11,7 @@ import {
   Loader2,
   Mail,
   Printer,
+  RefreshCw,
   RotateCcw,
   Send,
   ShieldCheck,
@@ -34,6 +35,9 @@ type TimeRangePreset = "all" | "7d" | "30d" | "90d" | "365d" | "custom";
 interface SalesLedgerPanelProps {
   activeItems: StaleRadarRow[];
   salesOrders: SalesOrderRecord[];
+  isLiveMode?: boolean;
+  isSyncingEbaySales?: boolean;
+  onSyncEbaySales?: (daysBack: number) => Promise<void>;
   onTriggerWebhookSale: (params: {
     itemId: string;
     marketplace: "ebay" | "etsy";
@@ -94,13 +98,18 @@ function defaultRangeDate(daysAgo: number): string {
 export function SalesLedgerPanel({
   activeItems,
   salesOrders,
+  isLiveMode = false,
+  isSyncingEbaySales = false,
+  onSyncEbaySales,
   onTriggerWebhookSale,
   onTriggerInboundEmail,
   onUpdateSalesOrder,
 }: SalesLedgerPanelProps) {
   const [subView, setSubView] = useState<"ledger" | "picklist">("ledger");
-  const [ingestMode, setIngestMode] = useState<"webhook" | "email">("webhook");
-  const [timeRange, setTimeRange] = useState<TimeRangePreset>("30d");
+  const [ingestMode, setIngestMode] = useState<"webhook" | "email">("email");
+  const [showIngestWorkbench, setShowIngestWorkbench] = useState(!isLiveMode);
+  const [ebayImportDays, setEbayImportDays] = useState<number>(365);
+  const [timeRange, setTimeRange] = useState<TimeRangePreset>("all");
   const [customStart, setCustomStart] = useState<string>(() =>
     defaultRangeDate(90)
   );
@@ -464,16 +473,51 @@ export function SalesLedgerPanel({
           </button>
         </div>
 
-        {subView === "picklist" && (
-          <button
-            type="button"
-            onClick={() => window.print()}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-white border border-[#E4E4DD] text-[#14151A] hover:border-[#0F766E] hover:text-[#0F766E] cursor-pointer"
-          >
-            <Printer className="w-3.5 h-3.5" />
-            Print Pick List
-          </button>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {onSyncEbaySales && (
+            <div className="inline-flex items-center gap-1.5 bg-white border border-[#DCE1DE] rounded-xl p-1 shadow-[0_1px_2px_rgba(20,21,26,0.03)]">
+              <select
+                value={ebayImportDays}
+                onChange={(e) => setEbayImportDays(Number(e.target.value))}
+                disabled={isSyncingEbaySales}
+                aria-label="eBay sales import range"
+                className="px-2 py-1 text-xs font-medium text-[#14151A] bg-transparent focus:outline-none cursor-pointer"
+              >
+                <option value={90}>Last 90 Days</option>
+                <option value={365}>Past Year (365d)</option>
+                <option value={730}>All Available (2 Years)</option>
+              </select>
+              <button
+                id="btn-sync-ebay-sales"
+                type="button"
+                disabled={isSyncingEbaySales}
+                onClick={async () => {
+                  await onSyncEbaySales(ebayImportDays);
+                  setTimeRange("all");
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#0F766E] text-white hover:bg-[#0B5B55] disabled:opacity-55 transition cursor-pointer"
+              >
+                {isSyncingEbaySales ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="w-3.5 h-3.5" />
+                )}
+                {isSyncingEbaySales ? "Importing eBay Sales..." : "Import eBay Sales"}
+              </button>
+            </div>
+          )}
+
+          {subView === "picklist" && (
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-white border border-[#E4E4DD] text-[#14151A] hover:border-[#0F766E] hover:text-[#0F766E] cursor-pointer"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              Print Pick List
+            </button>
+          )}
+        </div>
       </div>
 
       {subView === "picklist" ? (
@@ -747,41 +791,51 @@ export function SalesLedgerPanel({
       {/* Anti-Double-Sell Ingestion Workbench (Webhooks + Inbound Email Parser) */}
       <div className="bg-white border border-[#E4E4DD] rounded-xl shadow-[0_1px_2px_rgba(20,21,26,0.03)] overflow-hidden">
         <div className="px-4 py-3 border-b border-[#ECECE6] bg-[#FAF9F6] flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowIngestWorkbench((v) => !v)}
+            className="flex items-center gap-2 text-left cursor-pointer"
+          >
             <ShieldCheck className="w-4 h-4 text-[#0F766E]" />
             <h2 className="text-xs font-semibold uppercase tracking-[0.06em] text-[#14151A]">
-              Anti-Double-Sell Sale Ingestion &amp; Auto-Delist Cascade
+              Order-Email Parser &amp; Auto-Delist Tools
             </h2>
-          </div>
+            <span className="text-[11px] font-medium text-[#5C606B]">
+              {showIngestWorkbench ? "Hide ▴" : "Expand ▾"}
+            </span>
+          </button>
 
-          <div className="flex items-center gap-1 bg-[#F1F1EC] p-0.5 rounded-lg">
-            <button
-              type="button"
-              onClick={() => setIngestMode("webhook")}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold cursor-pointer ${
-                ingestMode === "webhook"
-                  ? "bg-white text-[#14151A] shadow-xs"
-                  : "text-[#5C606B]"
-              }`}
-            >
-              <Webhook className="w-3.5 h-3.5" />
-              eBay / Etsy Webhooks
-            </button>
-            <button
-              type="button"
-              onClick={() => setIngestMode("email")}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold cursor-pointer ${
-                ingestMode === "email"
-                  ? "bg-white text-[#14151A] shadow-xs"
-                  : "text-[#5C606B]"
-              }`}
-            >
-              <Mail className="w-3.5 h-3.5" />
-              Inbound Order-Email Parser
-            </button>
-          </div>
+          {showIngestWorkbench && (
+            <div className="flex items-center gap-1 bg-[#F1F1EC] p-0.5 rounded-lg">
+              <button
+                type="button"
+                onClick={() => setIngestMode("email")}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold cursor-pointer ${
+                  ingestMode === "email"
+                    ? "bg-white text-[#14151A] shadow-xs"
+                    : "text-[#5C606B]"
+                }`}
+              >
+                <Mail className="w-3.5 h-3.5" />
+                Inbound Order-Email Parser
+              </button>
+              <button
+                type="button"
+                onClick={() => setIngestMode("webhook")}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold cursor-pointer ${
+                  ingestMode === "webhook"
+                    ? "bg-white text-[#14151A] shadow-xs"
+                    : "text-[#5C606B]"
+                }`}
+              >
+                <Webhook className="w-3.5 h-3.5" />
+                eBay / Etsy Webhooks
+              </button>
+            </div>
+          )}
         </div>
 
+        {showIngestWorkbench && (
         <div className="p-5">
           {ingestMode === "webhook" ? (
             <div className="space-y-4">
@@ -946,6 +1000,7 @@ export function SalesLedgerPanel({
             </div>
           )}
         </div>
+        )}
       </div>
 
       {/* Sales Orders Ledger Table */}

@@ -1195,3 +1195,301 @@ export async function promoteEbayListing(params: {
     throw err;
   }
 }
+
+export interface NormalizedEbaySaleLine {
+  externalOrderId: string;
+  legacyItemId: string | null;
+  sku: string;
+  title: string;
+  quantity: number;
+  grossSalePrice: number;
+  marketplaceFees: number;
+  shippingCost: number;
+  refundAmount: number;
+  fulfillmentStatus: "to_ship" | "shipped" | "returned" | "partial_refund" | "unpaid";
+  trackingNumber: string | null;
+  shippedAt: string | null;
+  returnReason: string | null;
+  soldAt: string;
+}
+
+interface EbayFulfillmentOrder {
+  orderId: string;
+  creationDate: string;
+  lastModifiedDate?: string;
+  orderFulfillmentStatus?: "FULFILLED" | "IN_PROGRESS" | "NOT_STARTED";
+  orderPaymentStatus?: "PAID" | "PENDING" | "FAILED" | "FULLY_REFUNDED" | "PARTIALLY_REFUNDED";
+  cancelStatus?: {
+    cancelState?: "CANCELED" | "IN_PROGRESS" | "NONE_REQUESTED";
+    cancelRequests?: Array<{ cancelReason?: string }>;
+  };
+  pricingSummary?: {
+    priceSubtotal?: { value?: string };
+    deliveryCost?: { value?: string };
+    total?: { value?: string };
+  };
+  totalMarketplaceFee?: { value?: string };
+  paymentSummary?: {
+    refunds?: Array<{
+      refundStatus?: string;
+      amount?: { value?: string };
+    }>;
+  };
+  lineItems?: Array<{
+    lineItemId?: string;
+    legacyItemId?: string;
+    sku?: string;
+    title?: string;
+    quantity?: number;
+    lineItemCost?: { value?: string };
+    deliveryCost?: { shippingCost?: { value?: string } };
+    total?: { value?: string };
+    lineItemFulfillmentStatus?: "FULFILLED" | "IN_PROGRESS" | "NOT_STARTED";
+  }>;
+}
+
+/**
+ * Fetches historical eBay Seller orders via the Fulfillment API (supports up to 2 years
+ * with exact eBay final-value fees & refund totals), falling back to Trading API `GetOrders`
+ * (up to 90 days) if Fulfillment API scope is unavailable.
+ */
+export async function fetchEbaySalesOrders(daysBack = 365): Promise<{
+  orders: NormalizedEbaySaleLine[];
+  sourceApi: "fulfillment_v1" | "trading_get_orders";
+  daysBack: number;
+}> {
+  const clampedDays = Math.max(7, Math.min(730, Math.round(daysBack)));
+  const endDate = new Date();
+  const startDate = new Date(endDate.getTime() - clampedDays * 24 * 60 * 60 * 1000);
+  const startIso = startDate.toISOString();
+  const endIso = endDate.toISOString();
+
+  // 1. Try eBay Fulfillment API (supports up to 2 years + exact totalMarketplaceFee + refunds)
+  try {
+    const rawOrders: EbayFulfillmentOrder[] = [];
+    const limit = 200;
+    const filter = `creationdate:[${startIso}..${endIso}]`;
+
+    for (let page = 0; page < 10; page++) {
+      const offset = page * limit;
+      const res = await ebayRequest<{
+        orders?: EbayFulfillmentOrder[];
+        total?: number;
+      }>(
+        `/sell/fulfillment/v1/order?limit=${limit}&offset=${offset}&filter=${encodeURIComponent(filter)}`
+      );
+      const batch = res.orders || [];
+      rawOrders.push(...batch);
+      if (batch.length < limit || (res.total && rawOrders.length >= res.total)) {
+        break;
+      }
+    }
+
+    const lines: NormalizedEbaySaleLine[] = [];
+
+    for (const order of rawOrders) {
+      const items = order.lineItems || [];
+      if (items.length === 0) continue;
+
+      const orderShipping = Number(order.pricingSummary?.deliveryCost?.value || 0);
+      const orderFeeRaw =
+        order.totalMarketplaceFee?.value !== undefined
+          ? Number(order.totalMarketplaceFee.value)
+          : null;
+      const orderRefundTotal = (order.paymentSummary?.refunds || [])
+        .filter((r) => r.refundStatus !== "FAILED")
+        .reduce((sum, r) => sum + (Number(r.amount?.value) || 0), 0);
+
+      const rawLineGrosses = items.map((li) => {
+        const itemCost = Number(li.lineItemCost?.value || 0);
+        const shipCost =
+          li.deliveryCost?.shippingCost?.value !== undefined
+            ? Number(li.deliveryCost.shippingCost.value)
+            : items.length === 1
+              ? orderShipping
+              : 0;
+        return { itemCost, shipCost, gross: roundCurrency(itemCost + shipCost) };
+      });
+      const totalOrderGross = rawLineGrosses.reduce((s, x) => s + x.gross, 0);
+
+      const isCanceled = order.cancelStatus?.cancelState === "CANCELED";
+      const cancelReason =
+        order.cancelStatus?.cancelRequests?.[0]?.cancelReason || null;
+
+      items.forEach((li, idx) => {
+        const { gross, shipCost } = rawLineGrosses[idx];
+        const share =
+          totalOrderGross > 0 ? gross / totalOrderGross : 1 / items.length;
+        const fees =
+          orderFeeRaw !== null && Number.isFinite(orderFeeRaw)
+            ? roundCurrency(orderFeeRaw * share)
+            : roundCurrency(gross * 0.1325 + (idx === 0 ? 0.3 : 0));
+        let refund = roundCurrency(orderRefundTotal * share);
+
+        let status: NormalizedEbaySaleLine["fulfillmentStatus"] = "to_ship";
+        if (
+          isCanceled ||
+          order.orderPaymentStatus === "FAILED" ||
+          order.orderPaymentStatus === "PENDING"
+        ) {
+          status = "unpaid";
+          if (refund === 0 && isCanceled) refund = gross;
+        } else if (
+          order.orderPaymentStatus === "FULLY_REFUNDED" ||
+          (refund > 0 && refund >= gross - 0.01)
+        ) {
+          status = "returned";
+        } else if (
+          order.orderPaymentStatus === "PARTIALLY_REFUNDED" ||
+          refund > 0
+        ) {
+          status = "partial_refund";
+        } else if (
+          li.lineItemFulfillmentStatus === "FULFILLED" ||
+          order.orderFulfillmentStatus === "FULFILLED"
+        ) {
+          status = "shipped";
+        }
+
+        const extOrderId =
+          items.length === 1 ? order.orderId : `${order.orderId}#${idx + 1}`;
+        const legacyId = li.legacyItemId?.trim() || null;
+        const sku =
+          (li.sku || "").trim() ||
+          (legacyId ? `EBAY-${legacyId}` : `EBAY-ORD-${extOrderId}`);
+
+        lines.push({
+          externalOrderId: extOrderId,
+          legacyItemId: legacyId,
+          sku,
+          title: (li.title || "eBay Sold Item").trim(),
+          quantity: Math.max(1, Number(li.quantity || 1)),
+          grossSalePrice: gross,
+          marketplaceFees: fees,
+          shippingCost: roundCurrency(shipCost),
+          refundAmount: refund,
+          fulfillmentStatus: status,
+          trackingNumber: null,
+          shippedAt:
+            status === "shipped"
+              ? order.lastModifiedDate || order.creationDate
+              : null,
+          returnReason: cancelReason,
+          soldAt: order.creationDate || new Date().toISOString(),
+        });
+      });
+    }
+
+    return {
+      orders: lines,
+      sourceApi: "fulfillment_v1",
+      daysBack: clampedDays,
+    };
+  } catch (fulfillmentErr) {
+    const msg =
+      fulfillmentErr instanceof Error
+        ? fulfillmentErr.message
+        : String(fulfillmentErr);
+    // Only fall back to Trading API GetOrders on permission/scope issues
+    if (!msg.includes("401") && !msg.includes("403") && !msg.includes("scope")) {
+      throw fulfillmentErr;
+    }
+  }
+
+  // 2. Fallback: eBay Trading API GetOrders (supports up to 90 days)
+  const tradingDays = Math.min(90, clampedDays);
+  const tradingStart = new Date(
+    endDate.getTime() - tradingDays * 24 * 60 * 60 * 1000
+  ).toISOString();
+  const lines: NormalizedEbaySaleLine[] = [];
+
+  for (let page = 1; page <= 10; page++) {
+    const xml = await ebayTradingRequest(
+      "GetOrders",
+      `<CreateTimeFrom>${tradingStart}</CreateTimeFrom>
+      <CreateTimeTo>${endIso}</CreateTimeTo>
+      <OrderRole>Seller</OrderRole>
+      <OrderStatus>All</OrderStatus>
+      <Pagination>
+        <EntriesPerPage>100</EntriesPerPage>
+        <PageNumber>${page}</PageNumber>
+      </Pagination>`
+    );
+
+    const orderBlocks = extractAllXmlTags(xml, "Order");
+    for (const ob of orderBlocks) {
+      const orderId = extractXmlTag(ob, "OrderID") || "";
+      if (!orderId) continue;
+      const orderStatus = (extractXmlTag(ob, "OrderStatus") || "").toLowerCase();
+      const createdTime =
+        extractXmlTag(ob, "CreatedTime") || new Date().toISOString();
+      const shippedTime = extractXmlTag(ob, "ShippedTime") || null;
+      const orderShipCost = Number(
+        extractXmlTag(
+          extractXmlTag(ob, "ShippingServiceSelected") || "",
+          "ShippingServiceCost"
+        ) || 0
+      );
+
+      const txBlocks = extractAllXmlTags(ob, "Transaction");
+      txBlocks.forEach((tx, idx) => {
+        const itemBlock = extractXmlTag(tx, "Item") || "";
+        const legacyId = extractXmlTag(itemBlock, "ItemID") || null;
+        const title = decodeXmlEntities(
+          extractXmlTag(itemBlock, "Title") || "eBay Sold Item"
+        );
+        const sku =
+          decodeXmlEntities(
+            extractXmlTag(itemBlock, "SKU") || extractXmlTag(tx, "SKU") || ""
+          ).trim() ||
+          (legacyId ? `EBAY-${legacyId}` : `EBAY-ORD-${orderId}`);
+        const qty = Math.max(1, Number(extractXmlTag(tx, "QuantityPurchased") || 1));
+        const unitPrice = Number(extractXmlTag(tx, "TransactionPrice") || 0);
+        const lineShip = idx === 0 ? orderShipCost : 0;
+        const gross = roundCurrency(unitPrice * qty + lineShip);
+        const fvf = Number(extractXmlTag(tx, "FinalValueFee") || 0);
+        const fees =
+          fvf > 0
+            ? roundCurrency(fvf)
+            : roundCurrency(gross * 0.1325 + (idx === 0 ? 0.3 : 0));
+        const tracking =
+          extractXmlTag(tx, "ShipmentTrackingNumber") || null;
+
+        let status: NormalizedEbaySaleLine["fulfillmentStatus"] = "to_ship";
+        if (orderStatus.includes("cancel") || orderStatus.includes("inactive")) {
+          status = "unpaid";
+        } else if (shippedTime || tracking) {
+          status = "shipped";
+        }
+
+        lines.push({
+          externalOrderId:
+            txBlocks.length === 1 ? orderId : `${orderId}#${idx + 1}`,
+          legacyItemId: legacyId,
+          sku,
+          title,
+          quantity: qty,
+          grossSalePrice: gross,
+          marketplaceFees: fees,
+          shippingCost: roundCurrency(lineShip),
+          refundAmount: status === "unpaid" ? gross : 0,
+          fulfillmentStatus: status,
+          trackingNumber: tracking,
+          shippedAt: shippedTime,
+          returnReason: null,
+          soldAt: createdTime,
+        });
+      });
+    }
+
+    const hasMore = (extractXmlTag(xml, "HasMoreOrders") || "").toLowerCase();
+    if (hasMore !== "true" || orderBlocks.length === 0) break;
+  }
+
+  return {
+    orders: lines,
+    sourceApi: "trading_get_orders",
+    daysBack: tradingDays,
+  };
+}
+
