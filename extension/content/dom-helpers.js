@@ -244,29 +244,36 @@
   function isVisibleElement(el) {
     if (!el || el.disabled) return false;
     if (el.closest("#rcc-companion-hud")) return false;
+    if (typeof el.checkVisibility === "function") {
+      try {
+        if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) {
+          return false;
+        }
+      } catch {
+        // fallback below
+      }
+    }
     const style = window.getComputedStyle(el);
     if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
       return false;
     }
     const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
-  }
+    if (rect.width <= 0 || rect.height <= 0) return false;
 
-  function simulateFullClick(el) {
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-    const opts = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy };
-    try {
-      el.dispatchEvent(new PointerEvent("pointerdown", opts));
-      el.dispatchEvent(new MouseEvent("mousedown", opts));
-      el.dispatchEvent(new PointerEvent("pointerup", opts));
-      el.dispatchEvent(new MouseEvent("mouseup", opts));
-      el.dispatchEvent(new MouseEvent("click", opts));
-    } catch {
-      el.click();
+    // Ensure no ancestor clips this element to 0 height/width (e.g. max-height:0; overflow:hidden)
+    let p = el.parentElement;
+    for (let depth = 0; depth < 6 && p && p !== document.body; depth++) {
+      const ps = window.getComputedStyle(p);
+      if (ps.display === "none" || ps.visibility === "hidden" || ps.opacity === "0") {
+        return false;
+      }
+      if (ps.overflow === "hidden" || ps.overflowY === "hidden" || ps.overflow === "clip") {
+        const pr = p.getBoundingClientRect();
+        if (pr.height <= 2 || pr.width <= 2) return false;
+      }
+      p = p.parentElement;
     }
+    return true;
   }
 
   function simulateHoverAndClick(el) {
@@ -276,19 +283,46 @@
     const cy = rect.top + rect.height / 2;
     const opts = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy };
     try {
-      el.dispatchEvent(new PointerEvent("pointerenter", { ...opts, bubbles: false }));
       el.dispatchEvent(new MouseEvent("mouseenter", { ...opts, bubbles: false }));
       el.dispatchEvent(new MouseEvent("mouseover", opts));
     } catch {
       // ignore
     }
-    simulateFullClick(el);
+    el.click();
+  }
+
+  function resolveClickableTrigger(el) {
+    if (!el) return null;
+    let cur = el;
+    let best = el;
+    for (let depth = 0; depth < 4 && cur && cur !== document.body; depth++) {
+      const rect = cur.getBoundingClientRect();
+      const cls = String(cur.className || "").toLowerCase();
+      const cs = window.getComputedStyle(cur);
+      const isControl =
+        cur.tagName === "BUTTON" ||
+        cur.tagName === "SELECT" ||
+        cur.getAttribute("role") === "button" ||
+        cur.getAttribute("role") === "combobox" ||
+        cur.hasAttribute("tabindex") ||
+        cls.includes("dropdown__selector") ||
+        cls.includes("dropdown-toggle") ||
+        cls.includes("select");
+      if (rect.height >= 26 && rect.height <= 76 && rect.width >= 90 && rect.width <= 600) {
+        if (isControl || cs.cursor === "pointer") {
+          best = cur;
+          if (isControl) break;
+        }
+      }
+      cur = cur.parentElement;
+    }
+    return best;
   }
 
   /**
    * Class-agnostic visible trigger finder: locates ANY visible box whose text
    * or input placeholder matches `patterns` (e.g. "Select Category", "Select Size",
-   * "Select Condition") regardless of Poshmark/Mercari/FB CSS class names.
+   * "Select Condition") and resolves its clickable parent trigger.
    */
   async function findDropdownTriggerByText(patterns, timeoutMs = 3000) {
     const list = Array.isArray(patterns) ? patterns : [patterns];
@@ -319,29 +353,12 @@
         if (!txt || txt.length > 55) continue;
 
         if (matchesPattern(txt)) {
-          // Walk up at most 2 levels if we hit an inner <span> inside the bordered dropdown box
-          let target = el;
-          let p = el.parentElement;
-          for (let depth = 0; depth < 2 && p; depth++) {
-            const pr = p.getBoundingClientRect();
-            const pt = (p.textContent || "").replace(/\s+/g, " ").trim();
-            if (
-              pr.height >= 28 &&
-              pr.height <= 72 &&
-              pr.width >= 90 &&
-              pr.width <= 600 &&
-              pt.length <= 65 &&
-              matchesPattern(pt)
-            ) {
-              target = p;
-            }
-            p = p.parentElement;
-          }
-          const tr = target.getBoundingClientRect();
+          const clickable = resolveClickableTrigger(el);
+          const tr = clickable.getBoundingClientRect();
           const area = tr.width * tr.height;
           if (area < bestArea) {
             bestArea = area;
-            best = target;
+            best = clickable;
           }
         }
       }
@@ -361,9 +378,34 @@
   }
 
   /**
-   * Locates the currently open dropdown menu / popover container.
+   * Locates currently open dropdown menus (globally OR inside a trigger's parent wrapper).
    */
-  function findOpenDropdownContainers() {
+  function findOpenDropdownContainers(trigger = null) {
+    const openMenus = [];
+    const seen = new Set();
+    const pushIfOpen = (el) => {
+      if (!el || seen.has(el) || !isVisibleElement(el)) return;
+      seen.add(el);
+      openMenus.push(el);
+    };
+
+    // 1. Check sibling menus inside the trigger's closest dropdown wrapper first!
+    if (trigger) {
+      const wrapper =
+        trigger.closest('[class*="dropdown"], [class*="select"], [data-test]') ||
+        trigger.parentElement?.parentElement;
+      if (wrapper) {
+        for (const el of Array.from(
+          wrapper.querySelectorAll('ul, [role="listbox"], [role="menu"], [class*="menu"], [class*="list"], [class*="options"]')
+        )) {
+          if (el !== trigger && !el.contains(trigger)) {
+            pushIfOpen(el);
+          }
+        }
+      }
+    }
+
+    // 2. Check global portals / modals / popovers
     const selectors = [
       '.dropdown__menu',
       '[class*="dropdown__menu"]',
@@ -374,12 +416,9 @@
       'div[class*="popover"]',
       '.modal__body',
     ];
-    const openMenus = [];
     for (const sel of selectors) {
       for (const el of Array.from(document.querySelectorAll(sel))) {
-        if (isVisibleElement(el)) {
-          openMenus.push(el);
-        }
+        pushIfOpen(el);
       }
     }
     return openMenus;
@@ -417,36 +456,40 @@
 
   /**
    * Finds and clicks the best visible option matching `targetLabel` inside
-   * newly-opened DOM elements (DOM-diff) or open dropdown menus.
+   * newly-opened DOM elements (DOM-diff) OR open dropdown menus next to `trigger`.
    */
-  async function clickMatchingOption(targetLabel, timeoutMs = 2400, beforeSnapshot = null) {
+  async function clickMatchingOption(targetLabel, timeoutMs = 2400, beforeSnapshot = null, trigger = null) {
     if (!targetLabel) return { ok: false, sampleOptions: [] };
     const start = Date.now();
     let lastSample = [];
 
     while (Date.now() - start < timeoutMs) {
-      let candidates = [];
+      const candidateSet = new Set();
 
       if (beforeSnapshot) {
         const allNow = Array.from(
           document.querySelectorAll("li, a, button, div, span, label, p")
         );
-        candidates = allNow.filter((el) => !beforeSnapshot.has(el) && isVisibleElement(el));
-      }
-
-      if (candidates.length === 0) {
-        const containers = findOpenDropdownContainers();
-        for (const c of containers) {
-          candidates.push(
-            ...Array.from(
-              c.querySelectorAll(
-                '[role="option"], [role="menuitem"], [role="menuitemradio"], li, button, a, label, div, span'
-              )
-            )
-          );
+        for (const el of allNow) {
+          if (!beforeSnapshot.has(el) && isVisibleElement(el)) {
+            candidateSet.add(el);
+          }
         }
       }
 
+      // Always also inspect open dropdown containers (handles pre-mounted sibling menus!)
+      const containers = findOpenDropdownContainers(trigger);
+      for (const c of containers) {
+        for (const el of Array.from(
+          c.querySelectorAll(
+            '[role="option"], [role="menuitem"], [role="menuitemradio"], li, button, a, label, div, span'
+          )
+        )) {
+          if (isVisibleElement(el)) candidateSet.add(el);
+        }
+      }
+
+      const candidates = Array.from(candidateSet);
       if (candidates.length > 0) {
         const uniqTexts = [];
         for (const el of candidates) {
@@ -499,9 +542,20 @@
     return false;
   }
 
+  function describeAncestors(el) {
+    const chain = [];
+    let cur = el;
+    for (let i = 0; i < 4 && cur && cur !== document.body; i++) {
+      const cls = String(cur.className || "").trim().split(/\s+/).slice(0, 3).join(".");
+      const dt = cur.getAttribute("data-test") || cur.getAttribute("data-et-name") || "";
+      chain.push(`${cur.tagName}${cls ? "." + cls : ""}${dt ? `[${dt}]` : ""}`);
+      cur = cur.parentElement;
+    }
+    return chain.join(" < ");
+  }
+
   /**
-   * Opens a custom dropdown/combobox trigger using DOM-diff detection so it works
-   * across any Vue/React custom dropdown regardless of CSS classes.
+   * Opens a custom dropdown/combobox trigger using clean click + DOM-diff + sibling menu lookup.
    */
   async function selectDropdownSequence(triggerSelectors, labels, triggerTextPatterns = null, debugOut = null) {
     const cleanLabels = (labels || []).filter((l) =>
@@ -532,13 +586,27 @@
     const beforeSnapshot = snapshotVisibleElements();
     trigger.scrollIntoView({ block: "center" });
     await sleep(150);
-    simulateFullClick(trigger);
+    // Single clean click first (avoids mousedown+click double-toggle!)
+    trigger.click();
     await sleep(550);
+
+    // If nothing opened, also try clicking the first child or parent wrapper
+    if (
+      findOpenDropdownContainers(trigger).length === 0 &&
+      Array.from(document.querySelectorAll("li, a, button, div")).filter(
+        (el) => !beforeSnapshot.has(el) && isVisibleElement(el)
+      ).length === 0
+    ) {
+      if (trigger.parentElement) {
+        trigger.parentElement.click();
+        await sleep(500);
+      }
+    }
 
     let clickedCount = 0;
     let lastSamples = [];
     for (const label of cleanLabels) {
-      const stepRes = await clickMatchingOption(label, 2200, beforeSnapshot);
+      const stepRes = await clickMatchingOption(label, 2200, beforeSnapshot, trigger);
       lastSamples = stepRes.sampleOptions || [];
       if (stepRes.ok) {
         clickedCount += 1;
@@ -546,7 +614,7 @@
       } else {
         if (debugOut) {
           debugOut.push(
-            `Trigger <${trigger.tagName}.${String(trigger.className || "").slice(0, 40)}> ("${beforeText}") missed ${JSON.stringify(label)}; saw: [${lastSamples.slice(0, 8).join(", ")}]`
+            `Trigger (${describeAncestors(trigger)}) ("${beforeText}") missed ${JSON.stringify(label)}; saw: [${lastSamples.slice(0, 8).join(", ")}]`
           );
         }
         break;
@@ -567,7 +635,6 @@
     injectImageBlobs,
     sleep,
     clickButtonByText,
-    simulateFullClick,
     simulateHoverAndClick,
     findDropdownTriggerByText,
     clickMatchingOption,

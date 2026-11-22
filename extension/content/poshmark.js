@@ -262,7 +262,7 @@
           secondaryLabel: anyMissed ? "Copy Dropdown Debug Info (to fix any missed field)" : null,
           onSecondaryAction: anyMissed
             ? async () => {
-                const txt = `Poshmark v0.8.2 Debug (${catLabel}):\n${debugLog.join("\n")}`;
+                const txt = `Poshmark v0.8.3 Debug (${catLabel}):\n${debugLog.join("\n")}`;
                 try {
                   await navigator.clipboard.writeText(txt);
                   const btn = document.getElementById("rcc-hud-secondary");
