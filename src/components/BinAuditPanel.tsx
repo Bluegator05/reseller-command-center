@@ -49,105 +49,170 @@ interface BinEntry {
   totalRetail: number;
 }
 
+const CLOTHING_HINT_RE =
+  /\b(clothing|apparel|shirt|t-shirt|tshirt|tee|polo|blouse|top|sweater|sweatshirt|hoodie|pullover|cardigan|jacket|coat|blazer|vest|parka|windbreaker|fleece|pants|jeans|denim|trousers|slacks|chinos|shorts|leggings|joggers|sweatpants|skirt|dress|romper|jumpsuit|suit|tuxedo|jersey|flannel|henley|tunic|tank|camisole|bodysuit|swimsuit|bikini|trunks|robe|pajama|sleepwear|lingerie|bra|underwear|socks|tie|necktie|scarf|beanie|hat|cap|gloves|belt|womens|women's|mens|men's|boys|girls|youth|kids|size\s*(?:xxs|xs|s|m|l|xl|xxl|2xl|3xl|4xl))\b/i;
+
+function normalizeExplicitBin(raw: string): string | null {
+  const cleaned = raw
+    .replace(/^[\s()[\]{}*.,;:\-–—/\\]+|[\s()[\]{}*.,;:\-–—/\\]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned || !/[A-Za-z0-9]/.test(cleaned)) return null;
+  if (cleaned.toUpperCase() === "UNASSIGNED") return null;
+
+  const shelfLetter = cleaned.match(
+    /\bshelf\s*[-#:]?\s*([A-Za-z])(?=\b|[^A-Za-z]|$)/i
+  );
+  if (shelfLetter) return `Shelf ${shelfLetter[1].toUpperCase()}`;
+
+  const shelfNum = cleaned.match(/\bshelf\s*[-#:]?\s*(\d{1,2})\b/i);
+  if (shelfNum) return `Shelf ${shelfNum[1]}`;
+
+  const garageBin = cleaned.match(
+    /(?:^|[^A-Za-z0-9])G\s*[-#]?([1-9])(?=$|[^A-Za-z0-9])/i
+  );
+  if (garageBin) return `G${garageBin[1]}`;
+
+  if (/^clothes?$/i.test(cleaned)) return "Clothes";
+
+  return cleaned;
+}
+
 /**
- * Parses custom reseller SKUs formatted as:
- *   "Where bought, Date, Bin/Location, SKU #"
- * Examples:
- *   "SA828. 9/16/25 Shelf L - 2044"           -> bin: "SHELF L", source: "SA828", date: "9/16/25", item#: "2044"
- *   "SA828 9/16/25. Shelf M - 7042"           -> bin: "SHELF M", source: "SA828", date: "9/16/25", item#: "7042"
- *   "SA898. 9/16/25 G3 (1 Garage / 7 storage)"-> bin: "G3",      source: "SA898", date: "9/16/25"
- *   "Mom3. 44. 9/8/25"                        -> bin: "BIN 44",  source: "Mom3",  date: "9/8/25"
+ * Parses custom reseller SKUs into clean physical locations:
+ *  1) Any "Shelf <Letter>" anywhere in SKU -> "Shelf A", "Shelf E", "Shelf F", ...
+ *  2) Garage bins G1–G9 anywhere in SKU    -> "G1", "G2", "G3", "G4", "G5", ...
+ *  3) Explicit named containers (Tote, Rack, Closet, Box, Drawer, Tub, Cabinet, Bay)
+ *  4) Clothing without a shelf (numeric-only SKUs or apparel items) -> "Clothes"
+ *  5) Punctuation/asterisk-only or unlocated items -> "Unassigned"
  */
 function parseCustomSkuLocation(
   skuRaw: string | null | undefined,
-  explicitBinRaw: string | null | undefined
+  explicitBinRaw: string | null | undefined,
+  titleRaw?: string | null,
+  categoryHintRaw?: string | null
 ): ParsedSkuMeta {
-  const explicitBin = (explicitBinRaw || "").trim();
   const sku = (skuRaw || "").trim();
+  const explicit = explicitBinRaw ? normalizeExplicitBin(explicitBinRaw) : null;
 
-  // Extract date token like 9/16/25, 09/16/2025, 9-16-25
+  // Extract date & source metadata for display badges
   const dateRe = /\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b/;
   const dateMatch = sku.match(dateRe);
-
   let source: string | null = null;
   let dateStr: string | null = null;
-  let itemNumber: string | null = null;
-  let extractedBin = "";
 
   if (dateMatch && dateMatch.index !== undefined) {
     dateStr = dateMatch[1];
     const before = sku
       .slice(0, dateMatch.index)
-      .replace(/[.,;:\-–—]+$/g, "")
+      .replace(/^[\s()[\]{}*.,;:\-–—/\\]+|[\s()[\]{}*.,;:\-–—/\\]+$/g, "")
       .trim();
-    const after = sku
-      .slice(dateMatch.index + dateMatch[0].length)
-      .replace(/^[.,;:\-–—\s]+/g, "")
-      .trim();
-
     if (before) {
-      // Check if "before" has "Source. Location" (e.g. "Mom3. 44")
-      const beforeParts = before
-        .split(/[.,]+/)
+      const firstToken = before
+        .split(/[.,()]+/)
         .map((s) => s.trim())
-        .filter(Boolean);
-      source = beforeParts[0] || before;
-      if (!after && beforeParts.length >= 2) {
-        const preLoc = beforeParts.slice(1).join(" ").trim();
-        if (preLoc) {
-          extractedBin = /^\d+$/.test(preLoc) ? `BIN ${preLoc}` : preLoc;
-        }
+        .find((s) => /[A-Za-z0-9]/.test(s));
+      if (
+        firstToken &&
+        !/^shelf\b/i.test(firstToken) &&
+        !/^G[1-9]$/i.test(firstToken) &&
+        !/^\d+$/.test(firstToken)
+      ) {
+        source = firstToken;
       }
-    }
-
-    if (after) {
-      // Remove parenthetical notes like "(1 Garage / 7 storage)" from the grouping key
-      let locPart = after.replace(/\([^)]*\)/g, " ").trim();
-
-      // Strip trailing SKU # after dash, hash, comma, or period (e.g. "- 2044", "#2044", ", 2044", ". 2044")
-      const dashMatch = locPart.match(/^(.*?)\s*(?:[-–—#,.])\s*(\d{2,6}[A-Za-z]?)\s*$/);
-      if (dashMatch && dashMatch[1].trim()) {
-        locPart = dashMatch[1].trim();
-        itemNumber = dashMatch[2].trim();
-      } else {
-        // Also handle space-separated trailing 3-6 digit SKU number (e.g. "Shelf L 2044")
-        const trailNum = locPart.match(/^(.+?)\s+(\d{3,6})\s*$/);
-        if (trailNum && trailNum[1].trim()) {
-          locPart = trailNum[1].trim();
-          itemNumber = trailNum[2].trim();
-        }
-      }
-
-      locPart = locPart
-        .replace(/^[.,;:\-–—\s]+|[.,;:\-–—\s]+$/g, "")
-        .replace(/\s+/g, " ")
-        .trim();
-
-      if (locPart) {
-        extractedBin = /^\d{1,3}$/.test(locPart) ? `BIN ${locPart}` : locPart;
-      }
-    }
-  } else if (sku) {
-    // Fallback when no date appears in SKU: look for explicit Shelf/Bin/Tote/Rack/Garage/Box keywords
-    const kwMatch = sku.match(
-      /\b((?:shelf|bin|tote|rack|box|tub|drawer|closet|garage|storage|row|aisle|cabinet|bay)\s*[A-Za-z0-9-]+)\b/i
-    );
-    if (kwMatch) {
-      extractedBin = kwMatch[1].replace(/\s+/g, " ").trim();
     }
   }
 
-  const chosen =
-    explicitBin && explicitBin.toUpperCase() !== "UNASSIGNED"
-      ? explicitBin
-      : extractedBin || "UNASSIGNED";
+  // Respect explicit manually-assigned bin_location if clean
+  if (explicit) {
+    return { bin: explicit, source, dateStr, itemNumber: null };
+  }
 
-  return {
-    bin: chosen.replace(/\s+/g, " ").trim().toUpperCase(),
-    source,
-    dateStr,
-    itemNumber,
-  };
+  // Priority 1: "Shelf <Letter>" anywhere in SKU (handles ") 2 SHELF A/7 STORAGE", "0001 SHELF F", "Shelf L - 2044")
+  const shelfLetterMatch = sku.match(
+    /\bshelf\s*[-#:]?\s*([A-Za-z])(?=\b|[^A-Za-z]|$)/i
+  );
+  if (shelfLetterMatch) {
+    return {
+      bin: `Shelf ${shelfLetterMatch[1].toUpperCase()}`,
+      source,
+      dateStr,
+      itemNumber: null,
+    };
+  }
+  const shelfNumMatch = sku.match(/\bshelf\s*[-#:]?\s*(\d{1,2})\b/i);
+  if (shelfNumMatch) {
+    return {
+      bin: `Shelf ${shelfNumMatch[1]}`,
+      source,
+      dateStr,
+      itemNumber: null,
+    };
+  }
+
+  // Priority 2: Garage bins G1, G2, G3, G4, G5 (up to G9)
+  const garageBinMatch =
+    sku.match(/(?:^|[^A-Za-z0-9])G\s*[-#]?([1-9])(?=$|[^A-Za-z0-9])/i) ||
+    sku.match(/\bgarage\s*(?:bin\s*)?#?\s*([1-9])\b/i);
+  if (garageBinMatch) {
+    return {
+      bin: `G${garageBinMatch[1]}`,
+      source,
+      dateStr,
+      itemNumber: null,
+    };
+  }
+
+  // Priority 3: Other explicit named containers (ignores "/16 storage" count notes)
+  const namedBinMatch = sku.match(
+    /\b((?:tote|rack|closet|box|drawer|tub|cabinet|bay)\s*[-#:]?\s*[A-Za-z0-9]+)\b/i
+  );
+  if (namedBinMatch) {
+    const label = namedBinMatch[1]
+      .replace(/[-#:]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    const formatted = label.replace(
+      /\b([a-z])([a-z]*)/gi,
+      (_, first: string, rest: string) =>
+        first.toUpperCase() + rest.toLowerCase()
+    );
+    return { bin: formatted, source, dateStr, itemNumber: null };
+  }
+
+  // Priority 4: Clothing without a Shelf / Garage bin -> "Clothes"
+  // Strip storage count notes like "(1 Garage / 7 storage)", dates, and punctuation/asterisks
+  const cleanedTokensStr = sku
+    .replace(/\([^)]*(?:garage|storage)[^)]*\)/gi, " ")
+    .replace(/\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/g, " ")
+    .replace(/[()[\]{}*.,;:\-–—/\\#]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const isPureNumericSku = /^\d+(?:\s+\d+)*$/.test(cleanedTokensStr);
+  const tokens = cleanedTokensStr.split(" ").filter(Boolean);
+  const hasOnlyNumberLocation =
+    isPureNumericSku ||
+    (tokens.length === 2 &&
+      /^[A-Za-z]{1,6}\d{0,4}$/.test(tokens[0]) &&
+      /^\d{1,6}$/.test(tokens[1]));
+
+  const clothingText = `${titleRaw || ""} ${categoryHintRaw || ""}`;
+  const isClothingByText = CLOTHING_HINT_RE.test(clothingText);
+
+  if (isPureNumericSku || isClothingByText || hasOnlyNumberLocation) {
+    return { bin: "Clothes", source, dateStr, itemNumber: null };
+  }
+
+  return { bin: "Unassigned", source, dateStr, itemNumber: null };
+}
+
+function getBinSortRank(bin: string): number {
+  if (/^Shelf\b/i.test(bin)) return 0;
+  if (/^G[1-9]\d?$/i.test(bin)) return 1;
+  if (bin === "Clothes") return 2;
+  if (bin === "Unassigned") return 4;
+  return 3;
 }
 
 export function BinAuditPanel({
@@ -178,7 +243,12 @@ export function BinAuditPanel({
     };
 
     for (const r of activeItems) {
-      const parsed = parseCustomSkuLocation(r.sku, r.bin_location);
+      const parsed = parseCustomSkuLocation(
+        r.sku,
+        r.bin_location,
+        r.title,
+        r.category_hint
+      );
       add(
         parsed.bin,
         {
@@ -203,7 +273,12 @@ export function BinAuditPanel({
 
     for (const d of draftItems) {
       const basis = (d.cogs || 0) + (d.prep_cost || 0);
-      const parsed = parseCustomSkuLocation(d.sku, d.bin_location);
+      const parsed = parseCustomSkuLocation(
+        d.sku,
+        d.bin_location,
+        d.title,
+        d.category_hint
+      );
       add(
         parsed.bin,
         {
@@ -226,8 +301,8 @@ export function BinAuditPanel({
     }
 
     return [...map.values()].sort((a, b) => {
-      if (a.bin === "UNASSIGNED") return 1;
-      if (b.bin === "UNASSIGNED") return -1;
+      const rankDiff = getBinSortRank(a.bin) - getBinSortRank(b.bin);
+      if (rankDiff !== 0) return rankDiff;
       return a.bin.localeCompare(b.bin, undefined, { numeric: true });
     });
   }, [activeItems, draftItems]);
@@ -283,7 +358,9 @@ export function BinAuditPanel({
     setExpandedBins(new Set());
   };
 
-  const assignedBinCount = allBins.filter((b) => b.bin !== "UNASSIGNED").length;
+  const assignedBinCount = allBins.filter(
+    (b) => b.bin !== "Unassigned"
+  ).length;
 
   return (
     <div className="space-y-4">
@@ -299,9 +376,10 @@ export function BinAuditPanel({
                 {activeItems.length + draftItems.length} SKUs)
               </h2>
               <p className="text-xs text-[#5C606B] mt-0.5">
-                Automatically grouped by the Bin / Shelf location inside your
-                custom SKU (Source · Date · <strong>Location</strong> · SKU #).
-                Click any location below to expand everything stored there.
+                Grouped by <strong>Shelf A–Z</strong>, Garage bins{" "}
+                <strong>G1–G5</strong>, and <strong>Clothes</strong>{" "}
+                (number-labeled rotating boxes). Click any location to expand
+                everything stored there.
               </p>
             </div>
           </div>
@@ -388,7 +466,16 @@ export function BinAuditPanel({
         <div className="space-y-2.5">
           {visibleBins.map((b) => {
             const open = isBinOpen(b.bin);
-            const isUnassigned = b.bin === "UNASSIGNED";
+            const isUnassigned = b.bin === "Unassigned";
+            const isGarage = /^G[1-9]\d?$/i.test(b.bin);
+            const isClothes = b.bin === "Clothes";
+            const badgeClass = isUnassigned
+              ? "bg-[#E5E7EB] text-[#4B5563]"
+              : isGarage
+              ? "bg-[#1D4ED8] text-white"
+              : isClothes
+              ? "bg-[#6D28D9] text-white"
+              : "bg-[#0F766E] text-white";
             return (
               <section
                 key={b.bin}
@@ -413,14 +500,15 @@ export function BinAuditPanel({
                       <ChevronRight className="w-4 h-4 text-[#5C606B] shrink-0" />
                     )}
                     <span
-                      className={`px-2.5 py-1 rounded-lg font-mono text-xs font-bold ${
-                        isUnassigned
-                          ? "bg-[#E5E7EB] text-[#4B5563]"
-                          : "bg-[#0F766E] text-white"
-                      }`}
+                      className={`px-2.5 py-1 rounded-lg font-mono text-xs font-bold ${badgeClass}`}
                     >
                       {b.bin}
                     </span>
+                    {isGarage && (
+                      <span className="px-1.5 py-0.5 rounded bg-[#DBEAFE] text-[#1E40AF] text-[10px] font-semibold">
+                        Garage
+                      </span>
+                    )}
                     <span className="text-xs font-mono font-semibold text-[#14151A]">
                       {b.items.length} item{b.items.length === 1 ? "" : "s"}
                     </span>
