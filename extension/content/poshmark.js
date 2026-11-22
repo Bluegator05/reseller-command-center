@@ -589,7 +589,7 @@
           console.log("[RCC Poshmark v0.9.3]", debugLog.join(" | "));
         }
 
-        // 7. Auto-Publish: If Category & Size are populated, click "Next" -> "List This Item"!
+        // 7. Auto-Publish: Next -> List This Item -> optional Fragile Item Detected (Publish Listing -> Publish)!
         if (categoryMatched && sizeMatched) {
           showRccHud({
             title: `Publishing to Poshmark (${payload.sku || "SKU"})`,
@@ -602,16 +602,33 @@
 
           const clickedNext = await clickButtonByText([/^next$/i], 3500);
           if (clickedNext) {
-            await sleep(1400);
-            // Final confirmation screen: click "List This Item" (or "List" / "Next")
+            await sleep(900);
+            // Share Listing screen: strictly wait for "List This Item" (never re-click Next!)
             const clickedList = await clickButtonByText(
-              [/^list this item$/i, /^list item$/i, /^list$/i, /^next$/i],
-              4500
+              [/^list this item$/i, /^list item$/i],
+              6000
             );
             if (clickedList) {
               showRccHud({
+                title: `Submitting to Poshmark (${payload.sku || "SKU"})`,
+                message: `Clicked List This Item — checking for Fragile Item confirmation...`,
+                tone: "info",
+              });
+
+              // Handle Poshmark's 2-step "Fragile Item Detected" modal if it pops up
+              await sleep(1000);
+              const clickedPublishListing = await clickButtonByText(
+                [/^publish listing$/i],
+                3500
+              );
+              if (clickedPublishListing) {
+                await sleep(800);
+                await clickButtonByText([/^publish$/i], 3500);
+              }
+
+              showRccHud({
                 title: `Listed on Poshmark! (${payload.sku || "SKU"})`,
-                message: `Submitted to Poshmark — automatically syncing live link back to Command Center...`,
+                message: `Published to Poshmark — automatically syncing live link back to Command Center...`,
                 tone: "success",
               });
               sendResponse({ ok: true, autoPublished: true });
