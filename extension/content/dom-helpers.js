@@ -61,14 +61,92 @@
   }
 
   /**
+   * Pads non-square images onto a crisp 1:1 white square canvas (up to 1600x1600)
+   * so Poshmark's mandatory 1:1 cropper never chops off the top/bottom or sides of an item.
+   * Already-square images (within 1.5%) are returned untouched.
+   */
+  async function padBlobToSquare(blob, maxSize = 1600) {
+    let bmp = null;
+    let objectUrl = null;
+    try {
+      let source = null;
+      let w = 0;
+      let h = 0;
+
+      if (typeof createImageBitmap === "function") {
+        bmp = await createImageBitmap(blob);
+        source = bmp;
+        w = bmp.width;
+        h = bmp.height;
+      } else {
+        objectUrl = URL.createObjectURL(blob);
+        const img = await new Promise((resolve, reject) => {
+          const el = new Image();
+          el.onload = () => resolve(el);
+          el.onerror = reject;
+          el.src = objectUrl;
+        });
+        source = img;
+        w = img.naturalWidth || img.width;
+        h = img.naturalHeight || img.height;
+      }
+
+      if (!w || !h) return blob;
+      const maxDim = Math.max(w, h);
+      if (Math.abs(w - h) / maxDim <= 0.015) {
+        return blob; // Already square — preserve original bytes untouched
+      }
+
+      const size = Math.min(maxSize, maxDim);
+      const scale = size / maxDim;
+      const drawW = Math.round(w * scale);
+      const drawH = Math.round(h * scale);
+      const offsetX = Math.round((size - drawW) / 2);
+      const offsetY = Math.round((size - drawH) / 2);
+
+      const canvas = document.createElement("canvas");
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return blob;
+
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, size, size);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(source, offsetX, offsetY, drawW, drawH);
+
+      const squared = await new Promise((resolve) =>
+        canvas.toBlob((out) => resolve(out || blob), "image/jpeg", 0.92)
+      );
+      return squared;
+    } catch {
+      return blob;
+    } finally {
+      if (bmp && typeof bmp.close === "function") {
+        try {
+          bmp.close();
+        } catch {
+          // ignore
+        }
+      }
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    }
+  }
+
+  /**
    * Downloads master CDN images through the MV3 background service worker
    * (bypassing page CORS) and injects them into a file input via DataTransfer.
+   * Pass `{ squarePad: true }` for Poshmark so non-square photos are fitted into 1:1 squares without cropping.
    */
-  async function injectImageBlobs(fileInput, imageUrls, maxPhotos = 16) {
+  async function injectImageBlobs(fileInput, imageUrls, maxPhotos = 16, options = {}) {
     if (!fileInput || !Array.isArray(imageUrls) || imageUrls.length === 0) {
       return 0;
     }
 
+    const squarePad = Boolean(options && options.squarePad);
     const dt = new DataTransfer();
     let count = 0;
 
@@ -86,13 +164,18 @@
         for (let b = 0; b < binary.length; b++) {
           bytes[b] = binary.charCodeAt(b);
         }
-        const mime = res.mimeType || "image/jpeg";
+        const origMime = res.mimeType || "image/jpeg";
+        let finalBlob = new Blob([bytes], { type: origMime });
+        if (squarePad) {
+          finalBlob = await padBlobToSquare(finalBlob, 1600);
+        }
+        const mime = finalBlob.type || origMime;
         const ext = mime.includes("png")
           ? "png"
           : mime.includes("webp")
             ? "webp"
             : "jpg";
-        const file = new File([bytes], `rcc-photo-${i + 1}.${ext}`, {
+        const file = new File([finalBlob], `rcc-photo-${i + 1}.${ext}`, {
           type: mime,
         });
         dt.items.add(file);

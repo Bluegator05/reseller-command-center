@@ -384,7 +384,8 @@
         const uploadedCount = await injectImageBlobs(
           fileInput,
           payload.imageUrls || [],
-          16
+          16,
+          { squarePad: true }
         );
 
         // If Poshmark opens the cover-photo crop modal, auto-click "Apply"
