@@ -78,40 +78,68 @@
           setNativeValue(descInput, String(payload.descriptionPlain).slice(0, 1500));
         }
 
-        // 3. Auto-select Poshmark Category (Department -> Category -> Subcategory)
-        const catSequence = [sc.department, sc.category, sc.subcategory].filter(Boolean);
+        // 3. Auto-select Poshmark Category ("Select Category" -> Department -> Category)
+        const mainCatSteps = [sc.department, sc.category].filter(Boolean);
         let categoryMatched = false;
-        if (catSequence.length > 0) {
+        if (mainCatSteps.length > 0) {
           categoryMatched = await selectDropdownSequence(
             [
               '[data-et-name="select_category"]',
               '[data-vv-name="category"]',
               'div[class*="category"] .dropdown__selector',
-              'button[aria-label*="Category"]',
             ],
-            catSequence
+            mainCatSteps,
+            [/^select category$/i]
+          );
+          await sleep(500);
+        }
+
+        // 3b. Optional Subcategory ("Select Subcategory")
+        if (categoryMatched && sc.subcategory) {
+          await selectDropdownSequence(
+            ['[data-et-name="select_subcategory"]', 'div[class*="subcategory"] .dropdown__selector'],
+            [sc.subcategory],
+            [/^select subcategory/i]
           );
           await sleep(400);
         }
 
-        // 4. Auto-select Poshmark Size (defaults to OS for Home/Bags/Crafts/Electronics)
+        // 4. Auto-select Poshmark Size ("Select Size" — only enabled after Category is chosen)
         let sizeMatched = false;
-        if (sc.sizeLabel) {
+        if (categoryMatched && sc.sizeLabel) {
+          const sizeTargets =
+            sc.sizeLabel.toUpperCase() === "OS"
+              ? [["OS", "One Size", "One Size Fits All"]]
+              : [[sc.sizeLabel]];
           sizeMatched = await selectDropdownSequence(
             [
               '[data-et-name="select_size"]',
               '[data-vv-name="size"]',
               'div[class*="size"] .dropdown__selector',
-              'button[aria-label*="Size"]',
             ],
-            [sc.sizeLabel === "OS" ? "OS" : sc.sizeLabel, "One Size"]
+            sizeTargets,
+            [/^select size$/i]
           );
-          await sleep(300);
+          await sleep(400);
         }
 
-        // 5. Set NWT ("New With Tags") button if applicable
-        if (sc.conditionLabel && /new with tags|nwt/i.test(sc.conditionLabel)) {
-          await clickButtonByText([/^yes$/i, /^new with tags$/i], 1200);
+        // 5. Auto-select Poshmark 2026 Condition dropdown ("Select Condition")
+        let conditionMatched = false;
+        if (sc.conditionLabel) {
+          const isNew = /new with tags|nwt|brand new/i.test(sc.conditionLabel);
+          const condTargets = isNew
+            ? [["New With Tags", "NWT", "Brand New", "New"]]
+            : [["Good", "Gently Used", "Pre-owned", "Like New", "Fair"]];
+          conditionMatched = await selectDropdownSequence(
+            [
+              '[data-et-name="select_condition"]',
+              '[data-vv-name="condition"]',
+              'div[class*="condition"] .dropdown__selector',
+            ],
+            condTargets,
+            [/^select condition$/i]
+          );
+          await sleep(350);
         }
 
         // 6. Brand & Whole-Dollar Prices
@@ -123,26 +151,41 @@
           setNativeValue(brandInput, payload.brand);
         }
 
-        const originalPriceInput = await waitForSelector(
-          ['input[data-vv-name="originalPrice"]', 'input[name="original_price"]'],
-          2000
-        );
-        if (originalPriceInput && payload.targetPrice) {
-          setNativeValue(originalPriceInput, Math.max(3, Math.round(Number(payload.targetPrice))));
-        }
-
         const listingPriceInput = await waitForSelector(
-          ['input[data-vv-name="listingPrice"]', 'input[name="listing_price"]'],
+          ['input[data-vv-name="listingPrice"]', 'input[name="listing_price"]', 'input[placeholder*="Listing Price"]'],
           3000
         );
         if (listingPriceInput && payload.suggestedPrice) {
-          setNativeValue(listingPriceInput, Math.max(3, Math.round(Number(payload.suggestedPrice))));
+          // Clicking Listing Price on Poshmark 2026 may open a Pricing modal with Original Price + Listing Price + Done
+          listingPriceInput.scrollIntoView({ block: "center" });
+          listingPriceInput.click();
+          await sleep(450);
+
+          const modalOrig = await waitForSelector(
+            ['.modal input[data-vv-name="originalPrice"]', 'input[data-vv-name="originalPrice"]', 'input[name="original_price"]'],
+            1200
+          );
+          if (modalOrig && payload.targetPrice) {
+            setNativeValue(modalOrig, Math.max(3, Math.round(Number(payload.targetPrice))));
+          }
+
+          const modalPrice =
+            document.querySelector('.modal input[data-vv-name="listingPrice"]') ||
+            listingPriceInput;
+          setNativeValue(modalPrice, Math.max(3, Math.round(Number(payload.suggestedPrice))));
+
+          await sleep(300);
+          // Close Pricing modal if open by clicking its "Done" button (never Seller Fee link!)
+          await clickButtonByText([/^done$/i], 1200);
+          await sleep(300);
         }
 
+        const catLabel = [sc.department, sc.category, sc.subcategory].filter(Boolean).join(" › ");
         const fieldSummary = [
           `${uploadedCount} photos`,
-          categoryMatched ? `Category ✓ (${catSequence.join(" › ")})` : `Category: pick "${catSequence.join(" › ") || "category"}"`,
+          categoryMatched ? `Category ✓ (${catLabel})` : `Category: pick "${catLabel || "category"}"`,
           sizeMatched ? `Size ✓ (${sc.sizeLabel})` : sc.sizeLabel ? `Size: pick "${sc.sizeLabel}"` : null,
+          conditionMatched ? `Condition ✓` : `Condition: pick "${sc.conditionLabel || "Pre-owned"}"`,
         ]
           .filter(Boolean)
           .join(" · ");

@@ -206,8 +206,19 @@
     const b = normalizeLabel(targetText);
     if (!a || !b) return 0;
     if (a === b) return 1.0;
+
+    // Short labels (e.g., "OS", "S", "M", "L", "XL", "8") MUST NOT substring-match inside longer words like "Poshmark"!
+    if (b.length <= 3) {
+      const words = a.split(" ");
+      if (words.includes(b)) return 0.92;
+      return 0;
+    }
+
     if (a.startsWith(b) || b.startsWith(a)) return 0.9;
-    if (a.includes(b) || b.includes(a)) return 0.82;
+    // Only allow includes if target appears as whole word(s), not inside unrelated words
+    const wordRe = new RegExp(`\\b${b.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
+    if (wordRe.test(a)) return 0.85;
+
     const tokA = new Set(a.split(" ").filter((t) => t.length >= 2));
     const tokB = new Set(b.split(" ").filter((t) => t.length >= 2));
     if (tokA.size === 0 || tokB.size === 0) return 0;
@@ -218,39 +229,129 @@
     return overlap / Math.max(tokA.size, tokB.size);
   }
 
+  function isVisibleElement(el) {
+    if (!el || el.disabled) return false;
+    if (el.closest("#rcc-companion-hud")) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+      return false;
+    }
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
   /**
-   * Finds and clicks the best visible option matching `targetLabel` inside
-   * dropdown menus, listboxes, or native <select> elements.
+   * Finds a visible dropdown container/button by its placeholder or current label text
+   * (e.g. "Select Category", "Select Subcategory", "Select Size", "Select Condition").
    */
-  async function clickMatchingOption(targetLabel, timeoutMs = 2800, rootEl = document) {
-    if (!targetLabel) return false;
+  async function findDropdownTriggerByText(patterns, timeoutMs = 3000) {
+    const list = Array.isArray(patterns) ? patterns : [patterns];
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       const candidates = Array.from(
-        rootEl.querySelectorAll(
-          '[role="option"], [role="menuitem"], [role="menuitemradio"], li, button, a, label, span[data-test], div[role="button"]'
+        document.querySelectorAll(
+          '[data-test*="dropdown"], .dropdown__selector, [role="combobox"], [role="button"], button, div[tabindex], div[class*="dropdown"], div[class*="select"]'
         )
       );
+      let best = null;
+      let bestArea = Infinity;
+
+      for (const el of candidates) {
+        if (!isVisibleElement(el)) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.height > 85 || rect.height < 22 || rect.width < 60) continue;
+        const txt = (el.textContent || "").replace(/\s+/g, " ").trim();
+        if (!txt || txt.length > 60) continue;
+        const matched = list.some((p) =>
+          p instanceof RegExp ? p.test(txt) : txt.toLowerCase().includes(String(p).toLowerCase())
+        );
+        if (matched) {
+          const area = rect.width * rect.height;
+          if (area < bestArea) {
+            bestArea = area;
+            best = el;
+          }
+        }
+      }
+      if (best) return best;
+      await sleep(200);
+    }
+    return null;
+  }
+
+  /**
+   * Locates the currently open dropdown menu / popover container so option clicks
+   * NEVER stray onto unrelated links (like "Poshmark's Seller fee").
+   */
+  function findOpenDropdownContainers() {
+    const selectors = [
+      '.dropdown__menu',
+      '[class*="dropdown__menu"]',
+      '[class*="dropdown-menu"]',
+      '[role="listbox"]',
+      '[role="menu"]',
+      'ul[class*="menu"]',
+      'div[class*="popover"]',
+      '.modal__body',
+    ];
+    const openMenus = [];
+    for (const sel of selectors) {
+      for (const el of Array.from(document.querySelectorAll(sel))) {
+        if (isVisibleElement(el)) {
+          openMenus.push(el);
+        }
+      }
+    }
+    return openMenus;
+  }
+
+  /**
+   * Finds and clicks the best visible option matching `targetLabel` inside
+   * currently open dropdown menus/listboxes (never clicking unrelated <a> links!).
+   */
+  async function clickMatchingOption(targetLabel, timeoutMs = 2800, rootEl = null) {
+    if (!targetLabel) return false;
+    const labels = Array.isArray(targetLabel) ? targetLabel : [targetLabel];
+    const start = Date.now();
+
+    while (Date.now() - start < timeoutMs) {
+      const containers = rootEl ? [rootEl] : findOpenDropdownContainers();
+      const scopes = containers.length > 0 ? containers : [document];
+
       let bestEl = null;
       let bestScore = 0;
 
-      for (const el of candidates) {
-        if (el.disabled || el.closest("#rcc-companion-hud")) continue;
-        const rect = el.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) continue;
-        // Skip huge container elements so we click the specific leaf option
-        if (rect.height > 90) continue;
-        const txt = (el.textContent || "").replace(/\s+/g, " ").trim();
-        if (!txt || txt.length > 70) continue;
+      for (const scope of scopes) {
+        // Only allow <a> tags when scoped strictly inside an open dropdown container
+        const itemSelector =
+          containers.length > 0 || rootEl
+            ? '[role="option"], [role="menuitem"], [role="menuitemradio"], li, button, a, label, div[class*="option"], div[class*="item"], span'
+            : '[role="option"], [role="menuitem"], [role="menuitemradio"], li[role], button, label';
 
-        const score = scoreOptionText(txt, targetLabel);
-        if (score > bestScore) {
-          bestScore = score;
-          bestEl = el;
+        const candidates = Array.from(scope.querySelectorAll(itemSelector));
+        for (const el of candidates) {
+          if (!isVisibleElement(el)) continue;
+          const rect = el.getBoundingClientRect();
+          if (rect.height > 76 || rect.height < 16) continue;
+
+          // Never click help/fee/external links
+          const txt = (el.textContent || "").replace(/\s+/g, " ").trim();
+          if (!txt || txt.length > 60) continue;
+          if (/seller fee|learn about|learn more|help center|terms|privacy/i.test(txt)) {
+            continue;
+          }
+
+          for (const lbl of labels) {
+            const score = scoreOptionText(txt, lbl);
+            if (score > bestScore) {
+              bestScore = score;
+              bestEl = el;
+            }
+          }
         }
       }
 
-      if (bestEl && bestScore >= 0.72) {
+      if (bestEl && bestScore >= 0.78) {
         bestEl.scrollIntoView({ block: "nearest" });
         bestEl.click();
         return true;
@@ -265,16 +366,19 @@
    */
   function selectNativeOption(selectEl, targetLabel) {
     if (!selectEl || selectEl.tagName !== "SELECT" || !targetLabel) return false;
+    const labels = Array.isArray(targetLabel) ? targetLabel : [targetLabel];
     let bestOpt = null;
     let bestScore = 0;
     for (const opt of Array.from(selectEl.options)) {
-      const score = scoreOptionText(opt.textContent || opt.label || opt.value, targetLabel);
-      if (score > bestScore) {
-        bestScore = score;
-        bestOpt = opt;
+      for (const lbl of labels) {
+        const score = scoreOptionText(opt.textContent || opt.label || opt.value, lbl);
+        if (score > bestScore) {
+          bestScore = score;
+          bestOpt = opt;
+        }
       }
     }
-    if (bestOpt && bestScore >= 0.65) {
+    if (bestOpt && bestScore >= 0.72) {
       selectEl.value = bestOpt.value;
       selectEl.dispatchEvent(new Event("input", { bubbles: true }));
       selectEl.dispatchEvent(new Event("change", { bubbles: true }));
@@ -284,35 +388,48 @@
   }
 
   /**
-   * Opens a custom dropdown/combobox trigger and clicks through 1 or more cascading
-   * option labels (e.g., Department -> Category -> Subcategory).
+   * Opens a custom dropdown/combobox trigger (by CSS selector or visible label text)
+   * and clicks through 1 or more cascading option labels (e.g., Department -> Category).
    */
-  async function selectDropdownSequence(triggerSelectors, labels) {
-    const cleanLabels = (labels || []).filter((l) => Boolean(l && String(l).trim()));
+  async function selectDropdownSequence(triggerSelectors, labels, triggerTextPatterns = null) {
+    const cleanLabels = (labels || []).filter((l) =>
+      Array.isArray(l) ? l.length > 0 : Boolean(l && String(l).trim())
+    );
     if (cleanLabels.length === 0) return false;
 
-    const trigger = await waitForSelector(triggerSelectors, 2500);
-    if (!trigger) return false;
+    let trigger = null;
+    if (triggerTextPatterns) {
+      trigger = await findDropdownTriggerByText(triggerTextPatterns, 2200);
+    }
+    if (!trigger && triggerSelectors) {
+      trigger = await waitForSelector(triggerSelectors, 2200);
+    }
+    if (!trigger || !isVisibleElement(trigger)) return false;
+
+    const beforeText = (trigger.textContent || "").trim();
 
     if (trigger.tagName === "SELECT") {
-      return selectNativeOption(trigger, cleanLabels[cleanLabels.length - 1]);
+      const last = cleanLabels[cleanLabels.length - 1];
+      return selectNativeOption(trigger, last);
     }
 
     trigger.scrollIntoView({ block: "center" });
     trigger.click();
     await sleep(450);
 
-    let matchedAny = false;
+    let clickedCount = 0;
     for (const label of cleanLabels) {
-      const ok = await clickMatchingOption(label, 2500);
+      const ok = await clickMatchingOption(label, 2200);
       if (ok) {
-        matchedAny = true;
+        clickedCount += 1;
         await sleep(450);
       } else {
         break;
       }
     }
-    return matchedAny;
+
+    const afterText = (trigger.textContent || "").trim();
+    return clickedCount > 0 && (afterText !== beforeText || clickedCount === cleanLabels.length);
   }
 
   window.__rccHelpers = {
@@ -321,6 +438,7 @@
     injectImageBlobs,
     sleep,
     clickButtonByText,
+    findDropdownTriggerByText,
     clickMatchingOption,
     selectNativeOption,
     selectDropdownSequence,
