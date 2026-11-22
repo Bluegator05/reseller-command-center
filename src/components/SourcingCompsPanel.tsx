@@ -87,7 +87,7 @@ export function SourcingCompsPanel({
   const [estSalePrice, setEstSalePrice] = useState("75");
   const [targetChannel, setTargetChannel] = useState<MarketplaceType>("ebay");
   const [fbLocalOnly, setFbLocalOnly] = useState(false);
-  const [buyerPaysShip, setBuyerPaysShip] = useState(false);
+  const [buyerPaysShip, setBuyerPaysShip] = useState(true);
   const [weightOz, setWeightOz] = useState("18");
   const [lengthIn, setLengthIn] = useState("10");
   const [widthIn, setWidthIn] = useState("8");
@@ -731,11 +731,11 @@ export function SourcingCompsPanel({
                   <label className="inline-flex items-center gap-1.5 cursor-pointer text-[#444B52]">
                     <input
                       type="checkbox"
-                      checked={buyerPaysShip}
-                      onChange={(e) => setBuyerPaysShip(e.target.checked)}
+                      checked={!buyerPaysShip}
+                      onChange={(e) => setBuyerPaysShip(!e.target.checked)}
                       className="accent-[#0F766E]"
                     />
-                    <span>Buyer Pays Ship</span>
+                    <span>Offer Free Shipping (Seller Pays)</span>
                   </label>
                 </div>
               </div>
@@ -941,7 +941,13 @@ export function SourcingCompsPanel({
             <div className="text-[11px] font-mono text-[#444B52] flex flex-wrap gap-x-3 gap-y-1 pt-1">
               <span>Sale {fmtMoney(math.sale)}</span>
               <span>Fees -{fmtMoney(math.fees)}</span>
-              <span>Ship -{fmtMoney(math.shipCost)}</span>
+              <span>
+                {fbLocalOnly
+                  ? "Local Pickup ($0 Ship)"
+                  : buyerPaysShip
+                    ? "Ship $0.00 (Buyer Pays Calc)"
+                    : `Free Ship -${fmtMoney(math.shipCost)}`}
+              </span>
               <span>Basis -{fmtMoney(math.totalBasis)}</span>
             </div>
           </div>
