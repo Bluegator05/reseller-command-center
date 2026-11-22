@@ -68,9 +68,9 @@ function normalizeExplicitBin(raw: string): string | null {
   const shelfNum = cleaned.match(/\bshelf\s*[-#:]?\s*(\d{1,2})\b/i);
   if (shelfNum) return `Shelf ${shelfNum[1]}`;
 
-  const garageBin = cleaned.match(
-    /(?:^|[^A-Za-z0-9])G\s*[-#]?([1-9])(?=$|[^A-Za-z0-9])/i
-  );
+  const garageBin =
+    cleaned.match(/(?:^|[^A-Za-z0-9])G\s*[-#]?([1-9])(?=$|[^A-Za-z0-9])/i) ||
+    cleaned.match(/(?:^|[^A-Za-z0-9])G([1-9])\d{2,4}(?=$|[^A-Za-z0-9])/i);
   if (garageBin) return `G${garageBin[1]}`;
 
   if (/\bcloset\b/i.test(cleaned)) return "Closet";
@@ -83,7 +83,7 @@ function normalizeExplicitBin(raw: string): string | null {
 /**
  * Parses custom reseller SKUs into clean physical locations:
  *  1) Any "Shelf <Letter>" anywhere in SKU -> "Shelf A", "Shelf E", "Shelf F", ...
- *  2) Garage bins G1–G9 anywhere in SKU    -> "G1", "G2", "G3", "G4", "G5", ...
+ *  2) Garage bins G1–G9 anywhere in SKU (incl. G4001, G4016) -> "G1"–"G5", ...
  *  3) Any "Closet" anywhere in SKU         -> "Closet" (all floor items in shipping closet)
  *  4) Any "Rack" anywhere in SKU           -> "Rack"   (all items on shipping rack)
  *  5) Other explicit named containers (Tote, Box, Drawer, Tub, Cabinet, Bay)
@@ -119,7 +119,7 @@ function parseCustomSkuLocation(
       if (
         firstToken &&
         !/^shelf\b/i.test(firstToken) &&
-        !/^G[1-9]$/i.test(firstToken) &&
+        !/^G[1-9](?:\d{2,4})?$/i.test(firstToken) &&
         !/^(?:closet|rack)\b/i.test(firstToken) &&
         !/^\d+$/.test(firstToken)
       ) {
@@ -155,9 +155,10 @@ function parseCustomSkuLocation(
     };
   }
 
-  // Priority 2: Garage bins G1, G2, G3, G4, G5 (up to G9)
+  // Priority 2: Garage bins G1–G9 (handles both "G3" and concatenated codes like "G4001", "G4016")
   const garageBinMatch =
     sku.match(/(?:^|[^A-Za-z0-9])G\s*[-#]?([1-9])(?=$|[^A-Za-z0-9])/i) ||
+    sku.match(/(?:^|[^A-Za-z0-9])G([1-9])\d{2,4}(?=$|[^A-Za-z0-9])/i) ||
     sku.match(/\bgarage\s*(?:bin\s*)?#?\s*([1-9])\b/i);
   if (garageBinMatch) {
     return {
