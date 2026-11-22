@@ -78,6 +78,8 @@
           setNativeValue(descInput, String(payload.descriptionPlain).slice(0, 1500));
         }
 
+        const debugLog = [];
+
         // 3. Auto-select Poshmark Category ("Select Category" -> Department -> Category)
         const mainCatSteps = [sc.department, sc.category].filter(Boolean);
         let categoryMatched = false;
@@ -89,9 +91,10 @@
               'div[class*="category"] .dropdown__selector',
             ],
             mainCatSteps,
-            [/^select category$/i]
+            [/^select category$/i],
+            debugLog
           );
-          await sleep(500);
+          await sleep(600);
         }
 
         // 3b. Optional Subcategory ("Select Subcategory")
@@ -99,9 +102,10 @@
           await selectDropdownSequence(
             ['[data-et-name="select_subcategory"]', 'div[class*="subcategory"] .dropdown__selector'],
             [sc.subcategory],
-            [/^select subcategory/i]
+            [/^select subcategory/i],
+            debugLog
           );
-          await sleep(400);
+          await sleep(450);
         }
 
         // 4. Auto-select Poshmark Size ("Select Size" — only enabled after Category is chosen)
@@ -118,9 +122,10 @@
               'div[class*="size"] .dropdown__selector',
             ],
             sizeTargets,
-            [/^select size$/i]
+            [/^select size$/i],
+            debugLog
           );
-          await sleep(400);
+          await sleep(450);
         }
 
         // 5. Auto-select Poshmark 2026 Condition dropdown ("Select Condition")
@@ -137,7 +142,8 @@
               'div[class*="condition"] .dropdown__selector',
             ],
             condTargets,
-            [/^select condition$/i]
+            [/^select condition$/i],
+            debugLog
           );
           await sleep(350);
         }
@@ -156,10 +162,9 @@
           3000
         );
         if (listingPriceInput && payload.suggestedPrice) {
-          // Clicking Listing Price on Poshmark 2026 may open a Pricing modal with Original Price + Listing Price + Done
           listingPriceInput.scrollIntoView({ block: "center" });
           listingPriceInput.click();
-          await sleep(450);
+          await sleep(500);
 
           const modalOrig = await waitForSelector(
             ['.modal input[data-vv-name="originalPrice"]', 'input[data-vv-name="originalPrice"]', 'input[name="original_price"]'],
@@ -174,9 +179,8 @@
             listingPriceInput;
           setNativeValue(modalPrice, Math.max(3, Math.round(Number(payload.suggestedPrice))));
 
-          await sleep(300);
-          // Close Pricing modal if open by clicking its "Done" button (never Seller Fee link!)
-          await clickButtonByText([/^done$/i], 1200);
+          await sleep(350);
+          await clickButtonByText([/^done$/i], 1400);
           await sleep(300);
         }
 
@@ -189,6 +193,11 @@
         ]
           .filter(Boolean)
           .join(" · ");
+
+        const anyMissed = !categoryMatched || !sizeMatched || !conditionMatched;
+        if (debugLog.length > 0) {
+          console.log("[RCC Poshmark v0.8.2]", debugLog.join(" | "));
+        }
 
         // 7. Mac Mini Auto-Pilot Save Draft flow (never blind-publishes!)
         if (shouldSaveDraft) {
@@ -250,6 +259,19 @@
               tone: "success",
             });
           },
+          secondaryLabel: anyMissed ? "Copy Dropdown Debug Info (to fix any missed field)" : null,
+          onSecondaryAction: anyMissed
+            ? async () => {
+                const txt = `Poshmark v0.8.2 Debug (${catLabel}):\n${debugLog.join("\n")}`;
+                try {
+                  await navigator.clipboard.writeText(txt);
+                  const btn = document.getElementById("rcc-hud-secondary");
+                  if (btn) btn.textContent = "Copied! Paste into chat";
+                } catch {
+                  alert(txt);
+                }
+              }
+            : null,
         });
 
         sendResponse({ ok: true });

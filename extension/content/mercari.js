@@ -100,7 +100,10 @@
         // Auto-select Mercari Condition radio/button ("New", "Like new", "Good", "Fair", "Poor")
         let conditionMatched = false;
         if (sc.conditionLabel) {
-          conditionMatched = await clickMatchingOption(sc.conditionLabel, 2000);
+          const optRes = await clickMatchingOption(sc.conditionLabel, 1200);
+          conditionMatched =
+            Boolean(optRes?.ok) ||
+            (await clickButtonByText([sc.conditionLabel], 1500));
           await sleep(250);
         }
 
