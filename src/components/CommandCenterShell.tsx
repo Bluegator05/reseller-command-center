@@ -8,6 +8,7 @@ import {
   Archive,
   BarChart3,
   CheckCircle2,
+  CircleDollarSign,
   ClipboardList,
   Compass,
   Info,
@@ -15,8 +16,8 @@ import {
   Plus,
   Puzzle,
   Send,
-  ShieldCheck,
   Smartphone,
+  Sparkles,
   Wand2,
   X,
 } from "lucide-react";
@@ -585,10 +586,29 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
       j.status === "needs_user_confirm"
   ).length;
 
-  const toShipCount = data.salesOrders.filter(
+  const toShipOrders = data.salesOrders.filter(
     (o) =>
       o.fulfillment_status === "to_ship" || o.fulfillment_status === "picked"
-  ).length;
+  );
+  const toShipCount = toShipOrders.length;
+  const toShipGross = toShipOrders.reduce(
+    (sum, o) => sum + Number(o.gross_sale_price || 0),
+    0
+  );
+  const recent24hSales = data.salesOrders.filter((o) => {
+    if (
+      o.fulfillment_status === "unpaid" ||
+      o.fulfillment_status === "returned"
+    ) {
+      return false;
+    }
+    const ms = Date.parse(o.sold_at);
+    return !Number.isNaN(ms) && mountNow - ms <= 24 * 60 * 60 * 1000;
+  });
+  const recent24hGross = recent24hSales.reduce(
+    (sum, o) => sum + Number(o.gross_sale_price || 0),
+    0
+  );
 
   return (
     <div className="min-h-screen flex bg-[#F7F9F8]">
@@ -687,17 +707,35 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
             id="tab-sales-ledger"
             type="button"
             onClick={() => setActiveTab("sales")}
-            className={`relative w-full py-2 px-1 rounded-xl flex flex-col items-center gap-1 text-[10px] font-semibold transition cursor-pointer ${
-              activeTab === "sales"
-                ? "bg-[#ECFDF5] text-[#0F766E]"
-                : "text-[#5C606B] hover:bg-[#F2F6F4] hover:text-[#14151A]"
+            title={
+              toShipCount > 0
+                ? `${toShipCount} new sale${toShipCount === 1 ? "" : "s"} ($${toShipGross.toFixed(2)}) ready to ship!`
+                : "Sales Ledger & Pick List"
+            }
+            className={`relative w-full py-2 px-1 rounded-xl flex flex-col items-center gap-1 text-[10px] font-bold transition cursor-pointer ${
+              toShipCount > 0
+                ? activeTab === "sales"
+                  ? "bg-gradient-to-b from-[#059669] to-[#047857] text-white shadow-[0_2px_10px_rgba(5,150,105,0.35)]"
+                  : "bg-gradient-to-b from-[#ECFDF5] to-[#D1FAE5] text-[#047857] border border-[#34D399] shadow-[0_0_12px_rgba(16,185,129,0.22)] hover:from-[#D1FAE5] hover:to-[#A7F3D0]"
+                : activeTab === "sales"
+                  ? "bg-[#ECFDF5] text-[#0F766E]"
+                  : "text-[#5C606B] hover:bg-[#F2F6F4] hover:text-[#14151A]"
             }`}
           >
-            <ShieldCheck className="w-4 h-4" />
+            <CircleDollarSign
+              className={`w-4 h-4 ${
+                toShipCount > 0 && activeTab !== "sales"
+                  ? "text-[#059669]"
+                  : ""
+              }`}
+            />
             <span>Sales</span>
             {toShipCount > 0 && (
-              <span className="absolute top-1 right-1.5 min-w-[16px] h-4 px-1 rounded-full font-mono tabular-nums text-[9px] font-bold bg-[#0F766E] text-white inline-flex items-center justify-center">
-                {toShipCount}
+              <span className="absolute -top-1 -right-0.5 flex h-5 min-w-[20px] items-center justify-center">
+                <span className="absolute inline-flex h-full w-full rounded-full bg-[#10B981] opacity-65 animate-ping" />
+                <span className="relative inline-flex min-w-[20px] h-5 px-1.5 rounded-full font-mono tabular-nums text-[10px] font-extrabold bg-[#059669] text-white ring-2 ring-white shadow-xs items-center justify-center">
+                  {toShipCount}
+                </span>
               </span>
             )}
           </button>
@@ -813,15 +851,58 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
               </span>
             </div>
 
-            <button
-              id="btn-quick-add-item"
-              type="button"
-              onClick={() => setQuickAddOpen(true)}
-              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-semibold bg-[#0F766E] text-white hover:bg-[#0B5B55] transition cursor-pointer whitespace-nowrap shadow-xs"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Add Item</span>
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              {(toShipCount > 0 || recent24hSales.length > 0) && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("sales")}
+                  title="Jump to Sales Ledger & Pick List"
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold transition cursor-pointer whitespace-nowrap ${
+                    toShipCount > 0
+                      ? "bg-gradient-to-r from-[#059669] to-[#10B981] text-white shadow-[0_2px_10px_rgba(5,150,105,0.3)] hover:from-[#047857] hover:to-[#059669]"
+                      : "bg-[#ECFDF5] text-[#047857] border border-[#6EE7B7] hover:bg-[#D1FAE5]"
+                  }`}
+                >
+                  <span className="relative flex h-2 w-2">
+                    <span
+                      className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
+                        toShipCount > 0 ? "bg-[#FDE047]" : "bg-[#10B981]"
+                      }`}
+                    />
+                    <span
+                      className={`relative inline-flex rounded-full h-2 w-2 ${
+                        toShipCount > 0 ? "bg-[#FEF08A]" : "bg-[#059669]"
+                      }`}
+                    />
+                  </span>
+                  <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                  <span>
+                    {toShipCount > 0
+                      ? `${toShipCount} New Sale${toShipCount === 1 ? "" : "s"}`
+                      : `${recent24hSales.length} Sold (24h)`}
+                  </span>
+                  <span
+                    className={`font-mono tabular-nums px-1.5 py-0.5 rounded-full text-[11px] ${
+                      toShipCount > 0
+                        ? "bg-white/20 text-white"
+                        : "bg-white text-[#047857]"
+                    }`}
+                  >
+                    ${(toShipCount > 0 ? toShipGross : recent24hGross).toFixed(2)}
+                  </span>
+                </button>
+              )}
+
+              <button
+                id="btn-quick-add-item"
+                type="button"
+                onClick={() => setQuickAddOpen(true)}
+                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-semibold bg-[#0F766E] text-white hover:bg-[#0B5B55] transition cursor-pointer whitespace-nowrap shadow-xs"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Add Item</span>
+              </button>
+            </div>
           </div>
         </header>
 
