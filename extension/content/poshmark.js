@@ -338,6 +338,7 @@
           jobId: job.id,
           marketplace: "poshmark",
           sku: payload.sku || job.item_sku || "",
+          title: payload.mappedTitle || job.item_title || "",
           listedPrice: Math.max(3, Math.round(Number(payload.suggestedPrice || 0))),
           autoPilot: isAutoPilot,
         });

@@ -623,9 +623,83 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     try {
       const injected = await chrome.scripting.executeScript({
         target: { tabId },
-        func: () => {
-          const firstLink = document.querySelector('a[href*="/listing/"]');
-          return firstLink ? firstLink.href.split("?")[0] : null;
+        args: [watch.title || ""],
+        func: async (targetTitle) => {
+          const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+          const stop = new Set([
+            "the", "and", "for", "with", "from", "new", "size", "of", "in", "on", "to", "by",
+          ]);
+          const tok = (s) =>
+            String(s || "")
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, " ")
+              .split(/\s+/)
+              .filter((w) => w.length >= 2 && !stop.has(w));
+          const targetTokens = new Set(tok(targetTitle));
+
+          const scoreCandidate = (textOrSlug) => {
+            if (targetTokens.size === 0) return 0;
+            const candTokens = new Set(tok(textOrSlug));
+            if (candTokens.size === 0) return 0;
+            let hit = 0;
+            for (const w of targetTokens) {
+              if (candTokens.has(w)) hit += 1;
+            }
+            const dice = (2 * hit) / (targetTokens.size + candTokens.size);
+            const contain = hit / Math.min(targetTokens.size, candTokens.size);
+            return dice * 0.65 + contain * 0.35;
+          };
+
+          const searchDoc = (doc) => {
+            const links = Array.from(doc.querySelectorAll('a[href*="/listing/"]'));
+            let bestUrl = null;
+            let bestScore = 0;
+            for (const link of links) {
+              const href = link.getAttribute("href") || "";
+              const full = href.startsWith("http")
+                ? href.split("?")[0]
+                : `https://poshmark.com${href.split("?")[0]}`;
+              const card =
+                link.closest('[data-et-name="listing"], .card, .tile, article, li') ||
+                link.parentElement;
+              const titleText =
+                card?.querySelector(".tile__title, [data-et-name='listing_title']")?.textContent ||
+                link.getAttribute("title") ||
+                link.querySelector("img")?.getAttribute("alt") ||
+                href.replace(/\/listing\//i, "").replace(/-[0-9a-f]{24}$/i, "");
+              const score = Math.max(scoreCandidate(titleText), scoreCandidate(href));
+              if (score > bestScore) {
+                bestScore = score;
+                bestUrl = full;
+              }
+            }
+            return bestScore >= 0.65 ? bestUrl : null;
+          };
+
+          // Retry up to 4 times (Poshmark closet index can lag 1-3s right after publishing)
+          for (let attempt = 0; attempt < 4; attempt++) {
+            const fromDom = searchDoc(document);
+            if (fromDom) return fromDom;
+
+            if (attempt > 0) {
+              try {
+                const res = await fetch(
+                  `${window.location.pathname}?availability=available&sort_by=added_desc&_t=${Date.now()}`,
+                  { credentials: "include" }
+                );
+                if (res.ok) {
+                  const html = await res.text();
+                  const doc = new DOMParser().parseFromString(html, "text/html");
+                  const fromFetch = searchDoc(doc);
+                  if (fromFetch) return fromFetch;
+                }
+              } catch {
+                // ignore
+              }
+            }
+            await sleep(1500);
+          }
+          return null;
         },
       });
       if (injected?.[0]?.result) {
@@ -713,6 +787,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               jobId: message.jobId,
               marketplace: message.marketplace,
               sku: message.sku || "",
+              title: message.title || "",
               listedPrice: message.listedPrice,
               autoPilot: Boolean(message.autoPilot),
             });
