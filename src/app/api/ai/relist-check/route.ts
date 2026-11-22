@@ -30,6 +30,15 @@ export interface RelistSanityCheckResponse {
   ebayActiveUrl: string;
   photoCount: number;
   specificsCount: number;
+  liveWeightOz: number | null;
+  liveLengthIn: number | null;
+  liveWidthIn: number | null;
+  liveHeightIn: number | null;
+  liveBrand: string | null;
+  liveShippingProfileName: string | null;
+  recommendPromote: boolean;
+  recommendedPromoteRate: number;
+  suggestedSpecifics: Array<{ name: string; value: string }>;
 }
 
 interface RelistCheckBody {
@@ -224,6 +233,7 @@ export async function POST(request: Request) {
     shippingStatus: "ok" | "warn" | "fix";
     shippingFinding: string;
     shippingAdvice: string;
+    suggestedSpecifics?: Array<{ name: string; value: string }>;
   }
 
   const apiKey = getGeminiApiKey();
@@ -289,8 +299,10 @@ Return ONLY valid JSON with these exact keys:
   "suggestedTitle": "Upgraded high-converting eBay SEO title, strictly <= 80 chars, Title Case, NO invented brand/model",
   "shippingStatus": "ok" | "warn" | "fix",
   "shippingFinding": "Check if shipping price or weight looks too high for this item's value",
-  "shippingAdvice": "Specific Ground Advantage / UPS Ground weight/shipping sanity tip (never mention Priority Mail)"
-}`;
+  "shippingAdvice": "Specific Ground Advantage / UPS Ground weight/shipping sanity tip (never mention Priority Mail)",
+  "suggestedSpecifics": [{ "name": "Brand", "value": "..." }, { "name": "Type", "value": "..." }]
+}
+For suggestedSpecifics: return 0 to 4 high-value missing eBay Item Specifics clearly visible in the photo or title (e.g. Brand if missing, Model/MPN, Type, Color, Material). Never invent details not visible.`;
 
       const parts: Array<
         { text: string } | { inline_data: { mime_type: string; data: string } }
@@ -422,6 +434,23 @@ Return ONLY valid JSON with these exact keys:
 
   const compQuery = (ai.compSearchQuery || title).trim();
   const encQ = encodeURIComponent(compQuery);
+  const recommendPromote =
+    promotedRate < 4 && (daysListed >= 30 || views < 15);
+
+  const rawSuggestedSpecs = Array.isArray(ai.suggestedSpecifics)
+    ? ai.suggestedSpecifics
+    : [];
+  const suggestedSpecifics: Array<{ name: string; value: string }> = [];
+  const seenSpec = new Set<string>();
+  for (const s of rawSuggestedSpecs) {
+    const n = String(s?.name || "").trim().slice(0, 40);
+    const v = String(s?.value || "").trim().slice(0, 65);
+    if (!n || !v || /^n\/?a$/i.test(v)) continue;
+    const key = n.toLowerCase();
+    if (seenSpec.has(key)) continue;
+    seenSpec.add(key);
+    suggestedSpecifics.push({ name: n, value: v });
+  }
 
   const response: RelistSanityCheckResponse = {
     mode,
@@ -444,6 +473,15 @@ Return ONLY valid JSON with these exact keys:
     ebayActiveUrl: `https://www.ebay.com/sch/i.html?_nkw=${encQ}&_sop=15`,
     photoCount,
     specificsCount,
+    liveWeightOz,
+    liveLengthIn,
+    liveWidthIn,
+    liveHeightIn,
+    liveBrand,
+    liveShippingProfileName,
+    recommendPromote,
+    recommendedPromoteRate: 4,
+    suggestedSpecifics: suggestedSpecifics.slice(0, 4),
   };
 
   return NextResponse.json(response);

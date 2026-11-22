@@ -8,6 +8,7 @@ import {
 import {
   endAndSellSimilarEbayOffer,
   isEbayConfigured,
+  promoteEbayListing,
   sendEbayOfferToWatchers,
   updateEbayOfferPrice,
 } from "@/lib/ebay";
@@ -246,18 +247,79 @@ export async function POST(request: Request) {
             typeof body.newTitle === "string" && body.newTitle.trim().length >= 3
               ? body.newTitle.trim().slice(0, 80)
               : undefined;
+          const targetWeightOz =
+            typeof body.weightOz === "number" && body.weightOz > 0
+              ? Math.round(body.weightOz)
+              : undefined;
+          const targetLen =
+            typeof body.lengthIn === "number" && body.lengthIn > 0
+              ? body.lengthIn
+              : undefined;
+          const targetWid =
+            typeof body.widthIn === "number" && body.widthIn > 0
+              ? body.widthIn
+              : undefined;
+          const targetHgt =
+            typeof body.heightIn === "number" && body.heightIn > 0
+              ? body.heightIn
+              : undefined;
+          const targetAddSpecs = Array.isArray(body.addItemSpecifics)
+            ? body.addItemSpecifics.filter(
+                (s) => s?.name?.trim() && s?.value?.trim()
+              )
+            : [];
+          const targetPromoteRate =
+            typeof body.promoteRatePct === "number" && body.promoteRatePct >= 2
+              ? Math.min(20, roundCurrency(body.promoteRatePct))
+              : null;
 
           const relisted = await endAndSellSimilarEbayOffer({
             offerId: listing.external_listing_id,
             sku: inv.sku,
             newPrice: targetRelistPrice,
             newTitle: targetRelistTitle,
+            weightOz: targetWeightOz,
+            lengthIn: targetLen,
+            widthIn: targetWid,
+            heightIn: targetHgt,
+            addItemSpecifics: targetAddSpecs.length > 0 ? targetAddSpecs : undefined,
           });
+
+          // If seller enabled Promote on Relist, apply promoted ad rate to the brand-new eBay ItemID
+          let appliedPromoteRate: number | null = null;
+          let promoteNote: string | null = null;
+          if (targetPromoteRate && /^\d+$/.test(relisted.newListingId)) {
+            try {
+              await new Promise((r) => setTimeout(r, 1800));
+              const promoRes = await promoteEbayListing({
+                listingId: relisted.newListingId,
+                adRatePct: targetPromoteRate,
+              });
+              appliedPromoteRate = promoRes.adRatePct;
+            } catch (promoErr) {
+              console.warn(
+                `[ebay/action] Post-relist promote warning (${relisted.newListingId}):`,
+                promoErr
+              );
+              promoteNote = "relisted (retry Promote 4% once eBay finishes indexing)";
+            }
+          }
 
           const existingSpecs = (inv.item_specifics || {}) as Record<
             string,
             unknown
           >;
+          const mergedSpecs: Record<string, unknown> = { ...existingSpecs };
+          let updatedBrand: string | null = null;
+          for (const s of targetAddSpecs) {
+            const cleanName = s.name.trim();
+            const cleanVal = s.value.trim();
+            mergedSpecs[cleanName] = cleanVal;
+            if (cleanName.toLowerCase() === "brand") {
+              updatedBrand = cleanVal;
+            }
+          }
+
           const prevRelistCount = Number.isFinite(
             Number(existingSpecs.relist_count)
           )
@@ -274,8 +336,13 @@ export async function POST(request: Request) {
               ...(targetRelistPrice !== currentPrice
                 ? { target_price: targetRelistPrice }
                 : {}),
+              ...(updatedBrand ? { brand: updatedBrand } : {}),
+              ...(targetWeightOz ? { weight_oz: targetWeightOz } : {}),
+              ...(targetLen ? { length_in: targetLen } : {}),
+              ...(targetWid ? { width_in: targetWid } : {}),
+              ...(targetHgt ? { height_in: targetHgt } : {}),
               item_specifics: {
-                ...existingSpecs,
+                ...mergedSpecs,
                 relist_count: String(nextRelistCount),
                 last_relisted_at: nowIso,
               },
@@ -289,6 +356,9 @@ export async function POST(request: Request) {
               external_listing_id: relisted.newListingId,
               external_url: relisted.newExternalUrl,
               listed_price: targetRelistPrice,
+              ...(appliedPromoteRate !== null
+                ? { promoted_ad_rate_pct: appliedPromoteRate }
+                : {}),
               listed_at: nowIso,
               last_refreshed_at: nowIso,
               last_synced_at: nowIso,
@@ -309,6 +379,8 @@ export async function POST(request: Request) {
                 relistCount: nextRelistCount,
                 updatedPrice: targetRelistPrice,
                 updatedTitle: targetRelistTitle ?? null,
+                promotedAdRatePct: appliedPromoteRate,
+                addedSpecificsCount: targetAddSpecs.length,
               },
               completed_at: new Date().toISOString(),
             })
@@ -322,6 +394,17 @@ export async function POST(request: Request) {
           }
           if (targetRelistTitle && targetRelistTitle !== inv.title) {
             tweakNotes.push("title upgraded");
+          }
+          if (targetAddSpecs.length > 0) {
+            tweakNotes.push(`+${targetAddSpecs.length} specifics`);
+          }
+          if (targetWeightOz) {
+            tweakNotes.push(`weight ${targetWeightOz}oz`);
+          }
+          if (appliedPromoteRate !== null) {
+            tweakNotes.push(`promoted ${appliedPromoteRate}%`);
+          } else if (promoteNote) {
+            tweakNotes.push(promoteNote);
           }
 
           results.push({

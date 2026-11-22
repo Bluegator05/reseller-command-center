@@ -1907,15 +1907,14 @@ export function StaleRadarTable({
           row={relistCheckRow}
           isRelisting={isRelistingFromModal}
           onClose={() => setRelistCheckRow(null)}
-          onConfirmRelist={async ({ newPrice, newTitle }) => {
+          onConfirmRelist={async (fixes) => {
             const target = relistCheckRow;
             setIsRelistingFromModal(true);
             try {
               await onExecuteAction({
                 action: "end_and_sell_similar",
                 listingIds: [target.listing_id],
-                newPrice,
-                newTitle,
+                ...fixes,
               });
               setRelistCheckRow(null);
             } finally {

@@ -389,6 +389,12 @@ export interface EbayActionRequest {
   offerMessage?: string;
   newPrice?: number;
   newTitle?: string;
+  promoteRatePct?: number;
+  weightOz?: number;
+  lengthIn?: number;
+  widthIn?: number;
+  heightIn?: number;
+  addItemSpecifics?: Array<{ name: string; value: string }>;
 }
 
 export interface EbayActionItemResult {

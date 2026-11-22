@@ -803,6 +803,11 @@ export async function endAndSellSimilarEbayOffer(params: {
   sku?: string;
   newPrice?: number;
   newTitle?: string;
+  weightOz?: number;
+  lengthIn?: number;
+  widthIn?: number;
+  heightIn?: number;
+  addItemSpecifics?: Array<{ name: string; value: string }>;
 }): Promise<{
   previousOfferId: string;
   previousListingId: string | null;
@@ -810,8 +815,24 @@ export async function endAndSellSimilarEbayOffer(params: {
   newListingId: string;
   newExternalUrl: string;
 }> {
-  const { offerId: rawId, sku, newPrice, newTitle } = params;
+  const {
+    offerId: rawId,
+    sku,
+    newPrice,
+    newTitle,
+    weightOz,
+    lengthIn,
+    widthIn,
+    heightIn,
+    addItemSpecifics,
+  } = params;
   const cleanNewTitle = newTitle?.trim().slice(0, 80) || "";
+  const cleanAddSpecs = (addItemSpecifics || []).filter(
+    (s) => s.name?.trim() && s.value?.trim()
+  );
+  const hasPkgOverride =
+    (typeof weightOz === "number" && weightOz > 0) ||
+    (typeof lengthIn === "number" && lengthIn > 0);
   const { webBase } = getEbayBaseUrls();
   const invOfferId = await resolveInventoryOfferId(rawId, sku);
 
@@ -834,26 +855,59 @@ export async function endAndSellSimilarEbayOffer(params: {
       { method: "DELETE" }
     );
 
-    // If title changed and SKU exists on Inventory API, update product.title first
-    if (cleanNewTitle && sku) {
+    // If title, specifics, or weight changed on Inventory API, update the inventory item first
+    if ((cleanNewTitle || cleanAddSpecs.length > 0 || hasPkgOverride) && sku) {
       try {
         const invItem = await ebayRequest<Record<string, unknown>>(
           `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`
         );
         const prod =
           (invItem.product as Record<string, unknown> | undefined) || {};
+        const aspects = {
+          ...((prod.aspects as Record<string, string[]> | undefined) || {}),
+        };
+        for (const s of cleanAddSpecs) {
+          aspects[s.name.trim()] = [s.value.trim().slice(0, 65)];
+        }
+        const nextPkg = {
+          ...((invItem.packageWeightAndSize as Record<string, unknown> | undefined) ||
+            {}),
+        };
+        if (typeof weightOz === "number" && weightOz > 0) {
+          nextPkg.weight = { value: roundCurrency(weightOz), unit: "OUNCE" };
+        }
+        if (
+          typeof lengthIn === "number" &&
+          lengthIn > 0 &&
+          typeof widthIn === "number" &&
+          widthIn > 0 &&
+          typeof heightIn === "number" &&
+          heightIn > 0
+        ) {
+          nextPkg.dimensions = {
+            length: lengthIn,
+            width: widthIn,
+            height: heightIn,
+            unit: "INCH",
+          };
+        }
         await ebayRequest(
           `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`,
           {
             method: "PUT",
             body: JSON.stringify({
               ...invItem,
-              product: { ...prod, title: cleanNewTitle },
+              product: {
+                ...prod,
+                ...(cleanNewTitle ? { title: cleanNewTitle } : {}),
+                ...(cleanAddSpecs.length > 0 ? { aspects } : {}),
+              },
+              ...(hasPkgOverride ? { packageWeightAndSize: nextPkg } : {}),
             }),
           }
         );
       } catch (err) {
-        console.warn("[ebay] Inventory item title update warning:", err);
+        console.warn("[ebay] Inventory item update warning:", err);
       }
     }
 
@@ -898,7 +952,78 @@ export async function endAndSellSimilarEbayOffer(params: {
     };
   }
 
-  // Seller Hub / Trading API path: EndFixedPriceItem -> RelistFixedPriceItem (fresh 12-digit ItemID)
+  // Seller Hub / Trading API path:
+  // If adding ItemSpecifics or modifying Package Details, read existing values FIRST so nothing is lost!
+  let mergedSpecsXml = "";
+  let pkgOverrideXml = "";
+
+  if (cleanAddSpecs.length > 0 || hasPkgOverride) {
+    const existingDetails = await fetchEbayItemDetails(rawId);
+
+    if (cleanAddSpecs.length > 0) {
+      const mergedMap = new Map<string, { name: string; values: string[] }>();
+      for (const [k, vals] of Object.entries(
+        existingDetails?.itemSpecifics || {}
+      )) {
+        if (k.trim() && Array.isArray(vals) && vals.length > 0) {
+          mergedMap.set(k.trim().toLowerCase(), { name: k.trim(), values: vals });
+        }
+      }
+      for (const s of cleanAddSpecs) {
+        const key = s.name.trim().toLowerCase();
+        mergedMap.set(key, {
+          name: s.name.trim().slice(0, 40),
+          values: [s.value.trim().slice(0, 65)],
+        });
+      }
+      const nvlXml = [...mergedMap.values()]
+        .slice(0, 35)
+        .map(
+          (entry) => `      <NameValueList>
+        <Name>${escapeXml(entry.name)}</Name>
+        ${entry.values
+          .slice(0, 5)
+          .map((v) => `<Value>${escapeXml(v.slice(0, 65))}</Value>`)
+          .join("\n        ")}
+      </NameValueList>`
+        )
+        .join("\n");
+      if (nvlXml) {
+        mergedSpecsXml = `<ItemSpecifics>\n${nvlXml}\n    </ItemSpecifics>`;
+      }
+    }
+
+    if (hasPkgOverride) {
+      const finalOz = Math.max(
+        1,
+        Math.round(weightOz || existingDetails?.weightOz || 12)
+      );
+      const wMajor = Math.floor(finalOz / 16);
+      const wMinor = finalOz % 16;
+      const finalLen = Math.max(
+        1,
+        Math.round(lengthIn || existingDetails?.lengthIn || 10)
+      );
+      const finalWid = Math.max(
+        1,
+        Math.round(widthIn || existingDetails?.widthIn || 8)
+      );
+      const finalHgt = Math.max(
+        1,
+        Math.round(heightIn || existingDetails?.heightIn || 4)
+      );
+      pkgOverrideXml = `<ShippingPackageDetails>
+      <MeasurementUnit>English</MeasurementUnit>
+      <PackageDepth unit="in">${finalHgt}</PackageDepth>
+      <PackageLength unit="in">${finalLen}</PackageLength>
+      <PackageWidth unit="in">${finalWid}</PackageWidth>
+      <WeightMajor unit="lbs">${wMajor}</WeightMajor>
+      <WeightMinor unit="oz">${wMinor}</WeightMinor>
+    </ShippingPackageDetails>`;
+    }
+  }
+
+  // EndFixedPriceItem -> RelistFixedPriceItem (fresh 12-digit ItemID)
   await ebayTradingRequest(
     "EndFixedPriceItem",
     `<ItemID>${rawId}</ItemID>
@@ -919,6 +1044,8 @@ export async function endAndSellSimilarEbayOffer(params: {
       <ItemID>${rawId}</ItemID>
       ${titleOverrideXml}
       ${priceOverrideXml}
+      ${mergedSpecsXml}
+      ${pkgOverrideXml}
     </Item>`
   );
 

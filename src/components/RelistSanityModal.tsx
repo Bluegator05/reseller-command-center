@@ -6,23 +6,34 @@ import {
   CheckCircle2,
   ExternalLink,
   Loader2,
+  Megaphone,
+  Package,
   RefreshCcw,
   Sparkles,
   Stethoscope,
+  Tag,
   Trash2,
   X,
 } from "lucide-react";
 import type { RelistSanityCheckResponse } from "@/app/api/ai/relist-check/route";
 import type { StaleRadarRow } from "@/lib/types";
 
+export interface RelistFixPayload {
+  newPrice?: number;
+  newTitle?: string;
+  promoteRatePct?: number;
+  weightOz?: number;
+  lengthIn?: number;
+  widthIn?: number;
+  heightIn?: number;
+  addItemSpecifics?: Array<{ name: string; value: string }>;
+}
+
 interface RelistSanityModalProps {
   row: StaleRadarRow;
   isRelisting: boolean;
   onClose: () => void;
-  onConfirmRelist: (params: {
-    newPrice?: number;
-    newTitle?: string;
-  }) => Promise<void>;
+  onConfirmRelist: (params: RelistFixPayload) => Promise<void>;
   onSwitchToDonate?: (row: StaleRadarRow) => void;
 }
 
@@ -39,6 +50,36 @@ export function RelistSanityModal({
 
   const [editTitle, setEditTitle] = useState(row.title);
   const [editPrice, setEditPrice] = useState(row.listed_price.toFixed(2));
+  const [promoteEnabled, setPromoteEnabled] = useState(false);
+  const [promoteRate, setPromoteRate] = useState<number>(4);
+
+  // Live eBay package baseline vs editable weight/dims
+  const [baseWeightOz, setBaseWeightOz] = useState<number | null>(
+    row.weight_oz ?? null
+  );
+  const [baseDims, setBaseDims] = useState<{
+    l: number | null;
+    w: number | null;
+    h: number | null;
+  }>({
+    l: row.length_in ?? null,
+    w: row.width_in ?? null,
+    h: row.height_in ?? null,
+  });
+  const [editLbs, setEditLbs] = useState(
+    row.weight_oz ? String(Math.floor(row.weight_oz / 16)) : ""
+  );
+  const [editOz, setEditOz] = useState(
+    row.weight_oz ? String(row.weight_oz % 16) : ""
+  );
+  const [editLen, setEditLen] = useState(row.length_in ? String(row.length_in) : "");
+  const [editWid, setEditWid] = useState(row.width_in ? String(row.width_in) : "");
+  const [editHgt, setEditHgt] = useState(row.height_in ? String(row.height_in) : "");
+
+  // Toggleable suggested Item Specifics
+  const [selectedSpecIndexes, setSelectedSpecIndexes] = useState<Set<number>>(
+    new Set()
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -81,6 +122,37 @@ export function RelistSanityModal({
         }
         if (!cancelled) {
           setReport(data);
+          // Pre-check Promote if the audit recommends it (e.g. 0% promoted on 30+d listing)
+          if (data.recommendPromote) {
+            setPromoteEnabled(true);
+            setPromoteRate(data.recommendedPromoteRate || 4);
+          }
+          // Pre-fill real live eBay weight & dimensions
+          if (data.liveWeightOz) {
+            setBaseWeightOz(data.liveWeightOz);
+            setEditLbs(String(Math.floor(data.liveWeightOz / 16)));
+            setEditOz(String(data.liveWeightOz % 16));
+          }
+          if (data.liveLengthIn || data.liveWidthIn || data.liveHeightIn) {
+            setBaseDims({
+              l: data.liveLengthIn,
+              w: data.liveWidthIn,
+              h: data.liveHeightIn,
+            });
+            if (data.liveLengthIn) setEditLen(String(data.liveLengthIn));
+            if (data.liveWidthIn) setEditWid(String(data.liveWidthIn));
+            if (data.liveHeightIn) setEditHgt(String(data.liveHeightIn));
+          }
+          // Pre-select suggested missing Item Specifics if eBay specifics were sparse (< 8)
+          if (
+            Array.isArray(data.suggestedSpecifics) &&
+            data.suggestedSpecifics.length > 0 &&
+            data.specificsCount < 8
+          ) {
+            setSelectedSpecIndexes(
+              new Set(data.suggestedSpecifics.map((_, i) => i))
+            );
+          }
         }
       } catch (err) {
         if (!cancelled) {
@@ -105,6 +177,37 @@ export function RelistSanityModal({
     Math.abs(parsedPrice - row.listed_price) > 0.005;
   const titleChanged =
     editTitle.trim().length >= 3 && editTitle.trim() !== row.title.trim();
+
+  const totalEditOz =
+    (editLbs !== "" || editOz !== "")
+      ? Math.max(0, (Number(editLbs) || 0) * 16 + (Number(editOz) || 0))
+      : null;
+  const parsedLen = editLen ? Number(editLen) : null;
+  const parsedWid = editWid ? Number(editWid) : null;
+  const parsedHgt = editHgt ? Number(editHgt) : null;
+
+  const weightChanged =
+    totalEditOz !== null &&
+    totalEditOz > 0 &&
+    (baseWeightOz === null || Math.abs(totalEditOz - baseWeightOz) >= 1);
+  const dimsChanged =
+    Boolean(parsedLen && parsedWid && parsedHgt) &&
+    (parsedLen !== baseDims.l ||
+      parsedWid !== baseDims.w ||
+      parsedHgt !== baseDims.h);
+
+  const chosenSpecs = (report?.suggestedSpecifics || []).filter((_, idx) =>
+    selectedSpecIndexes.has(idx)
+  );
+
+  const fixSummaryParts: string[] = [];
+  if (titleChanged) fixSummaryParts.push("New Title");
+  if (priceChanged) fixSummaryParts.push(`Price $${parsedPrice.toFixed(2)}`);
+  if (promoteEnabled) fixSummaryParts.push(`Promote ${promoteRate}%`);
+  if (chosenSpecs.length > 0) fixSummaryParts.push(`+${chosenSpecs.length} Specifics`);
+  if (weightChanged || dimsChanged) fixSummaryParts.push("Updated Pkg Weight/Dims");
+
+  const fixCount = fixSummaryParts.length;
 
   const verdictConfig =
     report?.verdict === "consider_donate"
@@ -184,19 +287,28 @@ export function RelistSanityModal({
               </div>
               <div className="text-[11px] font-mono text-[#5C606B] mt-0.5 flex flex-wrap items-center gap-x-2">
                 <span>
-                  Ask <strong className="text-[#14151A]">${row.listed_price.toFixed(2)}</strong>
-                </span>
-                <span>·</span>
-                <span>
-                  Ship{" "}
+                  Ask{" "}
                   <strong className="text-[#14151A]">
-                    {row.shipping_price > 0
-                      ? `$${row.shipping_price.toFixed(2)}`
-                      : "Calculated"}
+                    ${row.listed_price.toFixed(2)}
                   </strong>
                 </span>
                 <span>·</span>
-                <span>COGS ${row.total_cost_basis.toFixed(2)}</span>
+                <span>
+                  {report?.liveShippingProfileName ||
+                    (row.shipping_price > 0
+                      ? `Ship $${row.shipping_price.toFixed(2)}`
+                      : "Calculated Ship")}
+                </span>
+                {baseWeightOz && (
+                  <>
+                    <span>·</span>
+                    <span>
+                      {baseWeightOz >= 16
+                        ? `${Math.floor(baseWeightOz / 16)}lb ${baseWeightOz % 16}oz`
+                        : `${baseWeightOz}oz`}
+                    </span>
+                  </>
+                )}
                 <span>·</span>
                 <span>Floor ${row.floor_price.toFixed(2)}</span>
               </div>
@@ -218,7 +330,7 @@ export function RelistSanityModal({
             <div className="py-10 text-center space-y-2">
               <Loader2 className="w-6 h-6 animate-spin text-[#0F766E] mx-auto" />
               <p className="text-xs font-semibold text-[#14151A]">
-                Auditing pricing, title SEO, shipping &amp; traffic signals…
+                Auditing live eBay weight, pricing, title SEO &amp; traffic signals…
               </p>
               <p className="text-[11px] text-[#5C606B]">
                 Checking why this sat for {row.days_listed} days before relisting.
@@ -226,12 +338,14 @@ export function RelistSanityModal({
             </div>
           ) : error ? (
             <div className="p-3.5 rounded-xl bg-[#FEF2F2] border border-[#FECACA] text-xs text-[#B91C1C]">
-              {error} — you can still edit the title/price below or relist as-is.
+              {error} — you can still apply fixes below or relist as-is.
             </div>
           ) : report ? (
             <>
               {/* Verdict Banner */}
-              <div className={`p-3.5 rounded-xl border ${verdictConfig.bg} space-y-2`}>
+              <div
+                className={`p-3.5 rounded-xl border ${verdictConfig.bg} space-y-2`}
+              >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span
                     className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wide ${verdictConfig.pill}`}
@@ -259,7 +373,9 @@ export function RelistSanityModal({
                     </a>
                   </div>
                 </div>
-                <p className={`text-xs font-medium leading-relaxed ${verdictConfig.text}`}>
+                <p
+                  className={`text-xs font-medium leading-relaxed ${verdictConfig.text}`}
+                >
                   {report.primaryDiagnosis}
                 </p>
               </div>
@@ -320,12 +436,20 @@ export function RelistSanityModal({
             </>
           ) : null}
 
-          {/* Quick Fix Before Relisting Editor */}
-          <div className="p-3.5 rounded-xl border border-[#DDE2DF] bg-[#FAFBF9] space-y-3">
-            <div className="text-[11px] font-bold uppercase tracking-[0.06em] text-[#444B52]">
-              Fix Title or Price During Sell Similar (Optional)
+          {/* 1-Click Fix Workbench (All Agreed Fixes Apply Together on Sell Similar!) */}
+          <div className="p-4 rounded-xl border border-[#DDE2DF] bg-[#FAFBF9] space-y-3.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-[11px] font-bold uppercase tracking-[0.06em] text-[#444B52]">
+                Fixes to Apply When Relisting
+              </span>
+              {fixCount > 0 && (
+                <span className="px-2 py-0.5 rounded-full bg-[#ECFDF5] text-[#0F766E] border border-[#A7F3D0] text-[10px] font-semibold">
+                  {fixSummaryParts.join(" · ")}
+                </span>
+              )}
             </div>
 
+            {/* 1. Title Upgrade */}
             <div>
               <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
                 <label className="text-[11px] font-semibold text-[#444B52]">
@@ -353,6 +477,7 @@ export function RelistSanityModal({
               />
             </div>
 
+            {/* 2. Price Adjustment */}
             <div className="flex flex-wrap items-end gap-2">
               <div className="w-32">
                 <label className="block text-[11px] font-semibold text-[#444B52] mb-1">
@@ -405,6 +530,167 @@ export function RelistSanityModal({
                 </button>
               </div>
             </div>
+
+            {/* 3. Promote Immediately on Relist */}
+            <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-lg bg-white border border-[#E4E4DD]">
+              <label className="inline-flex items-center gap-2 text-xs font-semibold text-[#14151A] cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={promoteEnabled}
+                  onChange={(e) => setPromoteEnabled(e.target.checked)}
+                  className="w-4 h-4 accent-[#0F766E]"
+                />
+                <Megaphone className="w-3.5 h-3.5 text-[#D97706]" />
+                <span>Promote new listing immediately on eBay</span>
+                {report?.recommendPromote && (
+                  <span className="px-1.5 py-0.5 rounded bg-[#FEF3C7] text-[#92400E] text-[9px] font-bold uppercase">
+                    Recommended
+                  </span>
+                )}
+              </label>
+
+              {promoteEnabled && (
+                <div className="inline-flex items-center gap-1">
+                  {[2, 4, 5, 6].map((r) => (
+                    <button
+                      key={r}
+                      type="button"
+                      onClick={() => setPromoteRate(r)}
+                      className={`px-2 py-0.5 rounded text-[11px] font-mono font-bold border transition cursor-pointer ${
+                        promoteRate === r
+                          ? "bg-[#0F766E] border-[#0F766E] text-white"
+                          : "bg-[#FAFBF9] border-[#DDE2DF] text-[#5C606B] hover:border-[#0F766E]"
+                      }`}
+                    >
+                      {r}%
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* 4. Add Missing Item Specifics (Toggleable Chips) */}
+            {report && report.suggestedSpecifics.length > 0 && (
+              <div className="p-2.5 rounded-lg bg-white border border-[#E4E4DD] space-y-2">
+                <div className="flex items-center justify-between text-[11px]">
+                  <span className="font-semibold text-[#14151A] inline-flex items-center gap-1.5">
+                    <Tag className="w-3.5 h-3.5 text-[#0F766E]" />
+                    Add Missing Item Specifics (merged safely with existing)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (
+                        selectedSpecIndexes.size ===
+                        report.suggestedSpecifics.length
+                      ) {
+                        setSelectedSpecIndexes(new Set());
+                      } else {
+                        setSelectedSpecIndexes(
+                          new Set(report.suggestedSpecifics.map((_, i) => i))
+                        );
+                      }
+                    }}
+                    className="text-[10px] font-semibold text-[#0F766E] hover:underline cursor-pointer"
+                  >
+                    {selectedSpecIndexes.size ===
+                    report.suggestedSpecifics.length
+                      ? "Uncheck all"
+                      : "Check all"}
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {report.suggestedSpecifics.map((spec, idx) => {
+                    const checked = selectedSpecIndexes.has(idx);
+                    return (
+                      <button
+                        key={`${spec.name}-${idx}`}
+                        type="button"
+                        onClick={() =>
+                          setSelectedSpecIndexes((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(idx)) next.delete(idx);
+                            else next.add(idx);
+                            return next;
+                          })
+                        }
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] border transition cursor-pointer ${
+                          checked
+                            ? "bg-[#ECFDF5] border-[#0F766E] text-[#065F46] font-semibold"
+                            : "bg-[#FAFBF9] border-[#DDE2DF] text-[#5C606B] hover:border-[#0F766E]"
+                        }`}
+                      >
+                        <span>{checked ? "☑" : "☐"}</span>
+                        <span>
+                          <strong>{spec.name}:</strong> {spec.value}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* 5. Package Weight & Dimensions (Live from eBay, editable if needed) */}
+            <div className="p-2.5 rounded-lg bg-white border border-[#E4E4DD] flex flex-wrap items-center justify-between gap-3">
+              <div className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-[#14151A]">
+                <Package className="w-3.5 h-3.5 text-[#5C606B]" />
+                <span>Package Weight &amp; Dims</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                <div className="inline-flex items-center gap-1">
+                  <input
+                    type="number"
+                    min="0"
+                    value={editLbs}
+                    onChange={(e) => setEditLbs(e.target.value)}
+                    placeholder="0"
+                    className="w-12 px-1.5 py-1 text-xs font-mono rounded border border-[#DDE2DF] text-center"
+                  />
+                  <span className="text-[#5C606B]">lb</span>
+                  <input
+                    type="number"
+                    min="0"
+                    max="15"
+                    value={editOz}
+                    onChange={(e) => setEditOz(e.target.value)}
+                    placeholder="14"
+                    className="w-12 px-1.5 py-1 text-xs font-mono rounded border border-[#DDE2DF] text-center"
+                  />
+                  <span className="text-[#5C606B]">oz</span>
+                </div>
+                <span className="text-[#CBD5E1]">|</span>
+                <div className="inline-flex items-center gap-1">
+                  <input
+                    type="number"
+                    min="1"
+                    value={editLen}
+                    onChange={(e) => setEditLen(e.target.value)}
+                    placeholder="L"
+                    className="w-12 px-1.5 py-1 text-xs font-mono rounded border border-[#DDE2DF] text-center"
+                  />
+                  <span className="text-[#5C606B]">×</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={editWid}
+                    onChange={(e) => setEditWid(e.target.value)}
+                    placeholder="W"
+                    className="w-12 px-1.5 py-1 text-xs font-mono rounded border border-[#DDE2DF] text-center"
+                  />
+                  <span className="text-[#5C606B]">×</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={editHgt}
+                    onChange={(e) => setEditHgt(e.target.value)}
+                    placeholder="H"
+                    className="w-12 px-1.5 py-1 text-xs font-mono rounded border border-[#DDE2DF] text-center"
+                  />
+                  <span className="text-[#5C606B]">in</span>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -443,6 +729,25 @@ export function RelistSanityModal({
                 onConfirmRelist({
                   newPrice: priceChanged ? parsedPrice : undefined,
                   newTitle: titleChanged ? editTitle.trim() : undefined,
+                  promoteRatePct: promoteEnabled ? promoteRate : undefined,
+                  weightOz:
+                    (weightChanged || dimsChanged) && totalEditOz
+                      ? totalEditOz
+                      : undefined,
+                  lengthIn:
+                    (weightChanged || dimsChanged) && parsedLen
+                      ? parsedLen
+                      : undefined,
+                  widthIn:
+                    (weightChanged || dimsChanged) && parsedWid
+                      ? parsedWid
+                      : undefined,
+                  heightIn:
+                    (weightChanged || dimsChanged) && parsedHgt
+                      ? parsedHgt
+                      : undefined,
+                  addItemSpecifics:
+                    chosenSpecs.length > 0 ? chosenSpecs : undefined,
                 })
               }
               className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-[#0F766E] text-white text-xs font-bold hover:bg-[#0B5B55] disabled:opacity-50 cursor-pointer shadow-xs"
@@ -454,9 +759,9 @@ export function RelistSanityModal({
               )}
               <span>
                 {isRelisting
-                  ? "Relisting on eBay…"
-                  : priceChanged || titleChanged
-                    ? "Apply Fixes & Sell Similar"
+                  ? "Applying Fixes & Relisting…"
+                  : fixCount > 0
+                    ? `Apply ${fixCount} Fix${fixCount === 1 ? "" : "es"} & Sell Similar`
                     : "Confirm & Sell Similar"}
               </span>
             </button>
