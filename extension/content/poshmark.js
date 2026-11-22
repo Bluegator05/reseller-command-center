@@ -319,6 +319,123 @@
       const shouldSaveDraft = Boolean(message.autoPilot && message.autoPilotSaveDraft);
 
       try {
+        // ANTI-DOUBLE-SELL AUTO-DELIST HANDLER
+        if (job.action === "delist") {
+          showRccHud({
+            title: `${isAutoPilot ? "Auto-Pilot · " : ""}Auto-Delisting Poshmark (${payload.sku || "SKU"})`,
+            message: `Sold on another marketplace (${payload.reason || "anti-double-sell"}) — removing Poshmark listing now...`,
+            tone: "info",
+          });
+
+          await sleep(800);
+          const bodyText = (document.body?.innerText || "").toLowerCase();
+          const alreadyGone =
+            bodyText.includes("page not found") ||
+            bodyText.includes("listing not found") ||
+            bodyText.includes("this listing has been deleted") ||
+            (!window.location.pathname.includes("/edit-listing") &&
+              /\bsold\b/.test(bodyText) &&
+              !document.querySelector('a[href*="/edit-listing/"]'));
+
+          if (alreadyGone) {
+            await chrome.runtime.sendMessage({
+              type: "RCC_JOB_STATUS_UPDATE",
+              jobId: job.id,
+              status: "completed",
+              extra: { marketplace: "poshmark" },
+            });
+            showRccHud({
+              title: `Poshmark Already Ended (${payload.sku || "SKU"})`,
+              message: "Listing was already sold or removed — synced back to Command Center.",
+              tone: "success",
+            });
+            if (isAutoPilot) {
+              await sleep(1500);
+              chrome.runtime.sendMessage({ type: "RCC_CLOSE_SENDER_TAB" });
+            }
+            sendResponse({ ok: true, delisted: true });
+            return;
+          }
+
+          // If on /listing/ view, click Edit to open /edit-listing/<id>
+          if (!window.location.pathname.includes("/edit-listing")) {
+            const editLink = document.querySelector('a[href*="/edit-listing/"]');
+            if (editLink) {
+              editLink.click();
+              await sleep(2200);
+            } else {
+              await clickButtonByText([/^edit$/i, /^edit listing$/i], 2500);
+              await sleep(2200);
+            }
+          }
+
+          window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+          await sleep(700);
+
+          const clickedDelete = await clickButtonByText(
+            [/^delete listing$/i, /delete listing/i],
+            4500
+          );
+
+          if (clickedDelete) {
+            await sleep(700);
+            await clickButtonByText(
+              [/^yes$/i, /^delete$/i, /^delete listing$/i, /^confirm$/i],
+              4000
+            );
+            await sleep(1500);
+
+            await chrome.runtime.sendMessage({
+              type: "RCC_JOB_STATUS_UPDATE",
+              jobId: job.id,
+              status: "completed",
+              extra: { marketplace: "poshmark" },
+            });
+            showRccHud({
+              title: `Delisted from Poshmark! (${payload.sku || "SKU"})`,
+              message: "Anti-double-sell complete — listing removed and synced to Command Center.",
+              tone: "success",
+            });
+            if (isAutoPilot) {
+              await sleep(1800);
+              chrome.runtime.sendMessage({ type: "RCC_CLOSE_SENDER_TAB" });
+            }
+            sendResponse({ ok: true, delisted: true });
+            return;
+          }
+
+          // Fallback interactive confirmation
+          await chrome.runtime.sendMessage({
+            type: "RCC_JOB_STATUS_UPDATE",
+            jobId: job.id,
+            status: "needs_user_confirm",
+            extra: {
+              errorMessage: "Could not find Delete Listing button — please delete manually on this tab.",
+            },
+          });
+          showRccHud({
+            title: `Confirm Poshmark Delist (${payload.sku || "SKU"})`,
+            message: "Click Delete Listing on this page, then tap Mark Delisted below.",
+            tone: "confirm",
+            actionLabel: "Mark Delisted",
+            onAction: async () => {
+              await chrome.runtime.sendMessage({
+                type: "RCC_JOB_STATUS_UPDATE",
+                jobId: job.id,
+                status: "completed",
+                extra: { marketplace: "poshmark" },
+              });
+              showRccHud({
+                title: "Poshmark Delist Synced",
+                message: "Marked ended in Command Center.",
+                tone: "success",
+              });
+            },
+          });
+          sendResponse({ ok: true, delisted: false });
+          return;
+        }
+
         showRccHud({
           title: `${isAutoPilot ? "Auto-Pilot · " : ""}Poshmark (${payload.sku || "SKU"})`,
           message: `Checking your Poshmark closet for duplicates before listing...`,

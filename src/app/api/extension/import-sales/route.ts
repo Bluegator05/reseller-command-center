@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { cascadeDelistOtherChannelsForSoldItem } from "@/lib/auto-delist";
 import { roundCurrency } from "@/lib/stale-engine";
 import { getSupabaseServerClient, isSupabaseConfigured } from "@/lib/supabase";
 import type { MarketplaceType, OrderFulfillmentStatus } from "@/lib/types";
@@ -20,6 +21,7 @@ interface ScannedSaleInput {
 interface ImportSalesBody {
   marketplace: Exclude<MarketplaceType, "ebay" | "etsy">;
   sales: ScannedSaleInput[];
+  cascadeDelist?: boolean;
 }
 
 const STOPWORDS = new Set([
@@ -381,6 +383,36 @@ export async function POST(request: Request) {
       importedCount += chunk.length;
     }
 
+    // Anti-Double-Sell Cascade: ONLY for brand-new paid sales from the past 7 days
+    let delistedCount = 0;
+    if (body.cascadeDelist && newRows.length > 0) {
+      const sevenDaysAgoMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
+      const itemById = new Map(existingItems.map((it) => [it.id, it]));
+      const rawByOrder = new Map(
+        rawSales.map((s) => [String(s.externalOrderId || "").trim(), s])
+      );
+      for (const row of newRows) {
+        if (
+          row.fulfillment_status === "unpaid" ||
+          row.fulfillment_status === "returned"
+        ) {
+          continue;
+        }
+        const soldMs = Date.parse(row.sold_at);
+        if (!Number.isNaN(soldMs) && soldMs < sevenDaysAgoMs) continue;
+        const inv = itemById.get(row.item_id);
+        const orig = rawByOrder.get(row.external_order_id);
+        const cascaded = await cascadeDelistOtherChannelsForSoldItem({
+          itemId: row.item_id,
+          soldOnMarketplace: marketplace,
+          externalOrderId: row.external_order_id,
+          sku: inv?.sku,
+          title: orig?.title,
+        });
+        delistedCount += cascaded.length;
+      }
+    }
+
     const label =
       marketplace === "poshmark"
         ? "Poshmark"
@@ -394,10 +426,11 @@ export async function POST(request: Request) {
       importedCount,
       updatedCount,
       skippedCount,
+      delistedCount,
       totalReceived: rawSales.length,
       message:
         importedCount > 0
-          ? `Imported ${importedCount} ${label} sale${importedCount === 1 ? "" : "s"}${updatedCount > 0 ? ` and updated ${updatedCount}` : ""} into Sales Ledger!`
+          ? `Imported ${importedCount} ${label} sale${importedCount === 1 ? "" : "s"}${delistedCount > 0 ? ` & auto-delisted ${delistedCount} cross-listing${delistedCount === 1 ? "" : "s"}` : ""}${updatedCount > 0 ? ` (${updatedCount} updated)` : ""}!`
           : updatedCount > 0
             ? `Updated ${updatedCount} existing ${label} sale${updatedCount === 1 ? "" : "s"}.`
             : `All ${rawSales.length} ${label} sales are already up to date in your Sales Ledger.`,

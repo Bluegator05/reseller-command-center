@@ -307,3 +307,167 @@ export async function getActiveInventoryForMatching(): Promise<InventoryItem[]> 
 export function getDemoJobRecorder() {
   return recordDemoJob;
 }
+
+/**
+ * Safe cascade helper for live eBay / Poshmark / Mercari sale syncs.
+ * Only called for BRAND-NEW recent paid sales (within last 7 days) so historical
+ * sales imports can never accidentally end active listings.
+ */
+export async function cascadeDelistOtherChannelsForSoldItem(params: {
+  itemId: string;
+  soldOnMarketplace: MarketplaceType;
+  externalOrderId: string;
+  sku?: string;
+  title?: string;
+}): Promise<AutoDelistCascadeItem[]> {
+  const supabase = getSupabaseServerClient();
+  if (!supabase || !isSupabaseConfigured()) return [];
+
+  const nowIso = new Date().toISOString();
+  const { data: listingsData } = await supabase
+    .from("marketplace_listings")
+    .select("*")
+    .eq("item_id", params.itemId);
+
+  const itemListings = (listingsData ?? []) as MarketplaceListing[];
+  if (itemListings.length === 0) return [];
+
+  // Mark selling channel's listing sold
+  const soldListing = itemListings.find(
+    (l) => l.marketplace === params.soldOnMarketplace
+  );
+  if (soldListing && soldListing.status !== "sold") {
+    await supabase
+      .from("marketplace_listings")
+      .update({ status: "sold", last_synced_at: nowIso })
+      .eq("id", soldListing.id);
+  }
+
+  const otherListings = itemListings.filter(
+    (l) =>
+      l.marketplace !== params.soldOnMarketplace &&
+      (l.status === "active" || l.status === "draft")
+  );
+
+  // Mark master inventory item sold
+  await supabase
+    .from("inventory_items")
+    .update({ status: "sold", updated_at: nowIso })
+    .eq("id", params.itemId);
+
+  if (otherListings.length === 0) return [];
+
+  // Check existing delist jobs for this item to prevent duplicate delist jobs
+  const { data: existingDelists } = await supabase
+    .from("channel_jobs")
+    .select("marketplace, status")
+    .eq("item_id", params.itemId)
+    .eq("action", "delist")
+    .in("status", ["pending", "processing", "completed"]);
+
+  const alreadyQueuedSet = new Set(
+    (existingDelists ?? []).map((j) => String(j.marketplace))
+  );
+
+  const results: AutoDelistCascadeItem[] = [];
+
+  for (const other of otherListings) {
+    if (alreadyQueuedSet.has(other.marketplace)) continue;
+
+    const isApi = other.marketplace === "ebay" || other.marketplace === "etsy";
+    const executionMode = isApi ? "api" : "extension";
+
+    const { data: jobRow } = await supabase
+      .from("channel_jobs")
+      .insert({
+        item_id: params.itemId,
+        listing_id: other.id,
+        marketplace: other.marketplace,
+        action: "delist",
+        execution_mode: executionMode,
+        payload: {
+          sku: params.sku || "",
+          title: params.title || "",
+          externalListingId: other.external_listing_id,
+          externalUrl: other.external_url,
+          reason: `SOLD_ON_${params.soldOnMarketplace.toUpperCase()}`,
+          soldOrderId: params.externalOrderId,
+        },
+        status: isApi ? "processing" : "pending",
+        attempts: isApi ? 1 : 0,
+        started_at: isApi ? nowIso : null,
+      })
+      .select("id")
+      .single();
+
+    const jobId = jobRow?.id ?? `delist-${other.marketplace}`;
+
+    if (isApi) {
+      try {
+        if (
+          other.marketplace === "ebay" &&
+          other.external_listing_id &&
+          isEbayConfigured()
+        ) {
+          await withdrawEbayOffer(other.external_listing_id, params.sku);
+        } else if (
+          other.marketplace === "etsy" &&
+          other.external_listing_id &&
+          isEtsyConfigured()
+        ) {
+          await deactivateEtsyListing(other.external_listing_id);
+        }
+
+        await supabase
+          .from("marketplace_listings")
+          .update({ status: "ended", last_synced_at: nowIso })
+          .eq("id", other.id);
+
+        await supabase
+          .from("channel_jobs")
+          .update({
+            status: "completed",
+            completed_at: new Date().toISOString(),
+          })
+          .eq("id", jobId);
+
+        results.push({
+          marketplace: other.marketplace,
+          executionMode: "api",
+          status: "delisted",
+          jobId,
+          message: `Auto-ended ${other.marketplace.toUpperCase()} listing #${other.external_listing_id} via API`,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "API delist failed";
+        await supabase
+          .from("channel_jobs")
+          .update({
+            status: "failed",
+            error_message: msg,
+            completed_at: new Date().toISOString(),
+          })
+          .eq("id", jobId);
+
+        results.push({
+          marketplace: other.marketplace,
+          executionMode: "api",
+          status: "failed",
+          jobId,
+          message: msg,
+        });
+      }
+    } else {
+      results.push({
+        marketplace: other.marketplace,
+        executionMode: "extension",
+        status: "queued_extension",
+        jobId,
+        message: `Queued urgent ${other.marketplace.toUpperCase()} auto-delist job`,
+      });
+    }
+  }
+
+  return results;
+}
+

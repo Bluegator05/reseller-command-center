@@ -493,6 +493,12 @@ export async function PATCH(request: Request) {
         .single();
 
       listingId = listingRow?.id ?? listingId;
+    } else if (status === "completed" && job.action === "delist") {
+      await supabase
+        .from("marketplace_listings")
+        .update({ status: "ended", last_synced_at: nowIso })
+        .eq("item_id", job.item_id)
+        .eq("marketplace", job.marketplace);
     }
 
     const { data: updated, error: updateErr } = await supabase

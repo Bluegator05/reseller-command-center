@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { cascadeDelistOtherChannelsForSoldItem } from "@/lib/auto-delist";
 import { fetchEbaySalesOrders, isEbayConfigured } from "@/lib/ebay";
 import { getEnvReadiness, getSupabaseServerClient } from "@/lib/supabase";
 
@@ -8,9 +9,11 @@ export async function POST(request: Request) {
   try {
     const body = (await request.json().catch(() => ({}))) as {
       daysBack?: number;
+      cascadeDelist?: boolean;
     };
+    const cascadeDelist = Boolean(body?.cascadeDelist);
     const daysBack = Math.max(
-      7,
+      1,
       Math.min(730, Math.round(Number(body?.daysBack) || 365))
     );
 
@@ -258,17 +261,45 @@ export async function POST(request: Request) {
       importedCount += chunk.length;
     }
 
+    // 5. Anti-Double-Sell Cascade (ONLY when explicitly enabled for live sale watch,
+    //    and strictly limited to brand-new paid sales from the past 7 days!)
+    const delistedCount = { total: 0 };
+    if (cascadeDelist && newSalesPayloads.length > 0) {
+      const sevenDaysAgoMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
+      const lineByOrderId = new Map(orders.map((o) => [o.externalOrderId, o]));
+      for (const row of newSalesPayloads) {
+        if (
+          row.fulfillment_status === "unpaid" ||
+          row.fulfillment_status === "returned"
+        ) {
+          continue;
+        }
+        const soldMs = Date.parse(row.sold_at);
+        if (!Number.isNaN(soldMs) && soldMs < sevenDaysAgoMs) continue;
+        const orig = lineByOrderId.get(row.external_order_id);
+        const cascaded = await cascadeDelistOtherChannelsForSoldItem({
+          itemId: row.item_id,
+          soldOnMarketplace: "ebay",
+          externalOrderId: row.external_order_id,
+          sku: orig?.sku,
+          title: orig?.title,
+        });
+        delistedCount.total += cascaded.length;
+      }
+    }
+
     return NextResponse.json({
       mode: "live",
       importedCount,
       updatedCount,
       skippedCount,
+      delistedCount: delistedCount.total,
       totalFetched: orders.length,
       sourceApi,
       daysBack: effectiveDays,
       message:
         importedCount > 0
-          ? `Imported ${importedCount} eBay sale${importedCount === 1 ? "" : "s"}${updatedCount > 0 ? ` and updated ${updatedCount}` : ""} from the past ${effectiveDays} days.`
+          ? `Imported ${importedCount} eBay sale${importedCount === 1 ? "" : "s"}${delistedCount.total > 0 ? ` & queued ${delistedCount.total} auto-delist${delistedCount.total === 1 ? "" : "s"}` : ""}${updatedCount > 0 ? ` (${updatedCount} updated)` : ""}.`
           : updatedCount > 0
             ? `Updated ${updatedCount} existing eBay order${updatedCount === 1 ? "" : "s"} (all ${orders.length} orders already synced).`
             : `All ${orders.length} eBay orders from the past ${effectiveDays} days are already up to date.`,

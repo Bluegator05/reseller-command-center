@@ -409,6 +409,135 @@
       const shouldSaveDraft = Boolean(message.autoPilot && message.autoPilotSaveDraft);
 
       try {
+        // ANTI-DOUBLE-SELL AUTO-DELIST (DEACTIVATE) HANDLER
+        if (job.action === "delist") {
+          showRccHud({
+            title: `${isAutoPilot ? "Auto-Pilot · " : ""}Auto-Delisting Mercari (${payload.sku || "SKU"})`,
+            message: `Sold on another marketplace (${payload.reason || "anti-double-sell"}) — deactivating Mercari listing now...`,
+            tone: "info",
+          });
+
+          await sleep(1000);
+          const bodyLower = (document.body?.innerText || "").toLowerCase();
+          const hasActivateBtn = Array.from(document.querySelectorAll("button")).some(
+            (b) => !b.closest("#rcc-companion-hud") && /^activate$/i.test((b.textContent || "").trim())
+          );
+          const alreadyEnded =
+            hasActivateBtn ||
+            bodyLower.includes("item is no longer available") ||
+            bodyLower.includes("page not found") ||
+            bodyLower.includes("this item has sold") ||
+            bodyLower.includes("listing was deleted");
+
+          if (alreadyEnded) {
+            await chrome.runtime.sendMessage({
+              type: "RCC_JOB_STATUS_UPDATE",
+              jobId: job.id,
+              status: "completed",
+              extra: { marketplace: "mercari" },
+            });
+            showRccHud({
+              title: `Mercari Already Inactive (${payload.sku || "SKU"})`,
+              message: "Listing is already deactivated or removed — synced back to Command Center.",
+              tone: "success",
+            });
+            if (isAutoPilot) {
+              await sleep(1500);
+              chrome.runtime.sendMessage({ type: "RCC_CLOSE_SENDER_TAB" });
+            }
+            sendResponse({ ok: true, delisted: true });
+            return;
+          }
+
+          // If on public item page (/us/item/m...), click Edit to open /sell/edit/m...
+          if (!window.location.pathname.includes("/sell/edit")) {
+            const editLink = document.querySelector('a[href*="/sell/edit/"]');
+            if (editLink) {
+              editLink.click();
+              await sleep(2200);
+            } else {
+              await clickButtonByText([/^edit$/i, /^edit listing$/i], 2500);
+              await sleep(2200);
+            }
+          }
+
+          window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+          await sleep(700);
+
+          // Prefer Deactivate (safe reversible hide); fall back to Delete if Deactivate isn't shown
+          const deactivateBtn =
+            document.querySelector('button[data-testid="DeactivateButton"]') ||
+            Array.from(document.querySelectorAll('button, [role="button"]')).find((b) => {
+              if (b.disabled || b.closest("#rcc-companion-hud")) return false;
+              const r = b.getBoundingClientRect();
+              return r.width > 40 && r.height > 20 && /^deactivate$/i.test((b.textContent || "").trim());
+            });
+
+          let clickedEnd = false;
+          if (deactivateBtn) {
+            deactivateBtn.scrollIntoView({ block: "center" });
+            await sleep(200);
+            deactivateBtn.click();
+            clickedEnd = true;
+          } else {
+            clickedEnd = await clickButtonByText([/^deactivate$/i, /^delete$/i, /^delete listing$/i], 3500);
+          }
+
+          if (clickedEnd) {
+            await sleep(750);
+            await clickButtonByText([/^deactivate$/i, /^yes$/i, /^confirm$/i, /^delete$/i], 3000);
+            await sleep(1500);
+
+            await chrome.runtime.sendMessage({
+              type: "RCC_JOB_STATUS_UPDATE",
+              jobId: job.id,
+              status: "completed",
+              extra: { marketplace: "mercari" },
+            });
+            showRccHud({
+              title: `Deactivated on Mercari! (${payload.sku || "SKU"})`,
+              message: "Anti-double-sell complete — listing hidden from buyers & synced to Command Center.",
+              tone: "success",
+            });
+            if (isAutoPilot) {
+              await sleep(1800);
+              chrome.runtime.sendMessage({ type: "RCC_CLOSE_SENDER_TAB" });
+            }
+            sendResponse({ ok: true, delisted: true });
+            return;
+          }
+
+          await chrome.runtime.sendMessage({
+            type: "RCC_JOB_STATUS_UPDATE",
+            jobId: job.id,
+            status: "needs_user_confirm",
+            extra: {
+              errorMessage: "Could not find Deactivate button — please deactivate manually on this tab.",
+            },
+          });
+          showRccHud({
+            title: `Confirm Mercari Delist (${payload.sku || "SKU"})`,
+            message: "Click Deactivate on this page, then tap Mark Delisted below.",
+            tone: "confirm",
+            actionLabel: "Mark Delisted",
+            onAction: async () => {
+              await chrome.runtime.sendMessage({
+                type: "RCC_JOB_STATUS_UPDATE",
+                jobId: job.id,
+                status: "completed",
+                extra: { marketplace: "mercari" },
+              });
+              showRccHud({
+                title: "Mercari Delist Synced",
+                message: "Marked ended in Command Center.",
+                tone: "success",
+              });
+            },
+          });
+          sendResponse({ ok: true, delisted: false });
+          return;
+        }
+
         // Tell background worker right away to watch this tab for live publish redirect!
         chrome.runtime.sendMessage({
           type: "RCC_WATCH_PUBLISH_SUCCESS",

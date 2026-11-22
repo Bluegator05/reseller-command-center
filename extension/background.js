@@ -10,6 +10,7 @@
  */
 
 const POLL_ALARM_NAME = "rcc_poll_extension_jobs";
+const SALE_WATCH_ALARM_NAME = "rcc_sale_watch_poll";
 const MARKETPLACE_CREATE_URLS = {
   poshmark: "https://poshmark.com/create-listing",
   mercari: "https://www.mercari.com/sell/",
@@ -29,6 +30,7 @@ const DEFAULT_CONFIG = {
 };
 
 let autoPilotBusy = false;
+let saleWatchBusy = false;
 
 async function getConfig() {
   const stored = await chrome.storage.local.get(["rccConfig"]);
@@ -45,9 +47,16 @@ async function saveConfig(partial) {
 
 async function configureAlarm(config) {
   await chrome.alarms.clear(POLL_ALARM_NAME);
+  await chrome.alarms.clear(SALE_WATCH_ALARM_NAME);
   if (config.autoPoll || config.autoPilot) {
     chrome.alarms.create(POLL_ALARM_NAME, {
       periodInMinutes: Math.max(0.5, Number(config.pollIntervalMinutes) || 0.5),
+    });
+  }
+  // When Mac Mini Auto-Pilot is ON, automatically check eBay, Poshmark & Mercari for new sales every 10 minutes
+  if (config.autoPilot) {
+    chrome.alarms.create(SALE_WATCH_ALARM_NAME, {
+      periodInMinutes: 10,
     });
   }
 }
@@ -171,17 +180,31 @@ async function updateBadgeCount(jobs, config) {
 async function runAutoPilotCycle(jobs, config) {
   if (!config?.autoPilot || autoPilotBusy) return;
   const now = Date.now();
-  // Give a local iMac/MacBook Air interactive browser a 12-second head start to claim jobs first
-  const candidate = [...(jobs || [])]
+
+  // Priority 1 (URGENT — 0s delay): Auto-delist jobs run IMMEDIATELY to stop double-sells!
+  const urgentDelist = [...(jobs || [])]
     .filter(
       (j) =>
         j.status === "pending" &&
-        j.action === "create" &&
-        (j.marketplace === "poshmark" || j.marketplace === "mercari") &&
-        now - Date.parse(j.created_at || 0) >= 12000
+        j.action === "delist" &&
+        (j.marketplace === "poshmark" || j.marketplace === "mercari")
     )
     .sort((a, b) => Date.parse(a.created_at || 0) - Date.parse(b.created_at || 0))[0];
 
+  // Priority 2: Give a local iMac/MacBook Air interactive browser a 12-second head start on create jobs
+  const createCandidate = urgentDelist
+    ? null
+    : [...(jobs || [])]
+        .filter(
+          (j) =>
+            j.status === "pending" &&
+            j.action === "create" &&
+            (j.marketplace === "poshmark" || j.marketplace === "mercari") &&
+            now - Date.parse(j.created_at || 0) >= 12000
+        )
+        .sort((a, b) => Date.parse(a.created_at || 0) - Date.parse(b.created_at || 0))[0];
+
+  const candidate = urgentDelist || createCandidate;
   if (!candidate) return;
 
   autoPilotBusy = true;
@@ -223,6 +246,30 @@ async function refreshJobsCache(allowAutoPilot = false) {
 
 const dispatchedJobIds = new Set();
 
+function resolveDelistTargetUrl(job) {
+  const extUrl = job?.payload?.externalUrl || "";
+  const extId = job?.payload?.externalListingId || "";
+  if (job.marketplace === "poshmark") {
+    const pmMatch =
+      String(extId).match(/([0-9a-f]{24})/i) ||
+      String(extUrl).match(/([0-9a-f]{24})/i);
+    if (pmMatch) {
+      return `https://poshmark.com/edit-listing/${pmMatch[1]}`;
+    }
+    return extUrl || null;
+  }
+  if (job.marketplace === "mercari") {
+    const mcMatch =
+      String(extId).match(/(?:^|[^a-z0-9])(m\d{9,13})(?:$|[^a-z0-9])/i) ||
+      String(extUrl).match(/(?:^|[^a-z0-9])(m\d{9,13})(?:$|[^a-z0-9])/i);
+    if (mcMatch) {
+      return `https://www.mercari.com/sell/edit/${mcMatch[1]}/`;
+    }
+    return extUrl || null;
+  }
+  return extUrl || null;
+}
+
 /**
  * Opens the target marketplace listing page and dispatches the job payload
  * once the content script finishes loading.
@@ -232,12 +279,12 @@ async function dispatchJobToTab(job, options = {}) {
     return { ok: true, alreadyDispatched: true };
   }
   const targetUrl =
-    job.action === "delist" && job.payload?.externalUrl
-      ? job.payload.externalUrl
+    job.action === "delist"
+      ? resolveDelistTargetUrl(job)
       : MARKETPLACE_CREATE_URLS[job.marketplace];
 
   if (!targetUrl) {
-    throw new Error(`Unsupported extension marketplace: ${job.marketplace}`);
+    throw new Error(`Unsupported or missing URL for ${job.marketplace} ${job.action} job`);
   }
 
   if (job?.id) dispatchedJobIds.add(job.id);
@@ -939,15 +986,19 @@ async function scrapeSoldOrdersFromDom(marketplace) {
   return results;
 }
 
-async function importMarketplaceSales(marketplace) {
+async function importMarketplaceSales(marketplace, options = {}) {
   if (marketplace !== "poshmark" && marketplace !== "mercari") {
     throw new Error(`Unsupported sales import marketplace: ${marketplace}`);
   }
 
+  const cascadeDelist = Boolean(options.cascadeDelist);
+  const background = Boolean(options.background);
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   let targetTab = null;
+  let createdTempTab = false;
 
   if (
+    !background &&
     marketplace === "poshmark" &&
     activeTab?.id &&
     activeTab.url &&
@@ -956,6 +1007,7 @@ async function importMarketplaceSales(marketplace) {
   ) {
     targetTab = activeTab;
   } else if (
+    !background &&
     marketplace === "mercari" &&
     activeTab?.id &&
     activeTab.url &&
@@ -967,7 +1019,8 @@ async function importMarketplaceSales(marketplace) {
       marketplace === "poshmark"
         ? "https://poshmark.com/order/sales"
         : "https://www.mercari.com/mypage/listings/active/";
-    const created = await chrome.tabs.create({ url: startUrl, active: true });
+    const created = await chrome.tabs.create({ url: startUrl, active: !background });
+    createdTempTab = background;
     await new Promise((resolve) => {
       const listener = (tabId, changeInfo) => {
         if (tabId === created.id && changeInfo.status === "complete") {
@@ -985,14 +1038,24 @@ async function importMarketplaceSales(marketplace) {
     targetTab = created;
   }
 
-  const injected = await chrome.scripting.executeScript({
-    target: { tabId: targetTab.id },
-    func: scrapeSoldOrdersFromDom,
-    args: [marketplace],
-  });
+  let sales = [];
+  try {
+    const injected = await chrome.scripting.executeScript({
+      target: { tabId: targetTab.id },
+      func: scrapeSoldOrdersFromDom,
+      args: [marketplace],
+    });
+    sales = injected?.[0]?.result || [];
+  } finally {
+    if (createdTempTab && targetTab?.id) {
+      chrome.tabs.remove(targetTab.id).catch(() => {});
+    }
+  }
 
-  const sales = injected?.[0]?.result || [];
   if (sales.length === 0) {
+    if (background) {
+      return { ok: true, marketplace, scannedCount: 0, importedCount: 0, delistedCount: 0 };
+    }
     throw new Error(
       marketplace === "poshmark"
         ? "No Poshmark sold orders detected. Make sure you are signed into Poshmark on the My Sales page and try again."
@@ -1009,7 +1072,7 @@ async function importMarketplaceSales(marketplace) {
     method: "POST",
     headers: buildBridgeHeaders(config, true),
     credentials: "include",
-    body: JSON.stringify({ marketplace, sales }),
+    body: JSON.stringify({ marketplace, sales, cascadeDelist }),
   });
 
   if (res.status === 401) {
@@ -1022,13 +1085,100 @@ async function importMarketplaceSales(marketplace) {
     throw new Error(data.error || `Sales import failed (${res.status})`);
   }
 
-  await broadcastToCommandCenterTabs({
-    type: "RCC_JOB_COMPLETED",
-    marketplace,
-    sku: `${sales.length} sales`,
-  });
+  if ((data.importedCount || 0) > 0 || (data.delistedCount || 0) > 0) {
+    await broadcastToCommandCenterTabs({
+      type: "RCC_JOB_COMPLETED",
+      marketplace,
+      sku: `${data.importedCount || 0} new sales`,
+    });
+  }
 
   return { ok: true, scannedCount: sales.length, ...data };
+}
+
+/**
+ * 24/7 Anti-Double-Sell Sale Watcher:
+ * Checks eBay (API), Poshmark, and Mercari for brand-new recent sales (past 3-7 days),
+ * immediately ends eBay via API when sold elsewhere, queues urgent delist jobs for
+ * Poshmark/Mercari, and immediately dispatches them!
+ */
+async function runSaleWatchCycle({ background = true } = {}) {
+  if (saleWatchBusy) {
+    return { ok: true, skipped: true, message: "Sale watch already running." };
+  }
+  saleWatchBusy = true;
+  const summary = {
+    ebayNew: 0,
+    poshmarkNew: 0,
+    mercariNew: 0,
+    delistsTriggered: 0,
+    errors: [],
+  };
+
+  try {
+    const config = await getConfig();
+    const base = (
+      config.apiBaseUrl || "https://reseller-command-center-black.vercel.app"
+    ).replace(/\/+$/, "");
+
+    // 1. Check eBay (fast server API call — past 3 days, cascadeDelist: true)
+    try {
+      const res = await fetch(`${base}/api/ebay/sync-sales`, {
+        method: "POST",
+        headers: buildBridgeHeaders(config, true),
+        credentials: "include",
+        body: JSON.stringify({ daysBack: 3, cascadeDelist: true }),
+      });
+      if (res.ok) {
+        const d = await res.json();
+        summary.ebayNew = Number(d.importedCount || 0);
+        summary.delistsTriggered += Number(d.delistedCount || 0);
+      }
+    } catch (e) {
+      summary.errors.push(`eBay: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // 2. Check Poshmark & Mercari quietly in background tabs (auto-closes after scraping)
+    for (const mkt of ["poshmark", "mercari"]) {
+      try {
+        const r = await importMarketplaceSales(mkt, {
+          cascadeDelist: true,
+          background,
+        });
+        if (mkt === "poshmark") summary.poshmarkNew = Number(r.importedCount || 0);
+        if (mkt === "mercari") summary.mercariNew = Number(r.importedCount || 0);
+        summary.delistsTriggered += Number(r.delistedCount || 0);
+      } catch (e) {
+        summary.errors.push(`${mkt}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
+    // 3. Immediately poll queue & run any urgent delist jobs!
+    const refreshed = await refreshJobsCache(true);
+    if (!config.autoPilot && Array.isArray(refreshed.jobs)) {
+      const pendingDelist = refreshed.jobs.find(
+        (j) =>
+          j.status === "pending" &&
+          j.action === "delist" &&
+          (j.marketplace === "poshmark" || j.marketplace === "mercari")
+      );
+      if (pendingDelist) {
+        await dispatchJobToTab(pendingDelist, { autoPilot: false });
+      }
+    }
+
+    const totalNew = summary.ebayNew + summary.poshmarkNew + summary.mercariNew;
+    return {
+      ok: true,
+      ...summary,
+      message:
+        totalNew > 0 || summary.delistsTriggered > 0
+          ? `Found ${totalNew} new sale${totalNew === 1 ? "" : "s"} (eBay ${summary.ebayNew}, Posh ${summary.poshmarkNew}, Mercari ${summary.mercariNew}) · ${summary.delistsTriggered} auto-delist${summary.delistsTriggered === 1 ? "" : "s"} triggered!`
+          : `Checked eBay, Poshmark & Mercari — no new sales to delist right now.`,
+    };
+  } finally {
+    saleWatchBusy = false;
+  }
 }
 
 async function linkExistingMatch(payload) {
@@ -1081,6 +1231,12 @@ chrome.runtime.onInstalled.addListener(async () => {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === POLL_ALARM_NAME) {
     refreshJobsCache(true);
+  } else if (alarm.name === SALE_WATCH_ALARM_NAME) {
+    getConfig().then((cfg) => {
+      if (cfg.autoPilot) {
+        runSaleWatchCycle({ background: true });
+      }
+    });
   }
 });
 
@@ -1489,8 +1645,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
         case "RCC_IMPORT_SALES": {
-          const salesRes = await importMarketplaceSales(message.marketplace);
+          const salesRes = await importMarketplaceSales(message.marketplace, {
+            cascadeDelist: Boolean(message.cascadeDelist),
+            background: false,
+          });
           sendResponse(salesRes);
+          break;
+        }
+        case "RCC_CHECK_NEW_SALES": {
+          const watchRes = await runSaleWatchCycle({ background: true });
+          sendResponse(watchRes);
           break;
         }
         default:

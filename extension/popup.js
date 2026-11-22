@@ -282,9 +282,35 @@ if (btnScanEl) {
   });
 }
 
+const btnCheckNewSales = document.getElementById("btn-check-new-sales");
 const btnImportPoshSales = document.getElementById("btn-import-posh-sales");
 const btnImportMercariSales = document.getElementById("btn-import-mercari-sales");
 const salesImportStatusEl = document.getElementById("sales-import-status");
+
+if (btnCheckNewSales) {
+  btnCheckNewSales.addEventListener("click", async () => {
+    btnCheckNewSales.disabled = true;
+    btnCheckNewSales.textContent = "Checking eBay, Poshmark & Mercari...";
+    errorBarEl.style.display = "none";
+    if (salesImportStatusEl) salesImportStatusEl.style.display = "none";
+    try {
+      const res = await chrome.runtime.sendMessage({ type: "RCC_CHECK_NEW_SALES" });
+      await loadState();
+      if (!res?.ok) {
+        errorBarEl.style.display = "block";
+        errorBarEl.textContent = res?.error || "Sale check failed";
+        return;
+      }
+      if (salesImportStatusEl) {
+        salesImportStatusEl.style.display = "block";
+        salesImportStatusEl.innerHTML = `<strong>Anti-Double-Sell Check:</strong> ${res.message}`;
+      }
+    } finally {
+      btnCheckNewSales.disabled = false;
+      btnCheckNewSales.textContent = "Check New Sales & Auto-Delist Now";
+    }
+  });
+}
 
 async function runSalesImport(marketplace, btn, defaultLabel) {
   btn.disabled = true;
@@ -296,6 +322,7 @@ async function runSalesImport(marketplace, btn, defaultLabel) {
     const res = await chrome.runtime.sendMessage({
       type: "RCC_IMPORT_SALES",
       marketplace,
+      cascadeDelist: false,
     });
     if (!res?.ok) {
       errorBarEl.style.display = "block";
@@ -317,12 +344,12 @@ async function runSalesImport(marketplace, btn, defaultLabel) {
 
 if (btnImportPoshSales) {
   btnImportPoshSales.addEventListener("click", () =>
-    runSalesImport("poshmark", btnImportPoshSales, "Poshmark Sales")
+    runSalesImport("poshmark", btnImportPoshSales, "Import Poshmark Sales")
   );
 }
 if (btnImportMercariSales) {
   btnImportMercariSales.addEventListener("click", () =>
-    runSalesImport("mercari", btnImportMercariSales, "Mercari Sales")
+    runSalesImport("mercari", btnImportMercariSales, "Import Mercari Sales")
   );
 }
 

@@ -40,7 +40,10 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
-  if (pathname.startsWith("/api/extension/")) {
+  if (
+    pathname.startsWith("/api/extension/") ||
+    pathname === "/api/ebay/sync-sales"
+  ) {
     const extPasscode = request.headers.get("x-owner-passcode")?.trim();
     if (extPasscode && verifyPasscodeInput(extPasscode)) {
       return NextResponse.next();
