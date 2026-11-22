@@ -426,7 +426,12 @@ export async function mapItemForMarketplace(params: {
   const marketplaceRulesGuide: Record<MarketplaceType, string> = {
     poshmark: [
       `Poshmark Departments MUST be one of: "Women", "Men", "Kids", "Home", "Pets", "Electronics".`,
-      `Poshmark Condition MUST be "New With Tags" or "Pre-owned". Size should be "OS" for Home/Bags/Crafts/Electronics or the exact garment/shoe size.`,
+      `Poshmark Categories MUST be an EXACT real Poshmark category under that department:`,
+      `- Under "Home": "Accents", "Art", "Bath", "Bedding", "Design", "Dining", "Games", "Holiday", "Kitchen", "Office", "Party Supplies", "Storage & Organization", "Wall Decor", "Other". (For craft supplies, paper punches, stamps, scrapbooking: MUST use department "Home", category "Office", subcategory "Arts & Crafts" — NEVER use "Crafts" as category!)`,
+      `- Under "Women": "Accessories", "Bags", "Dresses", "Intimates & Sleepwear", "Jackets & Coats", "Jeans", "Jewelry", "Makeup", "Pants & Jumpsuits", "Shoes", "Shorts", "Skirts", "Sweaters", "Swim", "Tops", "Other".`,
+      `- Under "Men": "Accessories", "Bags", "Jackets & Coats", "Jeans", "Pants", "Shirts", "Shoes", "Shorts", "Suits & Blazers", "Sweaters", "Swim", "Other".`,
+      `- Under "Electronics": "Cameras, Photo & Video", "Cell Phones & Accessories", "Computers, Laptops & Parts", "Headphones", "Media", "Networking", "Tablets & Accessories", "Video Games & Consoles", "Wearables", "Other".`,
+      `Poshmark Condition MUST be one of: "New With Tags (NWT)", "Like New", "Good", "Fair". Size should be "OS" for Home/Bags/Crafts/Electronics or the exact garment/shoe size.`,
       `Poshmark Policy: PROHIBITED items include perfumes, colognes, nail polish, aerosols, flammable liquids, used/opened makeup/skincare, medical devices, supplements, food, weapons/knives, heavy appliances/power tools/TVs/furniture, digital goods, and items over 10 lbs.`,
     ].join(" "),
     mercari: [

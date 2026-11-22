@@ -169,8 +169,31 @@
       const clickableChild =
         matchedEl.tagName === "LI" ? matchedEl.querySelector("a, button") || matchedEl : matchedEl;
       clickableChild.click();
+      await sleep(300);
+
+      // On last step (e.g. Condition 2-line cards), if label didn't update yet, also click parent/inner item
+      if (stepIdx === stepTargets.length - 1) {
+        const midLabel = (triggerEl.textContent || "").replace(/\s+/g, " ").trim();
+        if (midLabel === beforeLabel) {
+          const itemContainer = matchedEl.closest('li, a, button, .dropdown__menu__item, [role="option"]');
+          if (itemContainer && itemContainer !== clickableChild) {
+            itemContainer.click();
+            await sleep(250);
+          }
+          const innerLink = matchedEl.querySelector("a, button, span, div");
+          if (
+            (triggerEl.textContent || "").replace(/\s+/g, " ").trim() === beforeLabel &&
+            innerLink &&
+            innerLink !== clickableChild
+          ) {
+            innerLink.click();
+            await sleep(250);
+          }
+        }
+      }
+
       clickedSteps += 1;
-      await sleep(500);
+      await sleep(350);
     }
 
     const afterLabel = (triggerEl.textContent || "").replace(/\s+/g, " ").trim();
@@ -395,7 +418,7 @@
 
         const debugLog = [];
 
-        // 3. Auto-select Poshmark Category (Department -> Category)
+        // 3. Auto-select Poshmark Category (Department -> Category, with safe fallback to Office/Other)
         const catDropdown = findPoshmarkDropdownByContainerOrText(
           [
             '.listing-editor__category-container [data-test="dropdown"]',
@@ -403,7 +426,14 @@
           ],
           /^select category/i
         );
-        const catSteps = [sc.department, sc.category].filter(Boolean);
+        const catStep2 = sc.category
+          ? /craft|stamp|punch|scrapbook|paper|sew|yarn/i.test(
+              `${sc.category} ${sc.subcategory || ""} ${payload.mappedTitle || ""}`
+            )
+            ? [sc.category, "Office", "Art", "Other"]
+            : [sc.category, "Other"]
+          : ["Other"];
+        const catSteps = sc.department ? [sc.department, catStep2] : [catStep2];
         let categoryMatched = false;
         if (catSteps.length > 0) {
           categoryMatched = await selectPoshmarkVueDropdown(
@@ -556,7 +586,7 @@
 
         const anyMissed = !categoryMatched || !sizeMatched || !conditionMatched;
         if (debugLog.length > 0) {
-          console.log("[RCC Poshmark v0.9.0]", debugLog.join(" | "));
+          console.log("[RCC Poshmark v0.9.3]", debugLog.join(" | "));
         }
 
         // 7. Auto-Publish: If Category & Size are populated, click "Next" -> "List This Item"!
@@ -652,7 +682,7 @@
           secondaryLabel: anyMissed ? "Copy Dropdown Debug Info (to fix any missed field)" : null,
           onSecondaryAction: anyMissed
             ? async () => {
-                const txt = `Poshmark v0.9.0 Debug (${catLabel}):\n${debugLog.join("\n")}`;
+                const txt = `Poshmark v0.9.3 Debug (${catLabel}):\n${debugLog.join("\n")}`;
                 try {
                   await navigator.clipboard.writeText(txt);
                   const btn = document.getElementById("rcc-hud-secondary");
