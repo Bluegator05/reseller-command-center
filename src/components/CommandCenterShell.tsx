@@ -17,6 +17,7 @@ import {
   Send,
   ShieldCheck,
   Smartphone,
+  Wand2,
   X,
 } from "lucide-react";
 import { AnalyticsTaxPanel } from "./AnalyticsTaxPanel";
@@ -26,6 +27,7 @@ import { ChannelStatusStrip } from "./ChannelStatusStrip";
 import { CrossListDrawer } from "./CrossListDrawer";
 import { ExtensionQueuePanel } from "./ExtensionQueuePanel";
 import { ItemDetailModal } from "./ItemDetailModal";
+import { ListingStudioPanel } from "./ListingStudioPanel";
 import { QuickAddItemModal } from "./QuickAddItemModal";
 import { SalesLedgerPanel } from "./SalesLedgerPanel";
 import { SourcingCompsPanel } from "./SourcingCompsPanel";
@@ -64,6 +66,7 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
   const [data, setData] = useState<CommandCenterPayload>(initialData);
   const [activeTab, setActiveTab] = useState<
     | "radar"
+    | "listing"
     | "offers"
     | "sourcing"
     | "bins"
@@ -624,6 +627,25 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
           </button>
 
           <button
+            id="tab-listing-studio"
+            type="button"
+            onClick={() => setActiveTab("listing")}
+            className={`relative w-full py-2 px-1 rounded-xl flex flex-col items-center gap-1 text-[10px] font-semibold transition cursor-pointer ${
+              activeTab === "listing"
+                ? "bg-[#ECFDF5] text-[#0F766E]"
+                : "text-[#5C606B] hover:bg-[#F2F6F4] hover:text-[#14151A]"
+            }`}
+          >
+            <Wand2 className="w-4 h-4" />
+            <span>List</span>
+            {data.draftItems.length > 0 && (
+              <span className="absolute top-1 right-1.5 min-w-[16px] h-4 px-1 rounded-full font-mono tabular-nums text-[9px] font-bold bg-[#0F766E] text-white inline-flex items-center justify-center">
+                {data.draftItems.length}
+              </span>
+            )}
+          </button>
+
+          <button
             id="tab-watcher-offers"
             type="button"
             onClick={() => setActiveTab("offers")}
@@ -804,7 +826,7 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
         </header>
 
         <main className="flex-1 max-w-[1380px] w-full mx-auto px-4 sm:px-6 py-5 space-y-5">
-        {activeTab !== "sourcing" && (
+        {activeTab !== "sourcing" && activeTab !== "listing" && (
           <ChannelStatusStrip
             mode={data.mode}
             accounts={data.accounts}
@@ -819,7 +841,16 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
           />
         )}
 
-        {activeTab === "sourcing" ? (
+        {activeTab === "listing" ? (
+          <ListingStudioPanel
+            draftItems={data.draftItems}
+            isLiveMode={isLiveMode}
+            onPublished={async ({ sku, message }) => {
+              await refreshInventory();
+              pushToast("success", `${sku} Published!`, message);
+            }}
+          />
+        ) : activeTab === "sourcing" ? (
           <SourcingCompsPanel
             onSaveToInventory={async (payload: QuickAddItemRequest) => {
               const res = await fetch("/api/inventory", {

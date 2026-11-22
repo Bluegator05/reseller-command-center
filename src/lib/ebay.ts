@@ -1522,3 +1522,565 @@ export async function fetchEbaySalesOrders(daysBack = 365): Promise<{
   };
 }
 
+function escapeXml(raw: string): string {
+  return String(raw || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+/**
+ * Uploads a JPEG/PNG image binary directly to eBay Picture Services (EPS) via
+ * Trading API `UploadSiteHostedPictures` and returns the permanent `i.ebayimg.com` URL.
+ */
+export async function uploadEbayHostedPicture(
+  imageBuffer: Buffer,
+  fileName = "listing-photo.jpg"
+): Promise<string> {
+  const token = await getEbayAccessToken();
+  const { apiBase } = getEbayBaseUrls();
+  const boundary = `----RCCEbayBoundary${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+
+  const xmlPart = `<?xml version="1.0" encoding="utf-8"?>
+<UploadSiteHostedPicturesRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <WarningLevel>High</WarningLevel>
+  <PictureSet>Supersize</PictureSet>
+</UploadSiteHostedPicturesRequest>`;
+
+  const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, "_") || "photo.jpg";
+  const headerPart1 = Buffer.from(
+    `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="XML Payload"\r\n` +
+      `Content-Type: text/xml; charset=utf-8\r\n\r\n` +
+      `${xmlPart}\r\n` +
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="image"; filename="${safeName}"\r\n` +
+      `Content-Type: application/octet-stream\r\n\r\n`,
+    "utf8"
+  );
+  const footerPart = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
+  const body = Buffer.concat([headerPart1, imageBuffer, footerPart]);
+
+  const response = await fetch(`${apiBase}/ws/api.dll`, {
+    method: "POST",
+    headers: {
+      "X-EBAY-API-SITEID": "0",
+      "X-EBAY-API-COMPATIBILITY-LEVEL": "1355",
+      "X-EBAY-API-CALL-NAME": "UploadSiteHostedPictures",
+      "X-EBAY-API-IAF-TOKEN": token,
+      "Content-Type": `multipart/form-data; boundary=${boundary}`,
+    },
+    body,
+    cache: "no-store",
+  });
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `eBay UploadSiteHostedPictures failed (${response.status}): ${text.slice(0, 220)}`
+    );
+  }
+
+  const ack = extractXmlTag(text, "Ack");
+  if (ack && ack !== "Success" && ack !== "Warning") {
+    const msg =
+      extractXmlTag(text, "LongMessage") ||
+      extractXmlTag(text, "ShortMessage") ||
+      "Picture upload rejected by eBay";
+    throw new Error(`eBay photo upload error: ${decodeXmlEntities(msg)}`);
+  }
+
+  const fullUrl = extractXmlTag(text, "FullURL");
+  if (!fullUrl) {
+    throw new Error("eBay UploadSiteHostedPictures did not return a FullURL.");
+  }
+  return upgradeEbayImageUrl(fullUrl) || fullUrl;
+}
+
+export interface SuggestedEbayCategory {
+  categoryId: string;
+  categoryName: string;
+  categoryPath: string;
+  percentItemFound: number;
+}
+
+/**
+ * Fetches top real leaf eBay categories for a search query via Trading API
+ * `GetSuggestedCategories` (falls back gracefully to empty array if offline).
+ */
+export async function suggestEbayCategories(
+  query: string
+): Promise<SuggestedEbayCategory[]> {
+  const cleanQuery = query.trim().slice(0, 120);
+  if (!cleanQuery || !isEbayConfigured()) return [];
+
+  try {
+    const xml = await ebayTradingRequest(
+      "GetSuggestedCategories",
+      `<Query>${escapeXml(cleanQuery)}</Query>`
+    );
+
+    const blocks = extractAllXmlTags(xml, "SuggestedCategory");
+    const out: SuggestedEbayCategory[] = [];
+    for (const block of blocks.slice(0, 6)) {
+      const catBlock = extractXmlTag(block, "Category") || block;
+      const categoryId = extractXmlTag(catBlock, "CategoryID");
+      const categoryName = extractXmlTag(catBlock, "CategoryName");
+      const parents = extractAllXmlTags(catBlock, "CategoryParentName").map((p) =>
+        decodeXmlEntities(p)
+      );
+      const pct = Number(extractXmlTag(block, "PercentItemFound") || 0);
+      if (!categoryId || !categoryName) continue;
+      out.push({
+        categoryId,
+        categoryName,
+        categoryPath: [...parents, categoryName].join(" > "),
+        percentItemFound: pct,
+      });
+    }
+    return out;
+  } catch (err) {
+    console.warn("[ebay] GetSuggestedCategories warning:", err);
+    return [];
+  }
+}
+
+export type StudioConditionChoice =
+  | "new_sealed"
+  | "new_opened"
+  | "pre_owned"
+  | "for_parts";
+
+/**
+ * Queries `GetCategoryFeatures` for a leaf eBay category to pick an exact valid
+ * `ConditionID` (prevents eBay "ConditionID not valid for this category" errors).
+ */
+export async function resolveValidEbayCondition(
+  categoryId: string,
+  desired: StudioConditionChoice
+): Promise<{ conditionId: number | null; conditionName: string }> {
+  const defaultMap: Record<StudioConditionChoice, { id: number; name: string }> = {
+    new_sealed: { id: 1000, name: "New" },
+    new_opened: { id: 1500, name: "Open box" },
+    pre_owned: { id: 3000, name: "Used" },
+    for_parts: { id: 7000, name: "For parts or not working" },
+  };
+  const fallback = defaultMap[desired] || defaultMap.pre_owned;
+
+  if (!categoryId || !isEbayConfigured()) {
+    return { conditionId: fallback.id, conditionName: fallback.name };
+  }
+
+  try {
+    const xml = await ebayTradingRequest(
+      "GetCategoryFeatures",
+      `<CategoryID>${escapeXml(categoryId)}</CategoryID>
+      <DetailLevel>ReturnAll</DetailLevel>
+      <FeatureID>ConditionEnabled</FeatureID>
+      <FeatureID>ConditionValues</FeatureID>`
+    );
+
+    const enabled = (extractXmlTag(xml, "ConditionEnabled") || "").toLowerCase();
+    if (enabled === "disabled") {
+      return { conditionId: null, conditionName: "Not applicable" };
+    }
+
+    const condBlocks = extractAllXmlTags(xml, "Condition");
+    const valid = condBlocks
+      .map((b) => ({
+        id: Number(extractXmlTag(b, "ID") || 0),
+        name: decodeXmlEntities(extractXmlTag(b, "DisplayName") || ""),
+      }))
+      .filter((c) => c.id > 0);
+
+    if (valid.length === 0) {
+      return { conditionId: fallback.id, conditionName: fallback.name };
+    }
+
+    const prefIds: Record<StudioConditionChoice, number[]> = {
+      new_sealed: [1000, 1500, 1750, 2750, 3000],
+      new_opened: [1500, 1750, 1000, 2750, 3000],
+      pre_owned: [3000, 4000, 5000, 2500, 2750, 6000, 1500],
+      for_parts: [7000, 6000, 5000, 3000],
+    };
+
+    for (const candidateId of prefIds[desired] || prefIds.pre_owned) {
+      const hit = valid.find((v) => v.id === candidateId);
+      if (hit) {
+        return { conditionId: hit.id, conditionName: hit.name };
+      }
+    }
+
+    return { conditionId: valid[0].id, conditionName: valid[0].name };
+  } catch (err) {
+    console.warn(`[ebay] GetCategoryFeatures(${categoryId}) warning:`, err);
+    return { conditionId: fallback.id, conditionName: fallback.name };
+  }
+}
+
+interface EbaySellerListingDefaults {
+  postalCode: string;
+  location: string;
+  dispatchTimeMax: number;
+  useSellerProfiles: boolean;
+  paymentProfileId?: string;
+  returnProfileId?: string;
+  calculatedShippingProfileId?: string;
+  freeShippingProfileId?: string;
+}
+
+/**
+ * Auto-detects the seller's real PostalCode, Location, and eBay Business Policies
+ * (if opted in) from an existing live listing + Account API fulfillment policies.
+ * Strictly avoids selecting any USPS Priority Mail policy.
+ */
+async function detectEbaySellerListingDefaults(
+  sampleItemId?: string | null
+): Promise<EbaySellerListingDefaults> {
+  const defaults: EbaySellerListingDefaults = {
+    postalCode: process.env.EBAY_POSTAL_CODE?.trim() || "75001",
+    location: process.env.EBAY_LOCATION?.trim() || "United States",
+    dispatchTimeMax: 2,
+    useSellerProfiles: false,
+  };
+
+  let targetSampleId = sampleItemId?.trim() || "";
+  if (!targetSampleId) {
+    try {
+      const activeXml = await ebayTradingRequest(
+        "GetMyeBaySelling",
+        `<ActiveList>
+          <Include>true</Include>
+          <Pagination><EntriesPerPage>1</EntriesPerPage><PageNumber>1</PageNumber></Pagination>
+        </ActiveList>
+        <OutputSelector>ActiveList.ItemArray.Item.ItemID</OutputSelector>`
+      );
+      targetSampleId = extractXmlTag(activeXml, "ItemID") || "";
+    } catch {
+      // ignore
+    }
+  }
+
+  if (targetSampleId && /^\d+$/.test(targetSampleId)) {
+    try {
+      const itemXml = await ebayTradingRequest(
+        "GetItem",
+        `<ItemID>${targetSampleId}</ItemID>
+        <OutputSelector>Item.PostalCode</OutputSelector>
+        <OutputSelector>Item.Location</OutputSelector>
+        <OutputSelector>Item.DispatchTimeMax</OutputSelector>
+        <OutputSelector>Item.SellerProfiles</OutputSelector>`
+      );
+      const postal = extractXmlTag(itemXml, "PostalCode");
+      const loc = extractXmlTag(itemXml, "Location");
+      const dispatch = Number(extractXmlTag(itemXml, "DispatchTimeMax") || 0);
+      if (postal) defaults.postalCode = postal;
+      if (loc) defaults.location = loc;
+      if (dispatch > 0 && dispatch <= 5) defaults.dispatchTimeMax = dispatch;
+
+      const profilesBlock = extractXmlTag(itemXml, "SellerProfiles");
+      if (profilesBlock) {
+        const payBlock = extractXmlTag(profilesBlock, "SellerPaymentProfile") || "";
+        const retBlock = extractXmlTag(profilesBlock, "SellerReturnProfile") || "";
+        const shipBlock = extractXmlTag(profilesBlock, "SellerShippingProfile") || "";
+        const payId = extractXmlTag(payBlock, "PaymentProfileID");
+        const retId = extractXmlTag(retBlock, "ReturnProfileID");
+        const shipId = extractXmlTag(shipBlock, "ShippingProfileID");
+        const shipName = (extractXmlTag(shipBlock, "ShippingProfileName") || "").toLowerCase();
+
+        if (payId && retId) {
+          defaults.useSellerProfiles = true;
+          defaults.paymentProfileId = payId;
+          defaults.returnProfileId = retId;
+          if (shipId && !shipName.includes("priority")) {
+            if (shipName.includes("free")) {
+              defaults.freeShippingProfileId = shipId;
+            } else {
+              defaults.calculatedShippingProfileId = shipId;
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("[ebay] Sample listing defaults check warning:", err);
+    }
+  }
+
+  // If business policies are enabled, also check fulfillment policies via Sell Account API
+  // so we pick exact Calculated (non-Priority) vs Free Shipping policies cleanly.
+  if (defaults.useSellerProfiles) {
+    try {
+      const polRes = await ebayRequest<{
+        fulfillmentPolicies?: Array<{
+          fulfillmentPolicyId?: string;
+          name?: string;
+          shippingOptions?: Array<{
+            costType?: string;
+            shippingServices?: Array<{
+              shippingServiceCode?: string;
+              freeShipping?: boolean;
+            }>;
+          }>;
+        }>;
+      }>("/sell/account/v1/fulfillment_policy?marketplace_id=EBAY_US");
+
+      const policies = polRes.fulfillmentPolicies || [];
+      for (const p of policies) {
+        const id = p.fulfillmentPolicyId;
+        if (!id) continue;
+        const nameLower = (p.name || "").toLowerCase();
+        const services = (p.shippingOptions || []).flatMap(
+          (o) => o.shippingServices || []
+        );
+        const hasPriority =
+          nameLower.includes("priority") ||
+          services.some((s) =>
+            (s.shippingServiceCode || "").toLowerCase().includes("priority")
+          );
+        if (hasPriority) continue; // Strictly never pick USPS Priority Mail!
+
+        const isFree =
+          nameLower.includes("free") ||
+          services.some((s) => Boolean(s.freeShipping));
+        const isCalc = (p.shippingOptions || []).some(
+          (o) => (o.costType || "").toUpperCase() === "CALCULATED"
+        );
+
+        if (isFree && !defaults.freeShippingProfileId) {
+          defaults.freeShippingProfileId = id;
+        } else if (isCalc && !defaults.calculatedShippingProfileId) {
+          defaults.calculatedShippingProfileId = id;
+        }
+      }
+    } catch {
+      // Account API scope optional; sample listing profile IDs still work
+    }
+  }
+
+  return defaults;
+}
+
+export interface PublishEbayListingParams {
+  sku: string;
+  title: string;
+  descriptionHtml: string;
+  categoryId: string;
+  conditionChoice: StudioConditionChoice;
+  conditionDescription?: string | null;
+  price: number;
+  floorPrice?: number | null;
+  quantity?: number;
+  imageUrls: string[];
+  itemSpecifics: Array<{ name: string; value: string }>;
+  weightOz: number;
+  lengthIn: number;
+  widthIn: number;
+  heightIn: number;
+  freeShipping: boolean;
+  sampleExistingEbayItemId?: string | null;
+}
+
+/**
+ * Publishes a brand-new Fixed Price (Buy It Now, Good 'Til Cancelled) listing
+ * directly to eBay Production via Trading API `AddFixedPriceItem`.
+ * Default shipping is Buyer Pays Calculated (USPS Ground Advantage + UPS Ground —
+ * strictly NO USPS Priority Mail).
+ */
+export async function publishEbayFixedPriceListing(
+  params: PublishEbayListingParams
+): Promise<{
+  itemId: string;
+  listingUrl: string;
+  conditionId: number | null;
+  conditionName: string;
+}> {
+  const { webBase } = getEbayBaseUrls();
+  const cleanTitle = params.title.trim().slice(0, 80);
+  const cleanSku = params.sku.trim().slice(0, 50);
+  const priceStr = Math.max(0.99, roundCurrency(params.price)).toFixed(2);
+  const qty = Math.max(1, Math.min(999, Math.round(params.quantity || 1)));
+
+  const [resolvedCond, sellerDefaults] = await Promise.all([
+    resolveValidEbayCondition(params.categoryId, params.conditionChoice),
+    detectEbaySellerListingDefaults(params.sampleExistingEbayItemId),
+  ]);
+
+  const totalOz = Math.max(1, Math.round(params.weightOz || 12));
+  const weightMajor = Math.floor(totalOz / 16);
+  const weightMinor = totalOz % 16;
+  const len = Math.max(1, Math.round(params.lengthIn || 10));
+  const wid = Math.max(1, Math.round(params.widthIn || 8));
+  const hgt = Math.max(1, Math.round(params.heightIn || 4));
+
+  const picXml = params.imageUrls
+    .filter((u) => /^https?:\/\//i.test(u))
+    .slice(0, 24)
+    .map((u) => `      <PictureURL>${escapeXml(u)}</PictureURL>`)
+    .join("\n");
+
+  // Deduplicate and sanitize item specifics (eBay rejects empty names/values or >65 chars)
+  const seenSpec = new Set<string>();
+  const specXml = params.itemSpecifics
+    .filter((s) => s.name?.trim() && s.value?.trim())
+    .filter((s) => {
+      const k = s.name.trim().toLowerCase();
+      if (seenSpec.has(k)) return false;
+      seenSpec.add(k);
+      return true;
+    })
+    .slice(0, 30)
+    .map(
+      (s) => `      <NameValueList>
+        <Name>${escapeXml(s.name.trim().slice(0, 40))}</Name>
+        <Value>${escapeXml(s.value.trim().slice(0, 65))}</Value>
+      </NameValueList>`
+    )
+    .join("\n");
+
+  const condXml =
+    resolvedCond.conditionId !== null
+      ? `<ConditionID>${resolvedCond.conditionId}</ConditionID>`
+      : "";
+  const condDescXml =
+    params.conditionDescription?.trim() &&
+    resolvedCond.conditionId !== null &&
+    resolvedCond.conditionId !== 1000
+      ? `<ConditionDescription>${escapeXml(params.conditionDescription.trim().slice(0, 1000))}</ConditionDescription>`
+      : "";
+
+  const chosenShippingProfileId = params.freeShipping
+    ? sellerDefaults.freeShippingProfileId
+    : sellerDefaults.calculatedShippingProfileId;
+
+  let policyOrShippingXml = "";
+  if (
+    sellerDefaults.useSellerProfiles &&
+    sellerDefaults.paymentProfileId &&
+    sellerDefaults.returnProfileId &&
+    chosenShippingProfileId
+  ) {
+    policyOrShippingXml = `
+    <SellerProfiles>
+      <SellerPaymentProfile>
+        <PaymentProfileID>${escapeXml(sellerDefaults.paymentProfileId)}</PaymentProfileID>
+      </SellerPaymentProfile>
+      <SellerReturnProfile>
+        <ReturnProfileID>${escapeXml(sellerDefaults.returnProfileId)}</ReturnProfileID>
+      </SellerReturnProfile>
+      <SellerShippingProfile>
+        <ShippingProfileID>${escapeXml(chosenShippingProfileId)}</ShippingProfileID>
+      </SellerShippingProfile>
+    </SellerProfiles>`;
+  } else if (params.freeShipping) {
+    policyOrShippingXml = `
+    <ReturnPolicy>
+      <ReturnsAcceptedOption>ReturnsAccepted</ReturnsAcceptedOption>
+      <RefundOption>MoneyBack</RefundOption>
+      <ReturnsWithinOption>Days_30</ReturnsWithinOption>
+      <ShippingCostPaidByOption>Buyer</ShippingCostPaidByOption>
+    </ReturnPolicy>
+    <ShippingDetails>
+      <ShippingType>Flat</ShippingType>
+      <ShippingServiceOptions>
+        <ShippingServicePriority>1</ShippingServicePriority>
+        <ShippingService>USPSGroundAdvantage</ShippingService>
+        <ShippingServiceCost currencyID="USD">0.00</ShippingServiceCost>
+        <ShippingServiceAdditionalCost currencyID="USD">0.00</ShippingServiceAdditionalCost>
+        <FreeShipping>true</FreeShipping>
+      </ShippingServiceOptions>
+    </ShippingDetails>`;
+  } else {
+    // Default (99% of listings): Buyer Pays Calculated USPS Ground Advantage + UPS Ground (NO USPS Priority Mail!)
+    policyOrShippingXml = `
+    <ReturnPolicy>
+      <ReturnsAcceptedOption>ReturnsAccepted</ReturnsAcceptedOption>
+      <RefundOption>MoneyBack</RefundOption>
+      <ReturnsWithinOption>Days_30</ReturnsWithinOption>
+      <ShippingCostPaidByOption>Buyer</ShippingCostPaidByOption>
+    </ReturnPolicy>
+    <ShippingDetails>
+      <ShippingType>Calculated</ShippingType>
+      <CalculatedShippingRate>
+        <OriginatingPostalCode>${escapeXml(sellerDefaults.postalCode)}</OriginatingPostalCode>
+        <PackagingHandlingCosts currencyID="USD">0.00</PackagingHandlingCosts>
+      </CalculatedShippingRate>
+      <ShippingServiceOptions>
+        <ShippingServicePriority>1</ShippingServicePriority>
+        <ShippingService>USPSGroundAdvantage</ShippingService>
+      </ShippingServiceOptions>
+      <ShippingServiceOptions>
+        <ShippingServicePriority>2</ShippingServicePriority>
+        <ShippingService>UPSGround</ShippingService>
+      </ShippingServiceOptions>
+    </ShippingDetails>`;
+  }
+
+  const floorVal = Number(params.floorPrice || 0);
+  const bestOfferXml =
+    floorVal > 0 && floorVal < Number(priceStr)
+      ? `<BestOfferDetails>
+      <BestOfferEnabled>true</BestOfferEnabled>
+    </BestOfferDetails>
+    <ListingDetails>
+      <MinimumBestOfferPrice currencyID="USD">${roundCurrency(floorVal).toFixed(2)}</MinimumBestOfferPrice>
+    </ListingDetails>`
+      : `<BestOfferDetails>
+      <BestOfferEnabled>true</BestOfferEnabled>
+    </BestOfferDetails>`;
+
+  const safeDescHtml = (params.descriptionHtml || "").replace(/\]\]>/g, "]]&gt;");
+
+  const innerXml = `<Item>
+    <Title>${escapeXml(cleanTitle)}</Title>
+    <SKU>${escapeXml(cleanSku)}</SKU>
+    <Description><![CDATA[${safeDescHtml}]]></Description>
+    <PrimaryCategory>
+      <CategoryID>${escapeXml(params.categoryId)}</CategoryID>
+    </PrimaryCategory>
+    <StartPrice currencyID="USD">${priceStr}</StartPrice>
+    <CategoryMappingAllowed>true</CategoryMappingAllowed>
+    <Country>US</Country>
+    <Currency>USD</Currency>
+    <DispatchTimeMax>${sellerDefaults.dispatchTimeMax}</DispatchTimeMax>
+    <ListingDuration>GTC</ListingDuration>
+    <ListingType>FixedPriceItem</ListingType>
+    <Location>${escapeXml(sellerDefaults.location)}</Location>
+    <PostalCode>${escapeXml(sellerDefaults.postalCode)}</PostalCode>
+    <Quantity>${qty}</Quantity>
+    ${condXml}
+    ${condDescXml}
+    ${bestOfferXml}
+    <PictureDetails>
+${picXml}
+    </PictureDetails>
+    ${specXml ? `<ItemSpecifics>\n${specXml}\n    </ItemSpecifics>` : ""}
+    <ShippingPackageDetails>
+      <MeasurementUnit>English</MeasurementUnit>
+      <PackageDepth unit="in">${hgt}</PackageDepth>
+      <PackageLength unit="in">${len}</PackageLength>
+      <PackageWidth unit="in">${wid}</PackageWidth>
+      <ShippingPackage>PackageThickEnvelope</ShippingPackage>
+      <WeightMajor unit="lbs">${weightMajor}</WeightMajor>
+      <WeightMinor unit="oz">${weightMinor}</WeightMinor>
+    </ShippingPackageDetails>
+    ${policyOrShippingXml}
+  </Item>`;
+
+  const resXml = await ebayTradingRequest("AddFixedPriceItem", innerXml);
+  const newItemId = extractXmlTag(resXml, "ItemID");
+  if (!newItemId) {
+    throw new Error("eBay AddFixedPriceItem succeeded but did not return an ItemID.");
+  }
+
+  return {
+    itemId: newItemId,
+    listingUrl: `${webBase}/${newItemId}`,
+    conditionId: resolvedCond.conditionId,
+    conditionName: resolvedCond.conditionName,
+  };
+}
+
+
