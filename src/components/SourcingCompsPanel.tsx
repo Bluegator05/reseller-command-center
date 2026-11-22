@@ -86,6 +86,7 @@ export function SourcingCompsPanel({
   const [prepCost, setPrepCost] = useState("0");
   const [estSalePrice, setEstSalePrice] = useState("75");
   const [targetChannel, setTargetChannel] = useState<MarketplaceType>("ebay");
+  const [fbLocalOnly, setFbLocalOnly] = useState(false);
   const [buyerPaysShip, setBuyerPaysShip] = useState(false);
   const [weightOz, setWeightOz] = useState("18");
   const [lengthIn, setLengthIn] = useState("10");
@@ -125,11 +126,15 @@ export function SourcingCompsPanel({
     const cogs = Math.max(0, Number(buyCost) || 0);
     const prep = Math.max(0, Number(prepCost) || 0);
     const sale = Math.max(0, Number(estSalePrice) || 0);
-    const feePct =
-      CHANNEL_FEES.find((c) => c.key === targetChannel)?.feePct ?? 13.25;
+    const feePct = fbLocalOnly
+      ? 0
+      : (CHANNEL_FEES.find((c) => c.key === targetChannel)?.feePct ?? 13.25);
     const fees = round2(sale * (feePct / 100));
     const shipCost =
-      buyerPaysShip || targetChannel === "poshmark" || targetChannel === "facebook"
+      fbLocalOnly ||
+      buyerPaysShip ||
+      targetChannel === "poshmark" ||
+      targetChannel === "facebook"
         ? 0
         : shipping.cheapest.price;
     const totalBasis = round2(cogs + prep);
@@ -163,6 +168,7 @@ export function SourcingCompsPanel({
     prepCost,
     estSalePrice,
     targetChannel,
+    fbLocalOnly,
     buyerPaysShip,
     shipping.cheapest.price,
   ]);
@@ -175,16 +181,20 @@ export function SourcingCompsPanel({
   const ebayActiveUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(
     activeCompQuery
   )}`;
+  const fbSoldUrl = `https://www.facebook.com/marketplace/search/?query=${encodeURIComponent(
+    activeCompQuery
+  )}&availability=out%20of%20stock`;
+  const fbActiveUrl = `https://www.facebook.com/marketplace/search/?query=${encodeURIComponent(
+    activeCompQuery
+  )}`;
 
   async function handlePhotoSelected(file: File | null | undefined) {
     if (!file) return;
-    // Only send a hint if the user manually typed something different from a previous photo match
     const manualHint =
       query.trim() && query.trim() !== (visionResult?.itemTitle || "").trim()
         ? query.trim()
         : undefined;
 
-    // Immediately clear previous photo's comp data so stale results never linger
     setVisionError(null);
     setVisionResult(null);
     setSavedNotice(null);
@@ -217,6 +227,10 @@ export function SourcingCompsPanel({
         if (data.estWidthIn > 0) setWidthIn(String(data.estWidthIn));
         if (data.estHeightIn > 0) setHeightIn(String(data.estHeightIn));
         setIsMediaEligible(data.isMediaEligible);
+        if (data.isLocalPickupRecommended) {
+          setFbLocalOnly(true);
+          setTargetChannel("facebook");
+        }
       } else if (!manualHint) {
         setQuery("");
       }
@@ -226,7 +240,6 @@ export function SourcingCompsPanel({
       );
     } finally {
       setIsScanningPhoto(false);
-      // Reset file inputs so iPhone Safari fires onChange even when camera reuses image.jpg
       if (cameraInputRef.current) cameraInputRef.current.value = "";
       if (uploadInputRef.current) uploadInputRef.current.value = "";
     }
@@ -251,6 +264,8 @@ export function SourcingCompsPanel({
     setWidthIn("8");
     setHeightIn("4");
     setIsMediaEligible(false);
+    setFbLocalOnly(false);
+    setTargetChannel("ebay");
     setNotes("");
     setSavedNotice(null);
   }
@@ -265,6 +280,15 @@ export function SourcingCompsPanel({
         round2(math.totalBasis * 1.35 + math.shipCost),
         round2(math.sale * 0.72)
       );
+      const defaultNote = fbLocalOnly
+        ? `FB Marketplace Local Pickup Only (oversized/heavy · 0% local fee)`
+        : `Sourced via ${photoPreviewUrl ? "iPhone photo comp" : "mobile comps"} (${shipping.cheapest.label} est. ${fmtMoney(shipping.cheapest.price)})`;
+      const finalNotes = notes.trim()
+        ? fbLocalOnly && !/fb|facebook|local/i.test(notes)
+          ? `[FB Local Only] ${notes.trim()}`
+          : notes.trim()
+        : defaultNote;
+
       await onSaveToInventory({
         title: cleanTitle,
         brand: visionResult?.brand || null,
@@ -273,24 +297,23 @@ export function SourcingCompsPanel({
         prep_cost: math.prep,
         target_price: math.sale || 45,
         floor_price: floorPrice,
-        bin_location: binLocation.trim() || "TOTE-1",
+        bin_location: binLocation.trim() || (fbLocalOnly ? "LOCAL-FLOOR" : "TOTE-1"),
         source_location: sourceLocation.trim() || "Thrift Store",
         source_type: "thrift",
         receipt_ref: receiptRef.trim() || null,
         payment_method: "Business Debit",
-        weight_oz: Number(weightOz) || null,
-        length_in: Number(lengthIn) || null,
-        width_in: Number(widthIn) || null,
-        height_in: Number(heightIn) || null,
-        notes:
-          notes.trim() ||
-          `Sourced via ${photoPreviewUrl ? "iPhone photo comp" : "mobile comps"} (${shipping.cheapest.label} est. ${fmtMoney(shipping.cheapest.price)})`,
+        weight_oz: fbLocalOnly ? null : Number(weightOz) || null,
+        length_in: fbLocalOnly ? null : Number(lengthIn) || null,
+        width_in: fbLocalOnly ? null : Number(widthIn) || null,
+        height_in: fbLocalOnly ? null : Number(heightIn) || null,
+        notes: finalNotes,
+        fbLocalOnly,
         initialStatus: mode,
       });
       setSavedNotice(
         mode === "draft"
-          ? `Saved "${cleanTitle}" to Death Pile (${binLocation || "TOTE-1"}).`
-          : `Listed "${cleanTitle}" live in Active Inventory!`
+          ? `Saved "${cleanTitle}" to Death Pile${fbLocalOnly ? " [FB Local Only]" : ""} (${binLocation || (fbLocalOnly ? "LOCAL-FLOOR" : "TOTE-1")}).`
+          : `Saved "${cleanTitle}" in Active Inventory${fbLocalOnly ? " [FB Local Only]" : ""}!`
       );
       setQuery("");
       setNotes("");
@@ -376,6 +399,20 @@ export function SourcingCompsPanel({
             <span>eBay Sold Comps</span>
             <ExternalLink className="w-3 h-3" />
           </a>
+          <a
+            href={fbSoldUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold transition ${
+              fbLocalOnly
+                ? "bg-[#1877F2] text-white hover:bg-[#1465D0] shadow-xs"
+                : "border border-[#BFDBFE] bg-[#EFF6FF] text-[#1D4ED8] hover:bg-[#DBEAFE]"
+            }`}
+          >
+            <Search className="w-3.5 h-3.5" />
+            <span>FB Sold Comps</span>
+            <ExternalLink className="w-3 h-3" />
+          </a>
           {(photoPreviewUrl || query.trim()) && (
             <button
               type="button"
@@ -428,7 +465,7 @@ export function SourcingCompsPanel({
               ) : visionResult ? (
                 <>
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span
                         className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
                           visionResult.mode === "gemini"
@@ -441,6 +478,11 @@ export function SourcingCompsPanel({
                           ? `Gemini Vision · ${visionResult.modelUsed}`
                           : "Photo Attached — Add GEMINI_API_KEY in Vercel for Auto-ID"}
                       </span>
+                      {visionResult.isLocalPickupRecommended && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#EFF6FF] text-[#1D4ED8] border border-[#BFDBFE]">
+                          Oversized → FB Local Recommended
+                        </span>
+                      )}
                       {visionResult.mode === "gemini" && (
                         <span className="text-[11px] font-mono text-[#5C606B]">
                           {visionResult.brand} · {visionResult.category}
@@ -448,14 +490,23 @@ export function SourcingCompsPanel({
                       )}
                     </div>
                     {visionResult.ebaySearchQuery && (
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <a
+                          href={visionResult.facebookSoldUrl || fbSoldUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-[#1877F2] text-white text-[11px] font-semibold hover:bg-[#1465D0]"
+                        >
+                          <span>FB Sold Comps</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
                         <a
                           href={visionResult.ebaySoldUrl}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-[#0F766E] text-white text-[11px] font-semibold hover:bg-[#0B5B55]"
                         >
-                          <span>Sold Comps: &quot;{visionResult.ebaySearchQuery}&quot;</span>
+                          <span>eBay Sold: &quot;{visionResult.ebaySearchQuery}&quot;</span>
                           <ExternalLink className="w-3 h-3" />
                         </a>
                         <a
@@ -464,7 +515,7 @@ export function SourcingCompsPanel({
                           rel="noopener noreferrer"
                           className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-[#DDE2DF] bg-white text-[11px] font-semibold text-[#5C606B] hover:text-[#14151A]"
                         >
-                          <span>Active ↗</span>
+                          <span>eBay Active ↗</span>
                         </a>
                       </div>
                     )}
@@ -578,22 +629,86 @@ export function SourcingCompsPanel({
                   Channel
                 </label>
                 <select
-                  value={targetChannel}
+                  value={fbLocalOnly ? "facebook" : targetChannel}
+                  disabled={fbLocalOnly}
                   onChange={(e) =>
                     setTargetChannel(e.target.value as MarketplaceType)
                   }
-                  className="w-full px-2 py-2 text-xs rounded-lg border border-[#DDE2DF] bg-white focus:border-[#0F766E] focus:outline-none"
+                  className="w-full px-2 py-2 text-xs rounded-lg border border-[#DDE2DF] bg-white disabled:bg-[#EFF6FF] disabled:text-[#1D4ED8] focus:border-[#0F766E] focus:outline-none"
                 >
-                  {CHANNEL_FEES.map((c) => (
-                    <option key={c.key} value={c.key}>
-                      {c.label}
-                    </option>
-                  ))}
+                  {fbLocalOnly ? (
+                    <option value="facebook">FB Local (0% Fee)</option>
+                  ) : (
+                    CHANNEL_FEES.map((c) => (
+                      <option key={c.key} value={c.key}>
+                        {c.label}
+                      </option>
+                    ))
+                  )}
                 </select>
               </div>
             </div>
 
-            {/* Package Weight & Dims */}
+            {/* Facebook Marketplace Local-Only Toggle (Oversized / Heavy Items) */}
+            <div
+              className={`p-3 rounded-xl border transition flex flex-wrap items-center justify-between gap-2.5 ${
+                fbLocalOnly
+                  ? "bg-[#EFF6FF] border-[#93C5FD]"
+                  : "bg-[#FAFBF9] border-[#ECEFE9]"
+              }`}
+            >
+              <label className="inline-flex items-center gap-2.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={fbLocalOnly}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setFbLocalOnly(checked);
+                    if (checked) {
+                      setTargetChannel("facebook");
+                    } else if (targetChannel === "facebook") {
+                      setTargetChannel("ebay");
+                    }
+                  }}
+                  className="w-4 h-4 accent-[#1877F2] cursor-pointer"
+                />
+                <div>
+                  <span className="text-xs font-bold text-[#14151A]">
+                    Facebook Marketplace Only (Oversized / Local Pickup)
+                  </span>
+                  <span className="block text-[11px] text-[#5C606B]">
+                    Marks item <strong>FB Local Only</strong> in Death Pile &amp; Command Center · 0% local fee · $0 shipping
+                  </span>
+                </div>
+              </label>
+
+              {fbLocalOnly && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <a
+                    href={fbSoldUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#1877F2] text-white text-[11px] font-bold hover:bg-[#1465D0] transition"
+                  >
+                    <Search className="w-3 h-3" />
+                    <span>FB Sold Comps</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                  <a
+                    href={fbActiveUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[#93C5FD] bg-white text-[#1D4ED8] text-[11px] font-semibold hover:bg-[#DBEAFE] transition"
+                  >
+                    <span>FB Local Active</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+              )}
+            </div>
+
+            {/* Package Weight & Dims (hidden when FB Local Pickup Only) */}
+            {!fbLocalOnly && (
             <div className="p-3.5 rounded-xl bg-[#FAFBF9] border border-[#ECEFE9] space-y-2.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-[11px] font-bold text-[#14151A] flex items-center gap-1.5">
@@ -671,6 +786,7 @@ export function SourcingCompsPanel({
                 </div>
               </div>
             </div>
+            )}
 
             {/* Capture Metadata */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
@@ -742,15 +858,23 @@ export function SourcingCompsPanel({
                 ) : (
                   <PackagePlus className="w-4 h-4" />
                 )}
-                <span>Bought It → Save to Death Pile</span>
+                <span>
+                  {fbLocalOnly
+                    ? "Bought It → Death Pile (FB Only)"
+                    : "Bought It → Save to Death Pile"}
+                </span>
               </button>
               <button
                 type="button"
                 disabled={isSaving || !query.trim()}
                 onClick={() => handleQuickCapture("active")}
-                className="py-2.5 px-4 rounded-xl bg-[#0F766E] text-white text-xs font-bold hover:bg-[#0B5B55] disabled:opacity-50 transition cursor-pointer"
+                className={`py-2.5 px-4 rounded-xl text-white text-xs font-bold disabled:opacity-50 transition cursor-pointer ${
+                  fbLocalOnly
+                    ? "bg-[#1877F2] hover:bg-[#1465D0]"
+                    : "bg-[#0F766E] hover:bg-[#0B5B55]"
+                }`}
               >
-                List Active Now →
+                {fbLocalOnly ? "Save Active (FB Local Only) →" : "List Active Now →"}
               </button>
             </div>
           </div>
@@ -822,7 +946,47 @@ export function SourcingCompsPanel({
             </div>
           </div>
 
-          {/* Carrier Rate Table (Strictly Ground Advantage, Media Mail, UPS, FedEx) */}
+          {/* Carrier Rate Table OR Facebook Marketplace Local Comps Card */}
+          {fbLocalOnly ? (
+            <div className="bg-[#EFF6FF] border border-[#93C5FD] rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-xs font-bold text-[#1E3A8A]">
+                  Facebook Marketplace Local Comps
+                </h3>
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#1877F2] text-white">
+                  0% Fee · $0 Ship
+                </span>
+              </div>
+              <p className="text-xs text-[#1E40AF] leading-relaxed">
+                Check recently sold and active local listings on Facebook Marketplace for{" "}
+                <strong>&quot;{activeCompQuery}&quot;</strong> before making an offer:
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <a
+                  href={fbSoldUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-lg bg-[#1877F2] text-white text-xs font-bold hover:bg-[#1465D0] transition"
+                >
+                  <Search className="w-3.5 h-3.5" />
+                  <span>FB Sold Comps</span>
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+                <a
+                  href={fbActiveUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-lg border border-[#93C5FD] bg-white text-[#1D4ED8] text-xs font-semibold hover:bg-[#DBEAFE] transition"
+                >
+                  <span>FB Active Local</span>
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              </div>
+              <div className="text-[11px] text-[#3B82F6] pt-1 border-t border-[#BFDBFE]">
+                Tip: In the Facebook app/web, Sold Comps opens with <code>Sold / Out of stock</code> pre-filtered for your local area.
+              </div>
+            </div>
+          ) : (
           <div className="bg-white border border-[#E4E4DD] rounded-xl p-4 space-y-2.5">
             <div className="flex items-center justify-between">
               <h3 className="text-xs font-bold text-[#14151A]">
@@ -871,6 +1035,7 @@ export function SourcingCompsPanel({
               ))}
             </div>
           </div>
+          )}
         </section>
       </div>
     </div>

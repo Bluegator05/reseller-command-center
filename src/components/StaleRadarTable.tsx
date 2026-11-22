@@ -851,6 +851,11 @@ export function StaleRadarTable({
                         <span className="px-1.5 py-0.5 rounded bg-[#FEF3C7] text-[#92400E] font-semibold">
                           {daysWaiting}d unlisted
                         </span>
+                        {draft.item_specifics?.fb_local_only === "true" && (
+                          <span className="px-1.5 py-0.5 rounded bg-[#EFF6FF] text-[#1D4ED8] border border-[#BFDBFE] font-sans font-bold text-[10px]">
+                            FB Local Only
+                          </span>
+                        )}
                         <code className="px-1.5 py-0.5 rounded bg-[#F2F4F3] text-[#171A1D]">
                           {draft.sku}
                         </code>
@@ -1102,6 +1107,11 @@ export function StaleRadarTable({
                               {row.is_newly_listed && (
                                 <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[#EFF6FF] text-[#1D4ED8]">
                                   NEW
+                                </span>
+                              )}
+                              {row.fb_local_only && (
+                                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-[#1877F2] text-white">
+                                  FB Local Only
                                 </span>
                               )}
                               <span className="text-[10px] font-mono text-[#7C858D]">

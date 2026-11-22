@@ -203,6 +203,7 @@ export interface StaleRadarRow {
   is_newly_listed: boolean;
   is_stale: boolean;
   is_low_views: boolean;
+  fb_local_only?: boolean;
   is_at_floor: boolean;
   stale_severity: StaleSeverity;
   recommended_action: Exclude<JobActionType, "create" | "delist"> | null;
@@ -321,6 +322,7 @@ export interface QuickAddItemRequest {
   width_in?: number | null;
   height_in?: number | null;
   notes?: string | null;
+  fbLocalOnly?: boolean;
   initialStatus: "draft" | "active";
 }
 

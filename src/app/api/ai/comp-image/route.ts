@@ -16,9 +16,12 @@ export interface ImageCompResponse {
   estWidthIn: number;
   estHeightIn: number;
   isMediaEligible: boolean;
+  isLocalPickupRecommended?: boolean;
   inspectionTips: string[];
   ebaySoldUrl: string;
   ebayActiveUrl: string;
+  facebookSoldUrl: string;
+  facebookActiveUrl: string;
 }
 
 export const maxDuration = 30;
@@ -28,8 +31,8 @@ export const maxDuration = 30;
  * Accepts a base64 JPEG/WebP/PNG snapshot from iPhone camera or desktop upload,
  * identifies the item with Gemini 4 Hydrogen multimodal vision (falling back to
  * Gemini 3.8 Flash / 3.5 Flash-Lite if needed), and returns an optimized eBay
- * Sold Comps query, estimated price range, package weight/dims, Media Mail
- * eligibility, and in-store condition checkpoints.
+ * & Facebook Marketplace Sold Comps query, estimated price range, package weight/dims,
+ * Media Mail eligibility, local-pickup flag, and in-store condition checkpoints.
  */
 export async function POST(request: Request) {
   let body: {
@@ -66,14 +69,14 @@ export async function POST(request: Request) {
 
   if (apiKey) {
     try {
-      const prompt = `You are an expert eBay reseller sourcing assistant standing in a thrift store or estate sale.
+      const prompt = `You are an expert reseller sourcing assistant standing in a thrift store or estate sale.
 Inspect this item photo${body.hint ? ` (reseller hint: "${body.hint}")` : ""} carefully. Read any visible brand names, model numbers, labels, tags, or markings. Do NOT invent a brand or model number if it is not clearly visible in the photo — describe the exact visible item type/material/features instead.
 Return ONLY valid JSON with these exact keys:
 {
-  "itemTitle": "Concise eBay-ready item title (max 75 chars, include brand/model/size only if clearly visible)",
-  "ebaySearchQuery": "Clean 4-7 word search query optimized for eBay Sold Comps (no filler words)",
+  "itemTitle": "Concise listing-ready item title (max 75 chars, include brand/model/size only if clearly visible)",
+  "ebaySearchQuery": "Clean 4-7 word search query optimized for eBay & Facebook Marketplace Sold Comps (no filler words)",
   "brand": "Exact visible brand name, or Unbranded",
-  "category": "Short category (e.g. Film Camera, Mens Outerwear, Vintage Electronics, Cookware, Safety Signage, Books/Media)",
+  "category": "Short category (e.g. Film Camera, Mens Outerwear, Vintage Electronics, Cookware, Furniture, Books/Media)",
   "estLowPrice": number (conservative USD sold price),
   "estMedianPrice": number (typical USD sold price),
   "estHighPrice": number (top condition USD sold price),
@@ -82,6 +85,7 @@ Return ONLY valid JSON with these exact keys:
   "estWidthIn": number (packaged box width in inches),
   "estHeightIn": number (packaged box height in inches),
   "isMediaEligible": boolean (true ONLY for books, vinyl records, CDs, DVDs, VHS, sheet music; false for video games/electronics/apparel/signs),
+  "isLocalPickupRecommended": boolean (true if the item is bulky/oversized/heavy furniture, large mirror, framed wall art >30in, bike, lawn equipment, or impractical to ship economically),
   "inspectionTips": ["Short in-store flaw/test check #1", "Short check #2", "Short check #3"]
 }`;
 
@@ -107,6 +111,16 @@ Return ONLY valid JSON with these exact keys:
         "vintage collectible"
       ).trim();
 
+      const estWeightOz = Math.max(2, Number(parsed.estWeightOz) || 18);
+      const estLengthIn = Math.max(4, Number(parsed.estLengthIn) || 10);
+      const estWidthIn = Math.max(4, Number(parsed.estWidthIn) || 8);
+      const estHeightIn = Math.max(1, Number(parsed.estHeightIn) || 4);
+      const longestSide = Math.max(estLengthIn, estWidthIn, estHeightIn);
+      const isLocalPickupRecommended =
+        Boolean(parsed.isLocalPickupRecommended) ||
+        estWeightOz >= 400 ||
+        longestSide >= 30;
+
       const payload: ImageCompResponse = {
         mode: "gemini",
         modelUsed,
@@ -117,11 +131,12 @@ Return ONLY valid JSON with these exact keys:
         estLowPrice: Math.max(1, Number(parsed.estLowPrice) || 25),
         estMedianPrice: Math.max(1, Number(parsed.estMedianPrice) || 45),
         estHighPrice: Math.max(1, Number(parsed.estHighPrice) || 75),
-        estWeightOz: Math.max(2, Number(parsed.estWeightOz) || 18),
-        estLengthIn: Math.max(4, Number(parsed.estLengthIn) || 10),
-        estWidthIn: Math.max(4, Number(parsed.estWidthIn) || 8),
-        estHeightIn: Math.max(1, Number(parsed.estHeightIn) || 4),
+        estWeightOz,
+        estLengthIn,
+        estWidthIn,
+        estHeightIn,
         isMediaEligible: Boolean(parsed.isMediaEligible),
+        isLocalPickupRecommended,
         inspectionTips:
           Array.isArray(parsed.inspectionTips) &&
           parsed.inspectionTips.length > 0
@@ -132,6 +147,8 @@ Return ONLY valid JSON with these exact keys:
               ],
         ebaySoldUrl: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}&LH_Sold=1&LH_Complete=1`,
         ebayActiveUrl: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}`,
+        facebookSoldUrl: `https://www.facebook.com/marketplace/search/?query=${encodeURIComponent(query)}&availability=out%20of%20stock`,
+        facebookActiveUrl: `https://www.facebook.com/marketplace/search/?query=${encodeURIComponent(query)}`,
       };
 
       return NextResponse.json(payload);
@@ -146,7 +163,6 @@ Return ONLY valid JSON with these exact keys:
   }
 
   // Clean fallback when GEMINI_API_KEY is not yet configured:
-  // Never fabricate a fake product name for a real user photo.
   const hintClean = (body.hint || "").trim();
 
   const payload: ImageCompResponse = {
@@ -164,9 +180,10 @@ Return ONLY valid JSON with these exact keys:
     estWidthIn: 0,
     estHeightIn: 0,
     isMediaEligible: false,
+    isLocalPickupRecommended: false,
     inspectionTips: [
       "Photo attached! Add GEMINI_API_KEY in Vercel Environment Variables to enable automatic Gemini 4 Hydrogen Vision identification from iPhone photos.",
-      "Until connected, type the item brand/model below to open eBay Sold Comps and run profit + shipping math.",
+      "Until connected, type the item brand/model below to open eBay or Facebook Sold Comps and run profit math.",
     ],
     ebaySoldUrl: hintClean
       ? `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(hintClean)}&LH_Sold=1&LH_Complete=1`
@@ -174,6 +191,12 @@ Return ONLY valid JSON with these exact keys:
     ebayActiveUrl: hintClean
       ? `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(hintClean)}`
       : "https://www.ebay.com/",
+    facebookSoldUrl: hintClean
+      ? `https://www.facebook.com/marketplace/search/?query=${encodeURIComponent(hintClean)}&availability=out%20of%20stock`
+      : "https://www.facebook.com/marketplace/",
+    facebookActiveUrl: hintClean
+      ? `https://www.facebook.com/marketplace/search/?query=${encodeURIComponent(hintClean)}`
+      : "https://www.facebook.com/marketplace/",
   };
 
   return NextResponse.json(payload);

@@ -125,8 +125,27 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
       }
 
       const items: StaleRadarRow[] = [];
+      const activeEbayItemIds = new Set<string>();
       for (const row of joinedRows) {
         if (row.marketplace !== "ebay" || row.status !== "active") continue;
+        const inv = Array.isArray(row.inventory_items)
+          ? row.inventory_items[0]
+          : row.inventory_items;
+        if (!inv || inv.status === "sold") continue;
+        activeEbayItemIds.add(row.item_id);
+        items.push(
+          enrichStaleRadarRow(
+            row,
+            inv,
+            Number(ebayFeePct),
+            crossMap.get(row.item_id) ?? []
+          )
+        );
+      }
+      // Also surface active Facebook-Local-Only items (oversized/local items with no eBay listing)
+      for (const row of joinedRows) {
+        if (row.marketplace !== "facebook" || row.status !== "active") continue;
+        if (activeEbayItemIds.has(row.item_id)) continue;
         const inv = Array.isArray(row.inventory_items)
           ? row.inventory_items[0]
           : row.inventory_items;
@@ -135,7 +154,7 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
           enrichStaleRadarRow(
             row,
             inv,
-            Number(ebayFeePct),
+            0, // 0% fee for Facebook local pickup
             crossMap.get(row.item_id) ?? []
           )
         );

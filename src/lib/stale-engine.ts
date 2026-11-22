@@ -206,6 +206,7 @@ export function enrichStaleRadarRow(
     is_newly_listed: isNewlyListed,
     is_stale: isStale,
     is_low_views: isLowViews,
+    fb_local_only: item.item_specifics?.fb_local_only === "true",
     is_at_floor: dropCalc.isAlreadyAtFloor,
     stale_severity: staleSeverity,
     recommended_action: recommendedAction,

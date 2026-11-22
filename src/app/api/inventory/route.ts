@@ -47,12 +47,15 @@ export async function POST(request: Request) {
             { status: 400 }
           );
         }
+        const isFbOnly =
+          (item.item_specifics as Record<string, unknown> | null)?.fb_local_only ===
+          "true";
         await supabase.from("marketplace_listings").upsert(
           {
             item_id: item.id,
-            marketplace: "ebay",
+            marketplace: isFbOnly ? "facebook" : "ebay",
             listed_price: item.target_price,
-            shipping_price: 8.95,
+            shipping_price: isFbOnly ? 0 : 8.95,
             status: "active",
             listed_at: nowIso,
             last_synced_at: nowIso,
@@ -82,9 +85,10 @@ export async function POST(request: Request) {
 
     if (supabase && envReadiness.isSupabaseReady) {
       const nowIso = new Date().toISOString();
+      const isFbOnly = Boolean(req.fbLocalOnly);
       const sku =
         req.sku?.trim() ||
-        `SKU-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+        `${isFbOnly ? "FB" : "SKU"}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
       const { data: created, error } = await supabase
         .from("inventory_items")
         .insert({
@@ -108,6 +112,9 @@ export async function POST(request: Request) {
           length_in: req.length_in ?? null,
           width_in: req.width_in ?? null,
           height_in: req.height_in ?? null,
+          item_specifics: isFbOnly
+            ? { fb_local_only: "true", fulfillment_type: "local_pickup" }
+            : {},
           status: req.initialStatus,
           acquired_at: req.acquired_at || nowIso,
         })
@@ -124,9 +131,9 @@ export async function POST(request: Request) {
       if (req.initialStatus === "active") {
         await supabase.from("marketplace_listings").insert({
           item_id: created.id,
-          marketplace: "ebay",
+          marketplace: isFbOnly ? "facebook" : "ebay",
           listed_price: created.target_price,
-          shipping_price: 8.95,
+          shipping_price: isFbOnly ? 0 : 8.95,
           status: "active",
           listed_at: nowIso,
           last_synced_at: nowIso,
