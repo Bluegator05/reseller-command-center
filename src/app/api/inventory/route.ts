@@ -42,10 +42,51 @@ export async function POST(request: Request) {
           itemId: string;
           relistCount: number;
           lastRelistedAt?: string | null;
+        }
+      | {
+          action: "set_stale_exempt";
+          itemId: string;
+          exempt: boolean;
         };
 
     const envReadiness = getEnvReadiness();
     const supabase = getSupabaseServerClient();
+
+    if (body.action === "set_stale_exempt") {
+      if (!body.itemId) {
+        return NextResponse.json({ error: "Missing itemId" }, { status: 400 });
+      }
+      const exempt = Boolean(body.exempt);
+      if (supabase && envReadiness.isSupabaseReady) {
+        const nowIso = new Date().toISOString();
+        const { data: existing, error: fetchErr } = await supabase
+          .from("inventory_items")
+          .select("id, item_specifics")
+          .eq("id", body.itemId)
+          .single();
+        if (fetchErr || !existing) {
+          return NextResponse.json({ error: "Item not found" }, { status: 404 });
+        }
+        const specs = (existing.item_specifics || {}) as Record<string, unknown>;
+        const nextSpecs: Record<string, unknown> = { ...specs };
+        if (exempt) {
+          nextSpecs.stale_radar_exempt = "true";
+        } else {
+          delete nextSpecs.stale_radar_exempt;
+        }
+        const { data: updated, error: updErr } = await supabase
+          .from("inventory_items")
+          .update({ item_specifics: nextSpecs, updated_at: nowIso })
+          .eq("id", body.itemId)
+          .select("*")
+          .single();
+        if (updErr) {
+          return NextResponse.json({ error: updErr.message }, { status: 400 });
+        }
+        return NextResponse.json({ mode: "live", item: updated, exempt });
+      }
+      return NextResponse.json({ mode: "demo", exempt });
+    }
 
     if (body.action === "set_relist_count") {
       if (!body.itemId) {

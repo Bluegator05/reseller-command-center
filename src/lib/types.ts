@@ -204,6 +204,7 @@ export interface StaleRadarRow {
   is_stale: boolean;
   is_low_views: boolean;
   fb_local_only?: boolean;
+  stale_radar_exempt?: boolean;
   relist_count: number;
   last_relisted_at: string | null;
   days_since_relist: number | null;

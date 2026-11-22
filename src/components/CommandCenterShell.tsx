@@ -1109,6 +1109,36 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
                 "Saved to item history."
               );
             }}
+            onToggleStaleExempt={async ({ itemId, exempt }) => {
+              const res = await fetch("/api/inventory", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  action: "set_stale_exempt",
+                  itemId,
+                  exempt,
+                }),
+              });
+              const payload = (await res.json()) as { error?: string };
+              if (!res.ok) {
+                pushToast(
+                  "error",
+                  "Could Not Update Stale Radar Protection",
+                  payload.error || "Unknown error"
+                );
+                return;
+              }
+              await refreshInventory();
+              pushToast(
+                "success",
+                exempt
+                  ? "Protected from Stale Radar"
+                  : "Restored to Stale Radar",
+                exempt
+                  ? "Removed from Stale Radar Flagged and locked against accidental End & Sell Similar."
+                  : "This listing will be evaluated by Stale Radar again."
+              );
+            }}
             />
           </div>
         ) : activeTab === "extension" ? (

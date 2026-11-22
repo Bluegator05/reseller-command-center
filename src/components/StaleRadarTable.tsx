@@ -17,6 +17,7 @@ import {
   RefreshCcw,
   Search,
   Send,
+  ShieldCheck,
   Sparkles,
   Star,
   Trash2,
@@ -74,6 +75,10 @@ interface StaleRadarTableProps {
   onSetRelistCount?: (params: {
     itemId: string;
     relistCount: number;
+  }) => Promise<void>;
+  onToggleStaleExempt?: (params: {
+    itemId: string;
+    exempt: boolean;
   }) => Promise<void>;
 }
 
@@ -244,6 +249,7 @@ export function StaleRadarTable({
   onDeleteDraft,
   onDisposeItem,
   onSetRelistCount,
+  onToggleStaleExempt,
 }: StaleRadarTableProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeFilter, setActiveFilter] = useState<FilterKey>("all");
@@ -270,6 +276,9 @@ export function StaleRadarTable({
   const [bumpingRelistItemId, setBumpingRelistItemId] = useState<string | null>(
     null
   );
+  const [togglingExemptItemId, setTogglingExemptItemId] = useState<
+    string | null
+  >(null);
   const [mountNow] = useState(() => Date.now());
 
   const [notesMap, setNotesMap] = useStoredMap<Record<string, string>>(
@@ -286,6 +295,7 @@ export function StaleRadarTable({
   );
 
   const isDonateCandidate = (row: StaleRadarRow) =>
+    !row.stale_radar_exempt &&
     row.relist_count > 0 &&
     (row.days_since_relist ?? row.days_listed) >= donateDaysThreshold;
 
@@ -479,7 +489,17 @@ export function StaleRadarTable({
   };
 
   const runBulkAction = async (action: EbayActionRequest["action"]) => {
-    const ids = [...validSelectedIds];
+    const protectedListingIds =
+      action === "end_and_sell_similar"
+        ? new Set(
+            items
+              .filter((i) => i.stale_radar_exempt)
+              .map((i) => i.listing_id)
+          )
+        : null;
+    const ids = [...validSelectedIds].filter(
+      (id) => !protectedListingIds?.has(id)
+    );
     if (ids.length === 0) return;
     await onExecuteAction({ action, listingIds: ids, dropPct: 10, offerPct: 10 });
     setSelectedIds(new Set());
@@ -1207,6 +1227,12 @@ export function StaleRadarTable({
                                   FB Local Only
                                 </span>
                               )}
+                              {row.stale_radar_exempt && (
+                                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[#ECFDF5] text-[#0F766E] border border-[#A7F3D0]">
+                                  <ShieldCheck className="w-2.5 h-2.5" />
+                                  Protected
+                                </span>
+                              )}
                               {(() => {
                                 const donateFlag = isDonateCandidate(row);
                                 const daysRelisted =
@@ -1304,8 +1330,12 @@ export function StaleRadarTable({
 
                               <button
                                 type="button"
-                                disabled={isBusy}
-                                title="Ends stale eBay listing & publishes a fresh item ID (increments Relist Counter)"
+                                disabled={isBusy || Boolean(row.stale_radar_exempt)}
+                                title={
+                                  row.stale_radar_exempt
+                                    ? "Protected evergreen listing — click Protected to unlock before ending & selling similar"
+                                    : "Ends stale eBay listing & publishes a fresh item ID (increments Relist Counter)"
+                                }
                                 onClick={() =>
                                   onExecuteAction({
                                     action: "end_and_sell_similar",
@@ -1317,6 +1347,42 @@ export function StaleRadarTable({
                                 <RefreshCcw className="w-3 h-3" />
                                 Sell Similar
                               </button>
+
+                              {onToggleStaleExempt && (
+                                <button
+                                  type="button"
+                                  disabled={
+                                    isBusy ||
+                                    togglingExemptItemId === row.item_id
+                                  }
+                                  title={
+                                    row.stale_radar_exempt
+                                      ? "Protected from Stale Radar & End/Sell Similar. Click to remove protection."
+                                      : "Exclude from Stale Radar Flagged & lock Sell Similar (great for multi-qty listings with high sold history & watchers)"
+                                  }
+                                  onClick={async () => {
+                                    setTogglingExemptItemId(row.item_id);
+                                    try {
+                                      await onToggleStaleExempt({
+                                        itemId: row.item_id,
+                                        exempt: !row.stale_radar_exempt,
+                                      });
+                                    } finally {
+                                      setTogglingExemptItemId(null);
+                                    }
+                                  }}
+                                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold border transition cursor-pointer disabled:opacity-40 ${
+                                    row.stale_radar_exempt
+                                      ? "bg-[#ECFDF5] border-[#A7F3D0] text-[#0F766E] hover:bg-[#D1FAE5]"
+                                      : "border-[#DDE2DF] bg-white text-[#444B52] hover:border-[#0F766E] hover:text-[#0F766E]"
+                                  }`}
+                                >
+                                  <ShieldCheck className="w-3 h-3" />
+                                  {row.stale_radar_exempt
+                                    ? "Protected"
+                                    : "Protect"}
+                                </button>
+                              )}
 
                               {onDisposeItem && (
                                 <button

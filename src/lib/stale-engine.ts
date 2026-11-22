@@ -162,6 +162,17 @@ export function enrichStaleRadarRow(
   );
 
   const specs = (item.item_specifics || {}) as Record<string, unknown>;
+  const staleRadarExempt = specs.stale_radar_exempt === "true";
+
+  const finalIsStale = staleRadarExempt ? false : isStale;
+  const finalSeverity: StaleSeverity = staleRadarExempt
+    ? "healthy"
+    : staleSeverity;
+  const finalRecommendedAction = staleRadarExempt ? null : recommendedAction;
+  const finalStaleReason = staleRadarExempt
+    ? "Protected evergreen listing (excluded from Stale Radar)"
+    : staleReason;
+
   const rawRelistCount = Number(specs.relist_count);
   const relistCount =
     Number.isFinite(rawRelistCount) && rawRelistCount >= 0
@@ -223,16 +234,17 @@ export function enrichStaleRadarRow(
     days_listed: daysListed,
     days_since_acquired: daysSinceAcquired,
     is_newly_listed: isNewlyListed,
-    is_stale: isStale,
-    is_low_views: isLowViews,
+    is_stale: finalIsStale,
+    is_low_views: staleRadarExempt ? false : isLowViews,
     fb_local_only: item.item_specifics?.fb_local_only === "true",
+    stale_radar_exempt: staleRadarExempt,
     relist_count: relistCount,
     last_relisted_at: lastRelistedAt,
     days_since_relist: daysSinceRelist,
     is_at_floor: dropCalc.isAlreadyAtFloor,
-    stale_severity: staleSeverity,
-    recommended_action: recommendedAction,
-    stale_reason: staleReason,
+    stale_severity: finalSeverity,
+    recommended_action: finalRecommendedAction,
+    stale_reason: finalStaleReason,
     projected_drop_price: dropCalc.nextPrice,
     drop_would_clamp: dropCalc.wasClamped,
     est_fee_amount: estFeeAmount,
