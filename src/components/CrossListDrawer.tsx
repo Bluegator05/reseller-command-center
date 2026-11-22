@@ -148,6 +148,7 @@ function CrossListDrawerInner({
   const [tags, setTags] = useState<string[]>([]);
   const [newTagInput, setNewTagInput] = useState("");
   const [publishImmediately, setPublishImmediately] = useState(true);
+  const [overrideCompliance, setOverrideCompliance] = useState(false);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -240,6 +241,7 @@ function CrossListDrawerInner({
   const isComplianceBlocked = complianceIssues.some(
     (i) => i.severity === "block"
   );
+  const effectiveBlocked = isComplianceBlocked && !overrideCompliance;
   const hasComplianceWarning =
     !isComplianceBlocked &&
     complianceIssues.some((i) => i.severity === "warning");
@@ -261,7 +263,7 @@ function CrossListDrawerInner({
   };
 
   const handleSubmit = async () => {
-    if (!draft || isBelowFloor || isComplianceBlocked) return;
+    if (!draft || isBelowFloor || effectiveBlocked) return;
     setIsSubmitting(true);
     setError(null);
 
@@ -291,6 +293,7 @@ function CrossListDrawerInner({
           body: JSON.stringify({
             itemId: row.item_id,
             publishImmediately,
+            overrideCompliance,
             draft: {
               ...draft,
               mappedTitle: title.trim(),
@@ -334,6 +337,7 @@ function CrossListDrawerInner({
             itemId: row.item_id,
             marketplace: target,
             action: "create",
+            overrideCompliance,
             draft: {
               ...draft,
               mappedTitle: title.trim(),
@@ -594,6 +598,22 @@ function CrossListDrawerInner({
                     <strong>Auto-sanitized:</strong>{" "}
                     {draft.compliance.sanitizedAdjustments.join(" · ")}
                   </div>
+                )}
+
+                {isComplianceBlocked && (
+                  <label className="pt-1.5 border-t border-[#FCA5A5] flex items-center gap-2 text-[11px] font-medium text-[#7F1D1D] cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={overrideCompliance}
+                      onChange={(e) => setOverrideCompliance(e.target.checked)}
+                      className="rounded border-[#FCA5A5] accent-[#B91C1C]"
+                    />
+                    <span>
+                      False positive — I verified this item is allowed on{" "}
+                      <span className="capitalize">{target}</span> (override
+                      block)
+                    </span>
+                  </label>
                 )}
               </div>
 
@@ -1042,23 +1062,23 @@ function CrossListDrawerInner({
               id="btn-submit-crosslist"
               type="button"
               disabled={
-                !draft || isSubmitting || isBelowFloor || isComplianceBlocked
+                !draft || isSubmitting || isBelowFloor || effectiveBlocked
               }
               onClick={handleSubmit}
               className={`inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-45 transition cursor-pointer ${
-                isComplianceBlocked
+                effectiveBlocked
                   ? "bg-[#B91C1C]"
                   : "bg-[#14151A] hover:bg-[#272A34]"
               }`}
             >
               {isSubmitting ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : isComplianceBlocked ? (
+              ) : effectiveBlocked ? (
                 <ShieldAlert className="w-3.5 h-3.5" />
               ) : (
                 <ArrowRight className="w-3.5 h-3.5" />
               )}
-              {isComplianceBlocked
+              {effectiveBlocked
                 ? `Blocked on ${TARGET_CHANNELS.find((c) => c.key === target)?.label}`
                 : isSubmitting
                   ? isEtsy

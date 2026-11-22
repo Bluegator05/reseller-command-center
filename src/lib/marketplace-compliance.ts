@@ -83,25 +83,29 @@ const RECALL_HAZARD_RE =
   /\b(recalled|drop-side crib|drop side crib|used car seat|expired car seat)\b/i;
 
 const POSHMARK_FLAMMABLE_LIQUID_RE =
-  /\b(perfume|eau de parfum|eau de toilette|cologne|body mist|fragrance spray|nail polish|nail lacquer|acetone|aerosol|hairspray|dry shampoo spray|essential oil|lighter fluid|butane|flammable|lithium battery pack)\b/i;
+  /\b(perfume|eau de parfum|eau de toilette|cologne|body mist|fragrance spray|nail polish|nail lacquer|acetone|aerosol|hairspray|dry shampoo spray|essential oil|lighter fluid|butane|flammable liquid)\b/i;
+
+// Exclude empty/collectible bottles, cases, bags, holders, and craft supplies
+const CONTAINER_OR_ACCESSORY_RE =
+  /\b(empty bottle|empty|bottle only|display bottle|factice|makeup bag|cosmetic bag|cosmetic pouch|cosmetic case|toiletry bag|vanity case|organizer|holder|rack|stand|brush set|mirror|punch|stamp|die cut|scrapbook|mug|cup|dish|bowl|jar empty|canister|tin empty|sweater|shirt|dress|pants|jacket|shoes)\b/i;
 
 const COSMETICS_RE =
-  /\b(lipstick|lip gloss|mascara|foundation|concealer|eyeshadow|eyeliner|blush|bronzer|serum|moisturizer|face cream|lotion|cleanser|toner|skincare|makeup|cosmetic|shampoo|conditioner|deodorant)\b/i;
+  /\b(lipstick|lip gloss|lip balm|mascara|concealer|eyeshadow|eye shadow|eyeliner|eye liner|blush palette|cheek blush|liquid blush|bronzer|face serum|facial serum|moisturizer|face cream|body lotion|hand lotion|facial cleanser|face wash|facial toner|skincare|skin care|makeup palette|liquid foundation|makeup foundation|cosmetics lot|makeup lot|shampoo|hair conditioner|deodorant|antiperspirant)\b/i;
 
 const MEDICAL_HEALTHCARE_RE =
-  /\b(cpap|bipap|glucometer|blood glucose|insulin|blood pressure monitor|pulse oximeter|thermometer|nebulizer|hearing aid|wheelchair|walker mobility|crutches|orthopedic brace|knee brace|ankle brace|back brace|wrist brace|tens unit|stethoscope|first aid kit|contact lenses|vitamin|vitamins|dietary supplement|protein powder|pre-workout|probiotic|melatonin|cbd|medical device|fda cleared|otc medicine|ibuprofen|acetaminophen|test strips|surgical mask|n95|kn95)\b/i;
+  /\b(cpap|bipap|glucometer|blood glucose|insulin pump|blood pressure monitor|pulse oximeter|digital thermometer|forehead thermometer|nebulizer|hearing aid|wheelchair|rolling walker|crutches|orthopedic brace|knee brace|ankle brace|back brace|wrist brace|tens unit|stethoscope|first aid kit|contact lenses|dietary supplement|multivitamin|protein powder|pre-workout|probiotic|melatonin|medical device|fda cleared|otc medicine|ibuprofen|acetaminophen|glucose test strips|surgical mask|n95 mask|kn95 mask)\b/i;
 
 const FOOD_CONSUMABLE_RE =
-  /\b(baby formula|infant formula|candy bag|chocolate bar|snacks|coffee beans|tea bags|spice jar|seasoning|pet food|dog treats|cat treats|edible|perishable|grocery)\b/i;
+  /\b(baby formula|infant formula|candy bag|chocolate bar|snack pack|coffee beans|ground coffee|tea bags|spice jar full|pet food|dog treats|cat treats|edible|perishable food)\b/i;
 
 const POSHMARK_UNSUPPORTED_BULKY_RE =
-  /\b(microwave|refrigerator|washing machine|dryer|dishwasher|air conditioner|space heater|lawn mower|chainsaw|table saw|miter saw|power drill|impact driver|television|flat screen tv|sofa|couch|mattress|dining table|bookcase)\b/i;
+  /\b(microwave oven|refrigerator|washing machine|clothes dryer|dishwasher|window air conditioner|space heater|lawn mower|chainsaw|table saw|miter saw|cordless power drill|impact driver|flat screen tv|sectional sofa|mattress|dining table|bookcase)\b/i;
 
 const DIGITAL_GOODS_RE =
-  /\b(digital download|pdf download|ebook|gift card|egift|redeem code|activation key|steam key|xbox code|psn code)\b/i;
+  /\b(digital download|pdf download|ebook download|gift card|egift card|redeem code|activation key|steam key|xbox code|psn code)\b/i;
 
 const ADULT_EXPLICIT_RE =
-  /\b(sex toy|vibrator|dildo|erotica|porn|xxx|adult novelty|bondage)\b/i;
+  /\b(sex toy|vibrator|dildo|erotica|pornography|xxx adult|adult novelty|bondage gear)\b/i;
 
 const NEW_CONDITION_RE =
   /\b(new|nwt|nib|nip|nwot|sealed|unopened|brand new|mint in box)\b/i;
@@ -215,28 +219,31 @@ export function evaluateMarketplaceCompliance(params: {
   } = params;
 
   const issues: ComplianceIssue[] = [];
-  const haystack = [
+  // Product identity (title + category + brand) avoids false positives from eBay description boilerplate like "minor cosmetic wear"
+  const productIdentity = [
     item.title,
     item.brand ?? "",
     item.category_hint ?? "",
+  ].join(" ");
+  const fullText = [
+    productIdentity,
     item.description_plain ?? "",
     item.condition ?? "",
-    Object.values(item.item_specifics || {})
-      .flat()
-      .join(" "),
   ].join(" ");
 
   const conditionText = `${item.condition || ""} ${item.title}`;
   const looksNew = NEW_CONDITION_RE.test(conditionText);
   const looksUsed = USED_OPENED_RE.test(conditionText) && !looksNew;
   const looksCraftSupply =
-    isSupply === true || CRAFT_SUPPLY_RE.test(haystack);
+    isSupply === true || CRAFT_SUPPLY_RE.test(productIdentity);
+  const isContainerOrAccessory =
+    looksCraftSupply || CONTAINER_OR_ACCESSORY_RE.test(productIdentity);
   const weightOz = item.weight_oz ? Number(item.weight_oz) : null;
   const weightLb = weightOz ? weightOz / 16 : null;
   const limits = MARKETPLACE_LIMITS[targetMarketplace];
 
   // 1. Universal Prohibited Items
-  if (COUNTERFEIT_RE.test(haystack)) {
+  if (COUNTERFEIT_RE.test(fullText)) {
     issues.push({
       code: "COUNTERFEIT_WORDING",
       severity: "block",
@@ -246,7 +253,7 @@ export function evaluateMarketplaceCompliance(params: {
     });
   }
 
-  if (WEAPONS_RE.test(haystack)) {
+  if (WEAPONS_RE.test(productIdentity)) {
     issues.push({
       code: "PROHIBITED_WEAPON",
       severity: "block",
@@ -256,7 +263,7 @@ export function evaluateMarketplaceCompliance(params: {
     });
   }
 
-  if (TOBACCO_DRUGS_RE.test(haystack)) {
+  if (TOBACCO_DRUGS_RE.test(productIdentity)) {
     issues.push({
       code: "PROHIBITED_CONTROLLED",
       severity: "block",
@@ -266,7 +273,7 @@ export function evaluateMarketplaceCompliance(params: {
     });
   }
 
-  if (RECALL_HAZARD_RE.test(haystack)) {
+  if (RECALL_HAZARD_RE.test(fullText)) {
     issues.push({
       code: "PROHIBITED_RECALL",
       severity: "block",
@@ -276,7 +283,7 @@ export function evaluateMarketplaceCompliance(params: {
     });
   }
 
-  if (ADULT_EXPLICIT_RE.test(haystack)) {
+  if (ADULT_EXPLICIT_RE.test(productIdentity)) {
     issues.push({
       code: "PROHIBITED_ADULT",
       severity: "block",
@@ -305,7 +312,7 @@ export function evaluateMarketplaceCompliance(params: {
 
   // 3. Poshmark-Specific Rules
   if (targetMarketplace === "poshmark") {
-    if (POSHMARK_FLAMMABLE_LIQUID_RE.test(haystack)) {
+    if (!isContainerOrAccessory && POSHMARK_FLAMMABLE_LIQUID_RE.test(productIdentity)) {
       issues.push({
         code: "POSHMARK_HAZMAT",
         severity: "block",
@@ -315,7 +322,7 @@ export function evaluateMarketplaceCompliance(params: {
       });
     }
 
-    if (COSMETICS_RE.test(haystack)) {
+    if (!isContainerOrAccessory && COSMETICS_RE.test(productIdentity)) {
       if (looksUsed) {
         issues.push({
           code: "POSHMARK_USED_COSMETICS",
@@ -335,7 +342,7 @@ export function evaluateMarketplaceCompliance(params: {
       }
     }
 
-    if (MEDICAL_HEALTHCARE_RE.test(haystack)) {
+    if (!looksCraftSupply && MEDICAL_HEALTHCARE_RE.test(productIdentity)) {
       issues.push({
         code: "POSHMARK_MEDICAL",
         severity: "block",
@@ -345,7 +352,7 @@ export function evaluateMarketplaceCompliance(params: {
       });
     }
 
-    if (FOOD_CONSUMABLE_RE.test(haystack)) {
+    if (!isContainerOrAccessory && FOOD_CONSUMABLE_RE.test(productIdentity)) {
       issues.push({
         code: "POSHMARK_FOOD",
         severity: "block",
@@ -355,7 +362,7 @@ export function evaluateMarketplaceCompliance(params: {
       });
     }
 
-    if (POSHMARK_UNSUPPORTED_BULKY_RE.test(haystack)) {
+    if (POSHMARK_UNSUPPORTED_BULKY_RE.test(productIdentity)) {
       issues.push({
         code: "POSHMARK_UNSUPPORTED_CATEGORY",
         severity: "block",
@@ -365,7 +372,7 @@ export function evaluateMarketplaceCompliance(params: {
       });
     }
 
-    if (DIGITAL_GOODS_RE.test(haystack)) {
+    if (DIGITAL_GOODS_RE.test(productIdentity)) {
       issues.push({
         code: "POSHMARK_DIGITAL",
         severity: "block",
@@ -393,7 +400,7 @@ export function evaluateMarketplaceCompliance(params: {
 
   // 4. Mercari-Specific Rules
   if (targetMarketplace === "mercari") {
-    if (MEDICAL_HEALTHCARE_RE.test(haystack)) {
+    if (!looksCraftSupply && MEDICAL_HEALTHCARE_RE.test(productIdentity)) {
       issues.push({
         code: "MERCARI_MEDICAL",
         severity: "block",
@@ -402,7 +409,7 @@ export function evaluateMarketplaceCompliance(params: {
           "Medical devices, prescription items, and dietary supplements are prohibited on Mercari.",
       });
     }
-    if (FOOD_CONSUMABLE_RE.test(haystack)) {
+    if (!isContainerOrAccessory && FOOD_CONSUMABLE_RE.test(productIdentity)) {
       issues.push({
         code: "MERCARI_FOOD",
         severity: "block",
@@ -411,7 +418,7 @@ export function evaluateMarketplaceCompliance(params: {
           "Food, baby formula, and perishable consumables are prohibited on Mercari.",
       });
     }
-    if (DIGITAL_GOODS_RE.test(haystack)) {
+    if (DIGITAL_GOODS_RE.test(productIdentity)) {
       issues.push({
         code: "MERCARI_DIGITAL",
         severity: "block",
@@ -420,7 +427,7 @@ export function evaluateMarketplaceCompliance(params: {
           "Digital downloads, redeem codes, and gift cards are prohibited on Mercari.",
       });
     }
-    if (POSHMARK_FLAMMABLE_LIQUID_RE.test(haystack)) {
+    if (!isContainerOrAccessory && POSHMARK_FLAMMABLE_LIQUID_RE.test(productIdentity)) {
       issues.push({
         code: "MERCARI_HAZMAT_GROUND",
         severity: "warning",
@@ -433,7 +440,7 @@ export function evaluateMarketplaceCompliance(params: {
 
   // 5. Facebook Marketplace-Specific Rules
   if (targetMarketplace === "facebook") {
-    if (MEDICAL_HEALTHCARE_RE.test(haystack)) {
+    if (!looksCraftSupply && MEDICAL_HEALTHCARE_RE.test(productIdentity)) {
       issues.push({
         code: "FB_MEDICAL_AUTOBAN",
         severity: "block",
@@ -442,7 +449,7 @@ export function evaluateMarketplaceCompliance(params: {
           "Facebook's automated enforcement strictly prohibits medical/healthcare items (braces, monitors, thermometers, supplements) and frequently suspends Marketplace access.",
       });
     }
-    if (DIGITAL_GOODS_RE.test(haystack)) {
+    if (DIGITAL_GOODS_RE.test(productIdentity)) {
       issues.push({
         code: "FB_DIGITAL",
         severity: "block",

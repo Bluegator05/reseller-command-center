@@ -24,6 +24,7 @@ interface CrossListBody {
   itemIds?: string[];
   draft?: Partial<CrossListDraftPayload>;
   publishImmediately?: boolean;
+  overrideCompliance?: boolean;
 }
 
 /**
@@ -178,7 +179,7 @@ export async function POST(request: Request) {
         ),
       });
 
-      if (!etsyCompliance.allowed) {
+      if (!etsyCompliance.allowed && !body.overrideCompliance) {
         const blockMsg = etsyCompliance.issues
           .filter((i) => i.severity === "block")
           .map((i) => `${i.rule}: ${i.detail}`)

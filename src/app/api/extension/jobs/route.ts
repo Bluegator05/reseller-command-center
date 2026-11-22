@@ -93,6 +93,7 @@ interface QueueExtensionBody {
   marketplace?: MarketplaceType;
   action?: "create" | "delist";
   draft?: Partial<CrossListDraftPayload>;
+  overrideCompliance?: boolean;
 }
 
 /**
@@ -260,7 +261,7 @@ export async function POST(request: Request) {
       targetMarketplace: marketplace,
     });
 
-    if (action === "create") {
+    if (action === "create" && !body.overrideCompliance) {
       const compliance = evaluateMarketplaceCompliance({
         item,
         targetMarketplace: marketplace,
