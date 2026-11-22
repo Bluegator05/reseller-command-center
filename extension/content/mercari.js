@@ -269,6 +269,157 @@
   }
 
   /**
+   * Ensures a valid non-Priority Mercari prepaid shipping carrier is selected
+   * (Buyer pays · USPS Ground Advantage / UPS Ground Saver / FedEx Ground Economy).
+   * Strictly skips USPS Priority Mail.
+   */
+  async function ensureMercariShippingSelected(payload, helpers, debugLog, forceSelect = false) {
+    const { setNativeValue, sleep, clickButtonByText } = helpers;
+
+    const hasCarrierError = () =>
+      /please select a shipping carrier|select a shipping/i.test(
+        document.body?.innerText || ""
+      );
+
+    // 1. Check if Mercari already auto-selected a valid non-Priority carrier
+    const pageText = document.body?.innerText || "";
+    const alreadyHasCarrier =
+      /(?:usps\s*ground\s*advantage|ups\s*(?:ground\s*saver|surepost|ground)|fedex\s*(?:ground\s*economy|home\s*delivery|ground))/i.test(
+        pageText
+      ) && !hasCarrierError();
+
+    const openTrigger = Array.from(
+      document.querySelectorAll('button, [role="button"], a')
+    ).find((el) => {
+      if (el.disabled || el.closest("#rcc-companion-hud")) return false;
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) return false;
+      const t = (el.textContent || "").replace(/\s+/g, " ").trim();
+      return /^(?:select|choose)\s+(?:a\s+)?(?:shipping\s+)?(?:carrier|shipping|delivery)$/i.test(t);
+    });
+
+    if (!forceSelect && alreadyHasCarrier && !openTrigger) {
+      debugLog.push("Shipping: Mercari auto-filled carrier ✓");
+      return true;
+    }
+
+    // 2. Make sure "Buyer pays" / "Prepaid label" is selected (never Ship on your own)
+    const prepaidOption = Array.from(
+      document.querySelectorAll('label, button, [role="radio"], div[tabindex], div')
+    ).find((el) => {
+      if (el.closest("#rcc-companion-hud")) return false;
+      const r = el.getBoundingClientRect();
+      if (r.width < 60 || r.width > 700 || r.height < 28 || r.height > 140) return false;
+      const t = (el.innerText || "").trim();
+      return /^(?:buyer pays|prepaid label)\b/i.test(t) && t.length < 180;
+    });
+    if (prepaidOption) {
+      const radio = prepaidOption.querySelector('input[type="radio"]');
+      if (radio && !radio.checked) {
+        prepaidOption.scrollIntoView({ block: "center" });
+        radio.click();
+        prepaidOption.click();
+        await sleep(400);
+        debugLog.push("Shipping: selected Prepaid / Buyer pays");
+      }
+    }
+
+    // 3. Click "Select carrier" / "Select shipping" trigger if present
+    if (openTrigger) {
+      openTrigger.scrollIntoView({ block: "center" });
+      await sleep(150);
+      openTrigger.click();
+      await sleep(600);
+      debugLog.push(`Shipping: opened "${(openTrigger.textContent || "").trim()}"`);
+    }
+
+    // 4. Fill package weight (lb / oz) if inputs are visible and blank/zero
+    const lbInput = document.querySelector(
+      'input[data-testid*="Pound"], input[name*="pound" i], input[placeholder*="lb" i], input[aria-label*="pound" i]'
+    );
+    const ozInput = document.querySelector(
+      'input[data-testid*="Ounce"], input[name*="ounce" i], input[placeholder*="oz" i], input[aria-label*="ounce" i]'
+    );
+    if (lbInput || ozInput) {
+      const curLb = Number(lbInput?.value || 0);
+      const curOz = Number(ozInput?.value || 0);
+      if (curLb === 0 && curOz === 0) {
+        const totalOz = Math.max(4, Math.round(Number(payload.weightOz) || 12));
+        const lbs = Math.floor(totalOz / 16);
+        const oz = lbs > 0 ? totalOz % 16 : totalOz;
+        if (lbInput) setNativeValue(lbInput, String(lbs));
+        if (ozInput) setNativeValue(ozInput, String(oz));
+        await sleep(450);
+        debugLog.push(`Shipping: set weight ${lbs}lb ${oz}oz`);
+        await clickButtonByText([/^calculate$/i, /^next$/i, /^continue$/i], 1200);
+        await sleep(500);
+      }
+    }
+
+    // 5. Pick the best non-Priority carrier card/radio (strictly NO USPS Priority Mail)
+    const carrierPatterns = [
+      /usps\s*ground\s*advantage/i,
+      /ups\s*(?:ground\s*saver|surepost)/i,
+      /fedex\s*ground\s*economy/i,
+      /ups\s*ground/i,
+      /fedex\s*(?:home|ground)/i,
+      /\b(?:usps|ups|fedex)\b.*\$\s*\d/i,
+    ];
+
+    const pickCarrier = async () => {
+      const nodes = Array.from(
+        document.querySelectorAll('label, [role="radio"], [role="option"], button, div[tabindex], div')
+      );
+      for (const pat of carrierPatterns) {
+        let best = null;
+        let bestArea = Infinity;
+        for (const el of nodes) {
+          if (el.closest("#rcc-companion-hud") || el.disabled) continue;
+          const r = el.getBoundingClientRect();
+          if (r.width < 120 || r.width > 760 || r.height < 34 || r.height > 180) continue;
+          const cs = window.getComputedStyle(el);
+          if (cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0") continue;
+          const txt = (el.innerText || "").replace(/\s+/g, " ").trim();
+          if (!txt || txt.length > 220) continue;
+          // Strictly forbid USPS Priority Mail!
+          if (/priority\s*mail|\bpriority\b/i.test(txt)) continue;
+          if (!pat.test(txt)) continue;
+          const area = r.width * r.height;
+          if (area < bestArea) {
+            bestArea = area;
+            best = el;
+          }
+        }
+        if (best) {
+          best.scrollIntoView({ block: "center" });
+          await sleep(150);
+          const radio = best.querySelector('input[type="radio"]');
+          if (radio) radio.click();
+          best.click();
+          const outer = best.closest('label, button, [role="radio"]');
+          if (outer && outer !== best) outer.click();
+          await sleep(350);
+          debugLog.push(`Shipping: selected carrier "${(best.innerText || "").replace(/\s+/g, " ").trim().slice(0, 50)}"`);
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const picked = await pickCarrier();
+
+    // 6. Save modal if a shipping carrier modal is open
+    if (picked) {
+      await clickButtonByText([/^save$/i, /^confirm$/i, /^done$/i, /^select$/i], 1500);
+      await sleep(350);
+      return true;
+    }
+
+    debugLog.push("Shipping: carrier card not found");
+    return false;
+  }
+
+  /**
    * Detects visible red inline validation messages on Mercari /sell/
    */
   function detectMercariValidationError() {
@@ -595,16 +746,14 @@
 
         // 3. Category (if Mercari didn't already auto-populate it)
         const catLevels = [sc.department, sc.category, sc.subcategory].filter(Boolean);
-        let categoryMatched = false;
         const catEl = document.querySelector(
           '[data-testid="CategoryDropdown"], select[data-testid="CategoryId"], div[data-testid="Category"]'
         );
         const catTxt = (catEl?.textContent || "").trim();
         if (catEl && catTxt && !/select category/i.test(catTxt)) {
-          categoryMatched = true;
           debugLog.push(`Category: Mercari auto-filled ("${catTxt.slice(0, 40)}")`);
         } else if (catLevels.length > 0) {
-          categoryMatched = await selectDropdownSequence(
+          await selectDropdownSequence(
             [
               '[data-testid="CategoryDropdown"]',
               'select[data-testid="CategoryId"]',
@@ -619,8 +768,14 @@
         }
 
         // 4. Brand (select real brand or Mercari's "No brand / Not sure" unbranded pill)
-        const brandHelpers = { waitForSelector, setNativeValue, sleep, clickMatchingOption };
-        await selectMercariBrand(payload.brand || "", brandHelpers, debugLog, false);
+        const mercariHelpers = {
+          waitForSelector,
+          setNativeValue,
+          sleep,
+          clickMatchingOption,
+          clickButtonByText,
+        };
+        await selectMercariBrand(payload.brand || "", mercariHelpers, debugLog, false);
 
         // 5. Condition card ("New", "Like new", "Good", "Fair", "Poor")
         const targetCond = sc.conditionLabel || payload.condition || "Good";
@@ -629,6 +784,9 @@
           sleep,
           debugLog
         );
+
+        // 5.5 Shipping Carrier (ensure non-Priority Buyer-Pays prepaid carrier is selected)
+        await ensureMercariShippingSelected(payload, mercariHelpers, debugLog, false);
 
         // 6. Whole-dollar Price ($5+) + Disable Mercari Smart Pricing
         const priceInput = await waitForSelector(
@@ -654,7 +812,7 @@
         ].join(" · ");
 
         if (debugLog.length > 0) {
-          console.log("[RCC Mercari v0.9.8]", debugLog.join(" | "));
+          console.log("[RCC Mercari v1.1.1]", debugLog.join(" | "));
         }
 
         // 7. Auto-Publish: If Condition was selected, wait for photos to settle & click the purple "List" button!
@@ -668,13 +826,14 @@
 
           await sleep(Math.min(6000, Math.max(1800, uploadedCount * 350)));
 
-          // Double-check Brand & Smart pricing right before submitting
+          // Double-check Brand, Shipping & Smart pricing right before submitting
           const brandCheck = document.querySelector(
             'input[data-testid="Brand"], input[placeholder*="brand" i], input[aria-label*="brand" i], input[name="brand"]'
           );
           if (brandCheck && !brandCheck.value.trim()) {
-            await selectMercariBrand("", brandHelpers, debugLog, true);
+            await selectMercariBrand("", mercariHelpers, debugLog, true);
           }
+          await ensureMercariShippingSelected(payload, mercariHelpers, debugLog, false);
           await disableMercariSmartPricing(sleep, debugLog);
 
           const findListBtn = () =>
@@ -695,8 +854,8 @@
             await sleep(1200);
             await clickButtonByText([/^list anyway$/i, /^confirm$/i, /^list item$/i], 2000);
 
-            // Verify Mercari didn't block submission with an inline validation error (up to 2 auto-fixes)
-            for (let retry = 0; retry < 2; retry++) {
+            // Verify Mercari didn't block submission with an inline validation error (up to 3 auto-fixes)
+            for (let retry = 0; retry < 3; retry++) {
               await sleep(900);
               if (!window.location.pathname.includes("/sell")) {
                 validationError = null;
@@ -708,7 +867,12 @@
               let fixedSomething = false;
               if (/brand/i.test(validationError)) {
                 debugLog.push(`Auto-fix brand after error: ${validationError}`);
-                await selectMercariBrand("", brandHelpers, debugLog, true);
+                await selectMercariBrand("", mercariHelpers, debugLog, true);
+                fixedSomething = true;
+              }
+              if (/shipping|carrier|delivery/i.test(validationError)) {
+                debugLog.push(`Auto-fix shipping after error: ${validationError}`);
+                await ensureMercariShippingSelected(payload, mercariHelpers, debugLog, true);
                 fixedSomething = true;
               }
               if (/floor price/i.test(validationError)) {
@@ -811,7 +975,7 @@
           onSecondaryAction:
             !conditionMatched || validationError
               ? async () => {
-                  const txt = `Mercari v0.9.8 Debug (${targetCond}):\n${debugLog.join("\n")}${
+                  const txt = `Mercari v1.1.1 Debug (${targetCond}):\n${debugLog.join("\n")}${
                     validationError ? `\nValidation: ${validationError}` : ""
                   }`;
                   try {

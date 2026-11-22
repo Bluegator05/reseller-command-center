@@ -347,6 +347,7 @@ export async function POST(request: Request) {
       structuredCategory,
       targetPrice: Math.ceil(Number(item.target_price)),
       suggestedPrice,
+      weightOz: item.weight_oz ?? null,
       imageUrls: (item.image_urls || []).slice(0, limits.maxPhotos),
       requiresUserConfirm: marketplace === "facebook",
     };
