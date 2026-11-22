@@ -196,6 +196,25 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
     return () => window.removeEventListener("message", handleExtensionMsg);
   }, [pushToast, refreshInventory]);
 
+  // Auto-refresh every 10s while Mac Mini Auto-Pilot jobs are pending/processing
+  // so iMac / MacBook Air / iPhone tabs automatically flip to "Listed ↗" with no manual reload
+  const hasInFlightExtensionJobs = useMemo(
+    () =>
+      data.extensionJobs.some(
+        (j) => j.status === "pending" || j.status === "processing"
+      ),
+    [data.extensionJobs]
+  );
+
+  useEffect(() => {
+    if (!hasInFlightExtensionJobs) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      refreshInventory().catch(() => {});
+    }, 10_000);
+    return () => window.clearInterval(timer);
+  }, [hasInFlightExtensionJobs, refreshInventory]);
+
   const handleSyncEbay = useCallback(async () => {
     setIsSyncingEbay(true);
     try {

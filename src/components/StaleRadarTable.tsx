@@ -1676,10 +1676,25 @@ export function StaleRadarTable({
                               <div className="w-full max-w-[126px] flex items-center justify-center gap-1">
                                 {isLive && !isConfirm ? (
                                   <span
-                                    title="Open the pinned Chrome/Arc Extension icon in your browser toolbar and click Auto-Fill"
-                                    className="flex-1 text-center py-1 px-1.5 rounded-md text-[10px] font-semibold bg-[#ECFDF5] text-[#0F766E] border border-[#A7F3D0]"
+                                    title={
+                                      queuedJob.status === "processing"
+                                        ? "Mac Mini Auto-Pilot is actively filling and publishing this listing now — this card will auto-update to Listed ↗"
+                                        : "Queued for Mac Mini Auto-Pilot (picks up every ~30s and auto-updates to Listed ↗)"
+                                    }
+                                    className={`flex-1 inline-flex items-center justify-center gap-1 text-center py-1 px-1.5 rounded-md text-[10px] font-semibold border ${
+                                      queuedJob.status === "processing"
+                                        ? "bg-[#EFF6FF] text-[#1D4ED8] border-[#BFDBFE]"
+                                        : "bg-[#ECFDF5] text-[#0F766E] border-[#A7F3D0]"
+                                    }`}
                                   >
-                                    Use Ext Icon
+                                    {queuedJob.status === "processing" ? (
+                                      <>
+                                        <Loader2 className="w-2.5 h-2.5 animate-spin shrink-0" />
+                                        Posting…
+                                      </>
+                                    ) : (
+                                      "Queued · Auto-Pilot"
+                                    )}
                                   </span>
                                 ) : (
                                   <button
