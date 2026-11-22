@@ -394,27 +394,42 @@ async function scrapeActiveListingsFromDom(marketplace) {
       });
     }
   } else if (marketplace === "mercari") {
+    const extractMercariId = (str) => {
+      const m = String(str || "").match(/(?:^|[^a-z0-9])(m\d{9,13})(?:$|[^a-z0-9])/i);
+      return m ? m[1] : null;
+    };
     const links = Array.from(
-      document.querySelectorAll('a[href*="/us/item/m"], a[href*="/item/m"]')
+      document.querySelectorAll(
+        'a[href*="/us/item/m"], a[href*="/item/m"], a[href*="/sell/edit/m"], a[href*="/mypage/listings/"]'
+      )
     );
     for (const link of links) {
       const href = link.href || "";
-      const idMatch = href.match(/\/item\/(m\d+)/i);
-      const extId = idMatch ? idMatch[1] : href;
+      const row =
+        link.closest('tr, [role="row"], [data-testid*="Item"], [data-testid*="Listing"], li, article') ||
+        link.parentElement?.parentElement ||
+        link;
+      const extId =
+        extractMercariId(href) ||
+        extractMercariId(row?.querySelector("img")?.getAttribute("src")) ||
+        extractMercariId(row?.innerHTML);
       if (!extId || seen.has(extId)) continue;
 
-      const card =
-        link.closest('[data-testid*="Item"], [data-testid*="Listing"], li, article') ||
-        link;
-      const cardText = card?.innerText || link.innerText || "";
+      const cardText = row?.innerText || link.innerText || "";
       if (isSoldOrInactive(cardText)) continue;
 
-      const imgAlt = card?.querySelector("img")?.getAttribute("alt") || "";
+      const imgAlt = row?.querySelector("img")?.getAttribute("alt") || "";
+      const linkText = (link.innerText || link.textContent || "").trim();
       const lines = cardText
         .split("\n")
         .map((s) => s.trim())
-        .filter((s) => s.length >= 3 && !/^\$[\d,.]+$/.test(s));
-      const cleanTitle = (imgAlt.trim() || lines[0] || "")
+        .filter((s) => s.length >= 3 && !/^\$[\d,.]+$/.test(s) && !/^promote$/i.test(s));
+      const cleanTitle = (
+        (linkText.length >= 4 ? linkText : "") ||
+        imgAlt.trim() ||
+        lines[0] ||
+        ""
+      )
         .replace(/\s+/g, " ")
         .trim();
       if (cleanTitle.length < 3) continue;
@@ -422,7 +437,37 @@ async function scrapeActiveListingsFromDom(marketplace) {
       seen.add(extId);
       results.push({
         externalListingId: extId,
-        externalUrl: href.split("?")[0],
+        externalUrl: `https://www.mercari.com/us/item/${extId}/`,
+        title: cleanTitle,
+        price: extractPrice(cardText),
+      });
+    }
+    // Fallback for Mercari seller table rows that identify items via CDN thumbnail URL (photos/mXXXXXXXXXXX_1.jpg)
+    const imgs = Array.from(document.querySelectorAll("img[src]"));
+    for (const img of imgs) {
+      const extId = extractMercariId(img.getAttribute("src"));
+      if (!extId || seen.has(extId)) continue;
+      let row =
+        img.closest('tr, [role="row"], [data-testid*="Item"], [data-testid*="Listing"], li, article') ||
+        img.parentElement;
+      for (let up = 0; up < 4 && row && (row.innerText || "").trim().length < 12; up++) {
+        row = row.parentElement;
+      }
+      const cardText = row?.innerText || "";
+      if (isSoldOrInactive(cardText)) continue;
+      const lines = cardText
+        .split("\n")
+        .map((s) => s.trim())
+        .filter((s) => s.length >= 3 && !/^\$[\d,.]+$/.test(s) && !/^promote$/i.test(s));
+      const cleanTitle = ((img.getAttribute("alt") || "").trim() || lines[0] || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (cleanTitle.length < 3) continue;
+
+      seen.add(extId);
+      results.push({
+        externalListingId: extId,
+        externalUrl: `https://www.mercari.com/us/item/${extId}/`,
         title: cleanTitle,
         price: extractPrice(cardText),
       });
@@ -613,14 +658,29 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
   if (!isPoshmarkPublished && !isMercariPublished) return;
 
-  // Wait for page load completion on closet / mypage so we can grab the exact matching listing URL
-  if ((url.includes("/closet/") || url.includes("/mypage/")) && changeInfo.status !== "complete") {
+  // Wait for page load completion on closet / mypage so we can grab the exact matching listing URL.
+  // Mercari uses SPA navigation (history.pushState), so tab.status can already be "complete" when changeInfo.url fires.
+  if (
+    (url.includes("/closet/") || url.includes("/mypage/")) &&
+    changeInfo.status !== "complete" &&
+    tab?.status !== "complete"
+  ) {
     return;
   }
 
   watchedPublishTabs.delete(tabId);
 
   let finalUrl = url.split("?")[0];
+  let finalExternalId = null;
+
+  if (watch.marketplace === "mercari") {
+    const directId = finalUrl.match(/(?:^|[^a-z0-9])(m\d{9,13})(?:$|[^a-z0-9])/i);
+    if (directId) {
+      finalExternalId = directId[1];
+      finalUrl = `https://www.mercari.com/us/item/${directId[1]}/`;
+    }
+  }
+
   if (watch.marketplace === "poshmark" && url.includes("/closet/")) {
     try {
       const injected = await chrome.scripting.executeScript({
@@ -719,6 +779,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
           const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
           const stop = new Set([
             "the", "and", "for", "with", "from", "new", "size", "of", "in", "on", "to", "by",
+            "promote", "active", "inactive", "views", "likes", "clicks",
           ]);
           const tok = (s) =>
             String(s || "")
@@ -727,6 +788,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
               .split(/\s+/)
               .filter((w) => w.length >= 2 && !stop.has(w));
           const targetTokens = new Set(tok(targetTitle));
+
           const score = (text) => {
             if (targetTokens.size === 0) return 0;
             const cand = new Set(tok(text));
@@ -737,38 +799,87 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
             }
             const dice = (2 * hit) / (targetTokens.size + cand.size);
             const contain = hit / Math.min(targetTokens.size, cand.size);
-            return dice * 0.65 + contain * 0.35;
+            return dice * 0.55 + contain * 0.45;
           };
-          for (let attempt = 0; attempt < 4; attempt++) {
-            const links = Array.from(
-              document.querySelectorAll('a[href*="/us/item/m"], a[href*="/item/m"]')
-            );
-            let bestUrl = null;
+
+          const extractMercariId = (str) => {
+            const m = String(str || "").match(/(?:^|[^a-z0-9])(m\d{9,13})(?:$|[^a-z0-9])/i);
+            return m ? m[1] : null;
+          };
+
+          // Retry up to 8 times (~10s) so Mercari's React /mypage/listings/active/ table finishes fetching
+          for (let attempt = 0; attempt < 8; attempt++) {
+            // If page redirected to the direct item URL while waiting, use it immediately
+            const urlId = extractMercariId(window.location.href);
+            if (urlId) {
+              return { id: urlId, url: `https://www.mercari.com/us/item/${urlId}/` };
+            }
+
+            let bestId = null;
             let bestScore = 0;
-            for (const link of links) {
-              const href = link.getAttribute("href") || "";
-              const full = href.startsWith("http")
-                ? href.split("?")[0]
-                : `https://www.mercari.com${href.split("?")[0]}`;
-              const cardText =
-                link.getAttribute("title") ||
-                link.querySelector("img")?.getAttribute("alt") ||
-                link.textContent ||
-                "";
-              const s = score(cardText);
+
+            // Strategy 1: Scan all anchors pointing to any Mercari item/edit URL
+            const anchors = Array.from(document.querySelectorAll("a[href]"));
+            for (const a of anchors) {
+              const href = a.getAttribute("href") || "";
+              const row =
+                a.closest('tr, [role="row"], li, article, [data-testid*="Listing"], [data-testid*="Item"]') ||
+                a.parentElement?.parentElement ||
+                a;
+              const id =
+                extractMercariId(href) ||
+                extractMercariId(row?.querySelector("img")?.getAttribute("src")) ||
+                extractMercariId(row?.innerHTML);
+              if (!id) continue;
+
+              const ownText = (
+                a.innerText ||
+                a.getAttribute("title") ||
+                a.querySelector("img")?.getAttribute("alt") ||
+                ""
+              ).trim();
+              const rowText = (row?.innerText || "").trim();
+              const s = Math.max(score(ownText), score(rowText));
               if (s > bestScore) {
                 bestScore = s;
-                bestUrl = full;
+                bestId = id;
               }
             }
-            if (bestScore >= 0.65 && bestUrl) return bestUrl;
-            await sleep(1400);
+
+            // Strategy 2: Scan all Mercari CDN thumbnails (photos/mXXXXXXXXXXX_1.jpg) and match their row
+            if (bestScore < 0.55) {
+              const imgs = Array.from(document.querySelectorAll("img[src]"));
+              for (const img of imgs) {
+                const id = extractMercariId(img.getAttribute("src"));
+                if (!id) continue;
+                let row =
+                  img.closest('tr, [role="row"], li, article, [data-testid*="Listing"], [data-testid*="Item"]') ||
+                  img.parentElement;
+                for (let up = 0; up < 4 && row && (row.innerText || "").trim().length < 12; up++) {
+                  row = row.parentElement;
+                }
+                const s = Math.max(
+                  score(img.getAttribute("alt") || ""),
+                  score(row?.innerText || "")
+                );
+                if (s > bestScore) {
+                  bestScore = s;
+                  bestId = id;
+                }
+              }
+            }
+
+            if (bestScore >= 0.50 && bestId) {
+              return { id: bestId, url: `https://www.mercari.com/us/item/${bestId}/` };
+            }
+            await sleep(1200);
           }
           return null;
         },
       });
-      if (injected?.[0]?.result) {
-        finalUrl = injected[0].result;
+      if (injected?.[0]?.result?.url) {
+        finalUrl = injected[0].result.url;
+        finalExternalId = injected[0].result.id || null;
       }
     } catch {
       // fall back to mypage URL
@@ -778,6 +889,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   try {
     await updateJobStatus(watch.jobId, "completed", {
       externalUrl: finalUrl,
+      externalListingId: finalExternalId || undefined,
       listedPrice: watch.listedPrice,
     });
     await refreshJobsCache(false);
