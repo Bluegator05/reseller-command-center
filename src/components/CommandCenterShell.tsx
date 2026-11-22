@@ -1051,6 +1051,64 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
                 "Item permanently deleted from your unlisted backlog."
               );
             }}
+            onDisposeItem={async ({ itemId, disposition, note }) => {
+              const res = await fetch("/api/inventory", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  action: "dispose",
+                  itemId,
+                  disposition,
+                  note,
+                }),
+              });
+              const payload = (await res.json()) as {
+                message?: string;
+                error?: string;
+              };
+              if (!res.ok) {
+                pushToast(
+                  "error",
+                  "Failed to Archive Item",
+                  payload.error || "Unknown error"
+                );
+                return;
+              }
+              await refreshInventory();
+              pushToast(
+                "success",
+                disposition === "donated"
+                  ? "Marked Donated & Delisted"
+                  : "Marked Discarded & Delisted",
+                payload.message || "Archived and removed from active channels."
+              );
+            }}
+            onSetRelistCount={async ({ itemId, relistCount }) => {
+              const res = await fetch("/api/inventory", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  action: "set_relist_count",
+                  itemId,
+                  relistCount,
+                }),
+              });
+              const payload = (await res.json()) as { error?: string };
+              if (!res.ok) {
+                pushToast(
+                  "error",
+                  "Could Not Update Relist Counter",
+                  payload.error || "Unknown error"
+                );
+                return;
+              }
+              await refreshInventory();
+              pushToast(
+                "info",
+                `Relist Counter Updated (${relistCount}×)`,
+                "Saved to item history."
+              );
+            }}
             />
           </div>
         ) : activeTab === "extension" ? (

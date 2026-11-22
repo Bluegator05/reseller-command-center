@@ -131,7 +131,7 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
         const inv = Array.isArray(row.inventory_items)
           ? row.inventory_items[0]
           : row.inventory_items;
-        if (!inv || inv.status === "sold") continue;
+        if (!inv || inv.status === "sold" || inv.status === "archived") continue;
         activeEbayItemIds.add(row.item_id);
         items.push(
           enrichStaleRadarRow(
@@ -149,7 +149,7 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
         const inv = Array.isArray(row.inventory_items)
           ? row.inventory_items[0]
           : row.inventory_items;
-        if (!inv || inv.status === "sold") continue;
+        if (!inv || inv.status === "sold" || inv.status === "archived") continue;
         items.push(
           enrichStaleRadarRow(
             row,

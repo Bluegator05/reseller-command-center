@@ -66,12 +66,23 @@ interface StaleRadarTableProps {
   onOpenItemDetail: (row: StaleRadarRow) => void;
   onPromoteDraft: (itemId: string) => Promise<void>;
   onDeleteDraft: (itemId: string) => Promise<void>;
+  onDisposeItem?: (params: {
+    itemId: string;
+    disposition: "donated" | "discarded";
+    note?: string;
+  }) => Promise<void>;
+  onSetRelistCount?: (params: {
+    itemId: string;
+    relistCount: number;
+  }) => Promise<void>;
 }
 
 type FilterKey =
   | "all"
   | "newly_listed"
   | "stale"
+  | "relisted"
+  | "donate_toss"
   | "priority"
   | "unpromoted_30d"
   | "missing_etsy"
@@ -90,6 +101,7 @@ type SortKey =
 
 const NOTES_STORAGE_KEY = "rcc_private_notes_v1";
 const STARS_STORAGE_KEY = "rcc_starred_skus_v1";
+const DONATE_DAYS_STORAGE_KEY = "rcc_donate_days_threshold_v1";
 const STORAGE_EVT = "rcc_matrix_meta_sync";
 
 const DEFAULT_NOTES: Record<string, string> = {
@@ -230,6 +242,8 @@ export function StaleRadarTable({
   onOpenItemDetail,
   onPromoteDraft,
   onDeleteDraft,
+  onDisposeItem,
+  onSetRelistCount,
 }: StaleRadarTableProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeFilter, setActiveFilter] = useState<FilterKey>("all");
@@ -249,6 +263,13 @@ export function StaleRadarTable({
   >(null);
   const [confirmUnlinkKey, setConfirmUnlinkKey] = useState<string | null>(null);
   const [unlinkingKey, setUnlinkingKey] = useState<string | null>(null);
+  const [disposeTargetRow, setDisposeTargetRow] =
+    useState<StaleRadarRow | null>(null);
+  const [disposeNote, setDisposeNote] = useState("");
+  const [isDisposing, setIsDisposing] = useState(false);
+  const [bumpingRelistItemId, setBumpingRelistItemId] = useState<string | null>(
+    null
+  );
   const [mountNow] = useState(() => Date.now());
 
   const [notesMap, setNotesMap] = useStoredMap<Record<string, string>>(
@@ -259,6 +280,14 @@ export function StaleRadarTable({
     STARS_STORAGE_KEY,
     ["CAM-OLY-OM1N", "SNK-NB-990V5-105"]
   );
+  const [donateDaysThreshold, setDonateDaysThreshold] = useStoredMap<number>(
+    DONATE_DAYS_STORAGE_KEY,
+    60
+  );
+
+  const isDonateCandidate = (row: StaleRadarRow) =>
+    row.relist_count > 0 &&
+    (row.days_since_relist ?? row.days_listed) >= donateDaysThreshold;
 
   const starredSet = useMemo(() => new Set(starredSkus), [starredSkus]);
 
@@ -319,8 +348,14 @@ export function StaleRadarTable({
       staleRetailValue,
       totalCrossListings,
       priorityCount: items.filter((i) => starredSet.has(i.sku)).length,
+      relistedCount: items.filter((i) => i.relist_count > 0).length,
+      donateTossCount: items.filter(
+        (i) =>
+          i.relist_count > 0 &&
+          (i.days_since_relist ?? i.days_listed) >= donateDaysThreshold
+      ).length,
     };
-  }, [items, starredSet]);
+  }, [items, starredSet, donateDaysThreshold]);
 
   const filteredItems = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -331,6 +366,16 @@ export function StaleRadarTable({
 
       if (activeFilter === "newly_listed" && !row.is_newly_listed) return false;
       if (activeFilter === "stale" && !row.is_stale) return false;
+      if (activeFilter === "relisted" && row.relist_count <= 0) return false;
+      if (
+        activeFilter === "donate_toss" &&
+        !(
+          row.relist_count > 0 &&
+          (row.days_since_relist ?? row.days_listed) >= donateDaysThreshold
+        )
+      ) {
+        return false;
+      }
       if (activeFilter === "priority" && !starredSet.has(row.sku)) return false;
       if (activeFilter === "at_floor" && !row.is_at_floor) return false;
       if (
@@ -375,7 +420,15 @@ export function StaleRadarTable({
           return b.watchers_count - a.watchers_count;
       }
     });
-  }, [items, searchQuery, activeFilter, sortBy, starredSet, notesMap]);
+  }, [
+    items,
+    searchQuery,
+    activeFilter,
+    sortBy,
+    starredSet,
+    notesMap,
+    donateDaysThreshold,
+  ]);
 
   const validSelectedIds = useMemo(() => {
     const currentSet = new Set(items.map((i) => i.listing_id));
@@ -467,6 +520,7 @@ export function StaleRadarTable({
       count: metrics.newlyListedCount,
     },
     { key: "stale", label: "Needs Action (>45d)", count: metrics.staleCount },
+    { key: "relisted", label: "Relisted", count: metrics.relistedCount },
     {
       key: "unpromoted_30d",
       label: "30d+ Eligible (4% Promo)",
@@ -624,6 +678,45 @@ export function StaleRadarTable({
                 </button>
               );
             })}
+            <div className="inline-flex items-center rounded-lg overflow-hidden border border-[#FECACA] bg-[#FEF2F2]">
+              <button
+                type="button"
+                onClick={() =>
+                  setActiveFilter((prev) =>
+                    prev === "donate_toss" ? "all" : "donate_toss"
+                  )
+                }
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold transition cursor-pointer ${
+                  activeFilter === "donate_toss"
+                    ? "bg-[#B91C1C] text-white"
+                    : "text-[#B91C1C] hover:bg-[#FEE2E2]"
+                }`}
+              >
+                <Trash2 className="w-3 h-3" />
+                <span>Donate / Toss</span>
+                <span
+                  className={`font-mono tabular-nums text-[11px] px-1.5 rounded ${
+                    activeFilter === "donate_toss"
+                      ? "bg-white/20 text-white"
+                      : "bg-white text-[#B91C1C]"
+                  }`}
+                >
+                  {metrics.donateTossCount}
+                </span>
+              </button>
+              <select
+                aria-label="Days unsold after relist before Donate or Toss"
+                title="Flag relisted items unsold for this many days to Donate / Toss"
+                value={donateDaysThreshold}
+                onChange={(e) => setDonateDaysThreshold(Number(e.target.value))}
+                className="px-1.5 py-1 text-[11px] font-mono font-semibold text-[#991B1B] bg-[#FEF2F2] border-l border-[#FECACA] focus:outline-none cursor-pointer"
+              >
+                <option value={30}>30d+</option>
+                <option value={45}>45d+</option>
+                <option value={60}>60d+</option>
+                <option value={90}>90d+</option>
+              </select>
+            </div>
             <button
               type="button"
               onClick={() => setShowDeathPile((v) => !v)}
@@ -1114,6 +1207,50 @@ export function StaleRadarTable({
                                   FB Local Only
                                 </span>
                               )}
+                              {(() => {
+                                const donateFlag = isDonateCandidate(row);
+                                const daysRelisted =
+                                  row.days_since_relist ?? row.days_listed;
+                                const isBumping =
+                                  bumpingRelistItemId === row.item_id;
+                                return (
+                                  <button
+                                    type="button"
+                                    disabled={isBumping || !onSetRelistCount}
+                                    title={
+                                      row.relist_count > 0
+                                        ? `Relisted ${row.relist_count}× (${daysRelisted}d ago). Click to +1 if relisted manually on eBay.`
+                                        : "Original listing (never relisted). Click to mark as Relisted 1× if relisted manually on eBay."
+                                    }
+                                    onClick={async () => {
+                                      if (!onSetRelistCount) return;
+                                      setBumpingRelistItemId(row.item_id);
+                                      try {
+                                        await onSetRelistCount({
+                                          itemId: row.item_id,
+                                          relistCount: row.relist_count + 1,
+                                        });
+                                      } finally {
+                                        setBumpingRelistItemId(null);
+                                      }
+                                    }}
+                                    className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold border transition cursor-pointer disabled:cursor-default ${
+                                      donateFlag
+                                        ? "bg-[#FEF2F2] text-[#B91C1C] border-[#FECACA] hover:bg-[#FEE2E2]"
+                                        : row.relist_count > 0
+                                          ? "bg-[#EEF2FF] text-[#4338CA] border-[#C7D2FE] hover:bg-[#E0E7FF]"
+                                          : "bg-[#F7F8F7] text-[#6B7280] border-[#E5E8E6] hover:border-[#0F766E] hover:text-[#0F766E]"
+                                    }`}
+                                  >
+                                    <RefreshCcw className="w-2.5 h-2.5" />
+                                    {donateFlag
+                                      ? `Donate/Toss · Relisted ${row.relist_count}× (${daysRelisted}d)`
+                                      : row.relist_count > 0
+                                        ? `Relisted ${row.relist_count}× · ${daysRelisted}d`
+                                        : "0× relisted"}
+                                  </button>
+                                );
+                              })()}
                               <span className="text-[10px] font-mono text-[#7C858D]">
                                 {activeChannelCount}/5 live
                               </span>
@@ -1168,7 +1305,7 @@ export function StaleRadarTable({
                               <button
                                 type="button"
                                 disabled={isBusy}
-                                title="Ends stale eBay listing & publishes a fresh item ID (End & Sell Similar)"
+                                title="Ends stale eBay listing & publishes a fresh item ID (increments Relist Counter)"
                                 onClick={() =>
                                   onExecuteAction({
                                     action: "end_and_sell_similar",
@@ -1180,6 +1317,26 @@ export function StaleRadarTable({
                                 <RefreshCcw className="w-3 h-3" />
                                 Sell Similar
                               </button>
+
+                              {onDisposeItem && (
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  title="Mark item to Donate or Throw Away & automatically delist across all marketplaces"
+                                  onClick={() => {
+                                    setDisposeTargetRow(row);
+                                    setDisposeNote("");
+                                  }}
+                                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold border transition cursor-pointer ${
+                                    isDonateCandidate(row)
+                                      ? "bg-[#B91C1C] border-[#B91C1C] text-white hover:bg-[#991B1B]"
+                                      : "border-[#FECACA] bg-[#FEF2F2] text-[#B91C1C] hover:bg-[#FEE2E2]"
+                                  }`}
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  Donate / Toss
+                                </button>
+                              )}
 
                               {row.days_listed >= 30 &&
                                 row.promoted_ad_rate_pct < 4 && (
@@ -1539,6 +1696,131 @@ export function StaleRadarTable({
           </div>
         </div>
       </div>
+
+      {/* Donate / Throw Away & Auto-Delist Confirmation Modal */}
+      {disposeTargetRow && onDisposeItem && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 backdrop-blur-[2px] p-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !isDisposing) {
+              setDisposeTargetRow(null);
+            }
+          }}
+        >
+          <div className="bg-white border border-[#DCE2DF] rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+            <div className="px-5 py-3.5 border-b border-[#ECEFE9] bg-[#FEF2F2] flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold text-[#991B1B]">
+                  Donate or Throw Away Item
+                </h3>
+                <p className="text-[11px] font-mono text-[#B91C1C]">
+                  {disposeTargetRow.sku}
+                  {disposeTargetRow.bin_location
+                    ? ` · Bin ${disposeTargetRow.bin_location}`
+                    : ""}
+                  {disposeTargetRow.relist_count > 0
+                    ? ` · Relisted ${disposeTargetRow.relist_count}× (${disposeTargetRow.days_since_relist ?? disposeTargetRow.days_listed}d ago)`
+                    : ` · ${disposeTargetRow.days_listed}d listed`}
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={isDisposing}
+                onClick={() => setDisposeTargetRow(null)}
+                className="p-1 rounded-lg text-[#991B1B] hover:bg-[#FEE2E2] cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <div className="text-xs text-[#171A1D] font-semibold leading-snug">
+                {disposeTargetRow.title}
+              </div>
+
+              <div className="rounded-xl bg-[#FAFBF9] border border-[#E5E8E6] p-3 text-xs space-y-1">
+                <div className="text-[#5F666D]">
+                  This will archive the SKU and{" "}
+                  <strong className="text-[#171A1D]">
+                    automatically end/delist
+                  </strong>{" "}
+                  it on all active channels:
+                </div>
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  {disposeTargetRow.cross_listings
+                    .filter((c) => c.status === "active" || c.status === "draft")
+                    .map((c) => (
+                      <span
+                        key={c.marketplace}
+                        className="px-2 py-0.5 rounded bg-white border border-[#DDE2DF] text-[10px] font-mono font-bold uppercase text-[#171A1D]"
+                      >
+                        {c.marketplace}
+                      </span>
+                    ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-medium text-[#5F666D] mb-1">
+                  Optional Note (e.g. Goodwill drop-off, damaged)
+                </label>
+                <input
+                  type="text"
+                  value={disposeNote}
+                  onChange={(e) => setDisposeNote(e.target.value)}
+                  placeholder="Goodwill donation box / damaged..."
+                  className="w-full px-3 py-2 text-xs rounded-lg border border-[#DCE1DE] focus:border-[#0F766E] focus:outline-none"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                <button
+                  type="button"
+                  disabled={isDisposing}
+                  onClick={async () => {
+                    setIsDisposing(true);
+                    try {
+                      await onDisposeItem({
+                        itemId: disposeTargetRow.item_id,
+                        disposition: "donated",
+                        note: disposeNote.trim() || undefined,
+                      });
+                      setDisposeTargetRow(null);
+                    } finally {
+                      setIsDisposing(false);
+                    }
+                  }}
+                  className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold bg-[#0F766E] text-white hover:bg-[#0B5B55] disabled:opacity-50 cursor-pointer"
+                >
+                  {isDisposing && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  Donate &amp; Delist All
+                </button>
+                <button
+                  type="button"
+                  disabled={isDisposing}
+                  onClick={async () => {
+                    setIsDisposing(true);
+                    try {
+                      await onDisposeItem({
+                        itemId: disposeTargetRow.item_id,
+                        disposition: "discarded",
+                        note: disposeNote.trim() || undefined,
+                      });
+                      setDisposeTargetRow(null);
+                    } finally {
+                      setIsDisposing(false);
+                    }
+                  }}
+                  className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold bg-[#B91C1C] text-white hover:bg-[#991B1B] disabled:opacity-50 cursor-pointer"
+                >
+                  {isDisposing && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  Throw Away &amp; Delist All
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

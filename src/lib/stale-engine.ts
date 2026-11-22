@@ -161,6 +161,25 @@ export function enrichStaleRadarRow(
       (c.status === "active" || c.status === "draft")
   );
 
+  const specs = (item.item_specifics || {}) as Record<string, unknown>;
+  const rawRelistCount = Number(specs.relist_count);
+  const relistCount =
+    Number.isFinite(rawRelistCount) && rawRelistCount >= 0
+      ? Math.floor(rawRelistCount)
+      : listing.last_refreshed_at
+        ? 1
+        : 0;
+  const lastRelistedAt =
+    (typeof specs.last_relisted_at === "string" && specs.last_relisted_at) ||
+    listing.last_refreshed_at ||
+    null;
+  const daysSinceRelist =
+    relistCount > 0 && lastRelistedAt
+      ? calculateDaysListed(lastRelistedAt, nowMs)
+      : relistCount > 0
+        ? daysListed
+        : null;
+
   return {
     listing_id: listing.id,
     item_id: item.id,
@@ -207,6 +226,9 @@ export function enrichStaleRadarRow(
     is_stale: isStale,
     is_low_views: isLowViews,
     fb_local_only: item.item_specifics?.fb_local_only === "true",
+    relist_count: relistCount,
+    last_relisted_at: lastRelistedAt,
+    days_since_relist: daysSinceRelist,
     is_at_floor: dropCalc.isAlreadyAtFloor,
     stale_severity: staleSeverity,
     recommended_action: recommendedAction,

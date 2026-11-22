@@ -204,6 +204,9 @@ export interface StaleRadarRow {
   is_stale: boolean;
   is_low_views: boolean;
   fb_local_only?: boolean;
+  relist_count: number;
+  last_relisted_at: string | null;
+  days_since_relist: number | null;
   is_at_floor: boolean;
   stale_severity: StaleSeverity;
   recommended_action: Exclude<JobActionType, "create" | "delist"> | null;

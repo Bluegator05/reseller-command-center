@@ -244,6 +244,31 @@ export async function POST(request: Request) {
             newPrice: currentPrice,
           });
 
+          const existingSpecs = (inv.item_specifics || {}) as Record<
+            string,
+            unknown
+          >;
+          const prevRelistCount = Number.isFinite(
+            Number(existingSpecs.relist_count)
+          )
+            ? Math.max(0, Math.floor(Number(existingSpecs.relist_count)))
+            : listing.last_refreshed_at
+              ? 1
+              : 0;
+          const nextRelistCount = prevRelistCount + 1;
+
+          await supabase!
+            .from("inventory_items")
+            .update({
+              item_specifics: {
+                ...existingSpecs,
+                relist_count: String(nextRelistCount),
+                last_relisted_at: nowIso,
+              },
+              updated_at: nowIso,
+            })
+            .eq("id", inv.id);
+
           await supabase!
             .from("marketplace_listings")
             .update({
@@ -266,6 +291,7 @@ export async function POST(request: Request) {
                 previousExternalListingId: listing.external_listing_id,
                 newListingId: relisted.newListingId,
                 newOfferId: relisted.newOfferId,
+                relistCount: nextRelistCount,
               },
               completed_at: new Date().toISOString(),
             })
@@ -284,7 +310,7 @@ export async function POST(request: Request) {
             wasClampedToFloor: false,
             newExternalListingId: relisted.newListingId,
             jobId,
-            message: `Ended stale offer and republished as #${relisted.newListingId}`,
+            message: `Relisted (#${nextRelistCount}) as fresh listing #${relisted.newListingId}`,
           });
         } catch (err) {
           const msg =
