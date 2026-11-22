@@ -7,7 +7,7 @@
  * in 1 click (no toolbar icon click needed!).
  */
 (function initCommandCenterBridge() {
-  const EXT_VERSION = "0.8.4";
+  const EXT_VERSION = "0.9.0";
 
   function announceReady() {
     try {
@@ -23,6 +23,17 @@
 
   announceReady();
   setTimeout(announceReady, 800);
+
+  // Receive live completion notifications from background.js when a marketplace listing goes live
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type === "RCC_JOB_COMPLETED") {
+      try {
+        window.postMessage(message, window.location.origin);
+      } catch {
+        // ignore
+      }
+    }
+  });
 
   window.addEventListener("message", (event) => {
     if (event.source !== window) return;

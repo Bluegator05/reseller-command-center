@@ -169,6 +169,32 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
     setData(fresh);
   }, []);
 
+  // Auto-sync live status the instant the Companion Extension finishes publishing on Poshmark / Mercari
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handleExtensionMsg = (event: MessageEvent) => {
+      if (event.source !== window) return;
+      if (event.data?.type === "RCC_JOB_COMPLETED") {
+        const ch = String(event.data.marketplace || "marketplace").toUpperCase();
+        const sku = event.data.sku ? `${event.data.sku} · ` : "";
+        const price = event.data.listedPrice
+          ? ` at $${Number(event.data.listedPrice).toFixed(0)}`
+          : "";
+        refreshInventory()
+          .then(() => {
+            pushToast(
+              "success",
+              `Listed Live on ${ch}!`,
+              `${sku}Linked to your Command Center${price}. Green "Listed ↗" badge is now live.`
+            );
+          })
+          .catch(() => {});
+      }
+    };
+    window.addEventListener("message", handleExtensionMsg);
+    return () => window.removeEventListener("message", handleExtensionMsg);
+  }, [pushToast, refreshInventory]);
+
   const handleSyncEbay = useCallback(async () => {
     setIsSyncingEbay(true);
     try {

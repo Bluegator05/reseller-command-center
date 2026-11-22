@@ -107,18 +107,19 @@
 
       const start = Date.now();
       while (Date.now() - start < 2400) {
-        // Look inside this specific dropdownRoot's menu first (covers both single-level & 2-column menus)
         const menuRoot =
           dropdownRoot.querySelector('.dropdown__menu, [class*="dropdown__menu"], ul') ||
           dropdownRoot;
 
         const rawItems = Array.from(
-          menuRoot.querySelectorAll('li, a, button, [role="option"], .dropdown__menu__item, div[data-test]')
+          menuRoot.querySelectorAll(
+            ':scope > div, :scope > li, :scope > a, :scope > button, li, a, button, [role="option"], .dropdown__menu__item, div[class*="item"], div[data-test]'
+          )
         ).filter((el) => {
           if (el === triggerEl || triggerEl.contains(el)) return false;
           if (!isElementDisplayed(el)) return false;
           const r = el.getBoundingClientRect();
-          return r.height >= 18 && r.height <= 160 && r.width >= 30;
+          return r.height >= 18 && r.height <= 165 && r.width >= 24;
         });
 
         // Deduplicate & collect sample first-line labels for debug
@@ -126,7 +127,7 @@
         const items = [];
         for (const el of rawItems) {
           const line = (el.innerText || el.textContent || "").trim().split(/\r?\n/)[0].trim();
-          if (!line || line.length > 60) continue;
+          if (!line || line.length > 65) continue;
           if (seen.has(line)) continue;
           seen.add(line);
           items.push(el);
@@ -165,7 +166,6 @@
       } catch {
         // ignore
       }
-      // If there's an inner <a> or <button> inside an <li>, click it; otherwise click the element itself
       const clickableChild =
         matchedEl.tagName === "LI" ? matchedEl.querySelector("a, button") || matchedEl : matchedEl;
       clickableChild.click();
@@ -204,6 +204,16 @@
       const shouldSaveDraft = Boolean(message.autoPilot && message.autoPilotSaveDraft);
 
       try {
+        // Tell background worker right away to watch this tab for successful publish redirect!
+        chrome.runtime.sendMessage({
+          type: "RCC_WATCH_PUBLISH_SUCCESS",
+          jobId: job.id,
+          marketplace: "poshmark",
+          sku: payload.sku || job.item_sku || "",
+          listedPrice: Math.max(3, Math.round(Number(payload.suggestedPrice || 0))),
+          autoPilot: isAutoPilot,
+        });
+
         showRccHud({
           title: `${isAutoPilot ? "Auto-Pilot · " : ""}Poshmark (${payload.sku || "SKU"})`,
           message: `Uploading ${(payload.imageUrls || []).length} eBay photos & filling category, size, condition, and details...`,
@@ -256,7 +266,7 @@
 
         const debugLog = [];
 
-        // 3. Auto-select Poshmark Category (Department -> Category) inside `.listing-editor__category-container`
+        // 3. Auto-select Poshmark Category (Department -> Category)
         const catDropdown = findPoshmarkDropdownByContainerOrText(
           [
             '.listing-editor__category-container [data-test="dropdown"]',
@@ -274,7 +284,7 @@
             debugLog,
             "Category"
           );
-          await sleep(600);
+          await sleep(650);
         }
 
         // 3b. Optional Subcategory dropdown
@@ -300,25 +310,41 @@
 
         // 4. Auto-select Poshmark Size (unlocks right after Category is selected)
         let sizeMatched = false;
-        if (categoryMatched && sc.sizeLabel) {
+        if (categoryMatched) {
           const sizeDropdown = findPoshmarkDropdownByContainerOrText(
             [
               '.listing-editor__size-container [data-test="dropdown"]',
               '.listing-editor__size-container .dropdown',
+              '[data-test="size"] [data-test="dropdown"]',
             ],
             /^select size/i
           );
-          const sizeTarget =
-            sc.sizeLabel.toUpperCase() === "OS"
-              ? ["OS", "One Size", "One Size Fits All"]
-              : [sc.sizeLabel];
-          sizeMatched = await selectPoshmarkVueDropdown(
-            sizeDropdown,
-            [sizeTarget],
-            sleep,
-            debugLog,
-            "Size"
-          );
+          if (sizeDropdown) {
+            const existingSizeTxt = (
+              getPoshmarkSelectorTrigger(sizeDropdown)?.textContent || ""
+            ).trim();
+            if (existingSizeTxt && !/^select size/i.test(existingSizeTxt)) {
+              sizeMatched = true;
+              debugLog.push(`Size: already "${existingSizeTxt}"`);
+            } else {
+              const targetSize = sc.sizeLabel || "OS";
+              const sizeTarget =
+                targetSize.toUpperCase() === "OS"
+                  ? ["OS", "One Size", "One Size Fits All"]
+                  : [targetSize, "OS", "One Size"];
+              sizeMatched = await selectPoshmarkVueDropdown(
+                sizeDropdown,
+                [sizeTarget],
+                sleep,
+                debugLog,
+                "Size"
+              );
+            }
+          } else {
+            // Some Poshmark categories (e.g., certain Home items) auto-hide Size when not required
+            sizeMatched = true;
+            debugLog.push("Size: not required for this category");
+          }
           await sleep(450);
         }
 
@@ -352,7 +378,7 @@
           await sleep(350);
         }
 
-        // 6. Brand & Whole-Dollar Prices
+        // 6. Brand & Whole-Dollar Prices (closes Listing Price modal cleanly with Done!)
         const brandInput = await waitForSelector(
           ['input[placeholder*="Enter the Brand"]', 'input[name="brand"]'],
           3000
@@ -368,7 +394,7 @@
         if (listingPriceInput && payload.suggestedPrice) {
           listingPriceInput.scrollIntoView({ block: "center" });
           listingPriceInput.click();
-          await sleep(500);
+          await sleep(550);
 
           const modalOrig = await waitForSelector(
             ['.modal input[data-vv-name="originalPrice"]', 'input[data-vv-name="originalPrice"]', 'input[name="original_price"]'],
@@ -380,26 +406,21 @@
 
           const modalPrice =
             document.querySelector('.modal input[data-vv-name="listingPrice"]') ||
+            document.querySelector('[role="dialog"] input') ||
             listingPriceInput;
           setNativeValue(modalPrice, Math.max(3, Math.round(Number(payload.suggestedPrice))));
 
           await sleep(350);
-          // Only click Done if Poshmark's Pricing modal is currently open
-          const openModal = document.querySelector('.modal__body, .modal--in, [role="dialog"]');
-          if (openModal) {
-            const doneBtn = Array.from(openModal.querySelectorAll("button, a")).find((b) =>
-              /^done$/i.test((b.textContent || "").trim())
-            );
-            if (doneBtn) doneBtn.click();
-            await sleep(300);
-          }
+          // Click the black "Done" button in the Listing Price modal footer
+          await clickButtonByText([/^done$/i], 2000);
+          await sleep(450);
         }
 
         const catLabel = [sc.department, sc.category, sc.subcategory].filter(Boolean).join(" › ");
         const fieldSummary = [
           `${uploadedCount} photos`,
           categoryMatched ? `Category ✓ (${catLabel})` : `Category: pick "${catLabel || "category"}"`,
-          sizeMatched ? `Size ✓ (${sc.sizeLabel})` : sc.sizeLabel ? `Size: pick "${sc.sizeLabel}"` : null,
+          sizeMatched ? `Size ✓ (${sc.sizeLabel || "OS"})` : `Size: pick "${sc.sizeLabel || "OS"}"`,
           conditionMatched ? `Condition ✓` : `Condition: pick "${sc.conditionLabel || "Good"}"`,
         ]
           .filter(Boolean)
@@ -407,19 +428,49 @@
 
         const anyMissed = !categoryMatched || !sizeMatched || !conditionMatched;
         if (debugLog.length > 0) {
-          console.log("[RCC Poshmark v0.8.4]", debugLog.join(" | "));
+          console.log("[RCC Poshmark v0.9.0]", debugLog.join(" | "));
         }
 
-        // 7. Mac Mini Auto-Pilot Save Draft flow (never blind-publishes!)
-        if (shouldSaveDraft) {
+        // 7. Auto-Publish: If Category & Size are populated, click "Next" -> "List This Item"!
+        if (categoryMatched && sizeMatched) {
           showRccHud({
-            title: `Auto-Pilot · Saving Poshmark Draft (${payload.sku || "SKU"})`,
-            message: `${fieldSummary}. Waiting for photo upload, then saving Draft...`,
+            title: `Publishing to Poshmark (${payload.sku || "SKU"})`,
+            message: `${fieldSummary}. Waiting for photos to finish uploading, then clicking Next → List This Item...`,
             tone: "info",
           });
 
-          await sleep(Math.min(7000, Math.max(2500, uploadedCount * 450)));
+          // Give Poshmark CDN enough time to finish uploading multi-photo batch before clicking Next
+          await sleep(Math.min(6000, Math.max(1800, uploadedCount * 350)));
 
+          const clickedNext = await clickButtonByText([/^next$/i], 3500);
+          if (clickedNext) {
+            await sleep(1400);
+            // Final confirmation screen: click "List This Item" (or "List" / "Next")
+            const clickedList = await clickButtonByText(
+              [/^list this item$/i, /^list item$/i, /^list$/i, /^next$/i],
+              4500
+            );
+            if (clickedList) {
+              showRccHud({
+                title: `Listed on Poshmark! (${payload.sku || "SKU"})`,
+                message: `Submitted to Poshmark — automatically syncing live link back to Command Center...`,
+                tone: "success",
+              });
+              sendResponse({ ok: true, autoPublished: true });
+              return;
+            }
+          }
+        }
+
+        // 8. Fallback for Mac Mini Auto-Pilot if a required dropdown was ambiguous: Save Draft safely
+        if (shouldSaveDraft) {
+          showRccHud({
+            title: `Auto-Pilot · Saving Poshmark Draft (${payload.sku || "SKU"})`,
+            message: `${fieldSummary}. Saving as Draft for quick review...`,
+            tone: "info",
+          });
+
+          await sleep(2000);
           const saved = await clickButtonByText(
             [/^save draft$/i, /^save as draft$/i, /save.*draft/i],
             4000
@@ -448,12 +499,12 @@
           }
         }
 
-        // 8. Interactive Mode HUD (iMac / MacBook Air 1-click flow)
+        // 9. Interactive Mode fallback HUD (auto-links automatically as soon as user clicks Next -> List This Item!)
         showRccHud({
-          title: `Poshmark Ready (${payload.sku || "SKU"})`,
-          message: `Filled at $${Math.round(Number(payload.suggestedPrice || 0))} · ${fieldSummary}. Review & click Next → List This Item, then click below.`,
-          tone: "success",
-          actionLabel: "Mark Listed in Command Center",
+          title: `Poshmark Almost Ready (${payload.sku || "SKU"})`,
+          message: `Filled at $${Math.round(Number(payload.suggestedPrice || 0))} · ${fieldSummary}. Pick any missing field & click Next → List This Item — Command Center will auto-sync as soon as it posts!`,
+          tone: "confirm",
+          actionLabel: "Mark Listed Manually",
           onAction: async () => {
             await chrome.runtime.sendMessage({
               type: "RCC_JOB_STATUS_UPDATE",
@@ -473,7 +524,7 @@
           secondaryLabel: anyMissed ? "Copy Dropdown Debug Info (to fix any missed field)" : null,
           onSecondaryAction: anyMissed
             ? async () => {
-                const txt = `Poshmark v0.8.4 Debug (${catLabel}):\n${debugLog.join("\n")}`;
+                const txt = `Poshmark v0.9.0 Debug (${catLabel}):\n${debugLog.join("\n")}`;
                 try {
                   await navigator.clipboard.writeText(txt);
                   const btn = document.getElementById("rcc-hud-secondary");

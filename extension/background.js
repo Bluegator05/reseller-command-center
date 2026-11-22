@@ -566,6 +566,98 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
+const watchedPublishTabs = new Map();
+
+async function broadcastToCommandCenterTabs(payload) {
+  try {
+    const tabs = await chrome.tabs.query({
+      url: [
+        "https://reseller-command-center-black.vercel.app/*",
+        "https://*.vercel.app/*",
+        "http://localhost:3000/*",
+      ],
+    });
+    for (const t of tabs) {
+      if (t.id) {
+        chrome.tabs.sendMessage(t.id, payload).catch(() => {});
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  const watch = watchedPublishTabs.get(tabId);
+  if (!watch) return;
+  const url = changeInfo.url || tab?.url || "";
+  if (!url) return;
+
+  const isPoshmarkPublished =
+    watch.marketplace === "poshmark" &&
+    url.includes("poshmark.com") &&
+    !url.includes("/create-listing") &&
+    (url.includes("/listing/") || url.includes("/closet/"));
+
+  const isMercariPublished =
+    watch.marketplace === "mercari" &&
+    url.includes("mercari.com") &&
+    !url.includes("/sell") &&
+    (url.includes("/item/m") || url.includes("/mypage/"));
+
+  if (!isPoshmarkPublished && !isMercariPublished) return;
+
+  // Wait for page load completion on /closet/ so we can grab the newest listing URL if needed
+  if (url.includes("/closet/") && changeInfo.status !== "complete") return;
+
+  watchedPublishTabs.delete(tabId);
+
+  let finalUrl = url.split("?")[0];
+  if (watch.marketplace === "poshmark" && url.includes("/closet/")) {
+    try {
+      const injected = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          const firstLink = document.querySelector('a[href*="/listing/"]');
+          return firstLink ? firstLink.href.split("?")[0] : null;
+        },
+      });
+      if (injected?.[0]?.result) {
+        finalUrl = injected[0].result;
+      }
+    } catch {
+      // fall back to closet URL
+    }
+  }
+
+  try {
+    await updateJobStatus(watch.jobId, "completed", {
+      externalUrl: finalUrl,
+      listedPrice: watch.listedPrice,
+    });
+    await refreshJobsCache(false);
+    await broadcastToCommandCenterTabs({
+      type: "RCC_JOB_COMPLETED",
+      jobId: watch.jobId,
+      marketplace: watch.marketplace,
+      sku: watch.sku,
+      externalUrl: finalUrl,
+      listedPrice: watch.listedPrice,
+    });
+    if (watch.autoPilot) {
+      setTimeout(() => {
+        chrome.tabs.remove(tabId).catch(() => {});
+      }, 2000);
+    }
+  } catch (err) {
+    console.warn("[RCC] Auto-complete publish sync error:", err);
+  }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  watchedPublishTabs.delete(tabId);
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     try {
@@ -609,6 +701,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse(result);
           break;
         }
+        case "RCC_WATCH_PUBLISH_SUCCESS": {
+          if (sender?.tab?.id && message.jobId) {
+            watchedPublishTabs.set(sender.tab.id, {
+              jobId: message.jobId,
+              marketplace: message.marketplace,
+              sku: message.sku || "",
+              listedPrice: message.listedPrice,
+              autoPilot: Boolean(message.autoPilot),
+            });
+          }
+          sendResponse({ ok: true });
+          break;
+        }
         case "RCC_CLOSE_SENDER_TAB": {
           if (sender?.tab?.id) {
             await chrome.tabs.remove(sender.tab.id);
@@ -619,6 +724,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case "RCC_JOB_STATUS_UPDATE": {
           await updateJobStatus(message.jobId, message.status, message.extra || {});
           await refreshJobsCache(false);
+          if (message.status === "completed") {
+            await broadcastToCommandCenterTabs({
+              type: "RCC_JOB_COMPLETED",
+              jobId: message.jobId,
+              marketplace: message.extra?.marketplace || "",
+              externalUrl: message.extra?.externalUrl || "",
+              listedPrice: message.extra?.listedPrice,
+            });
+          }
           sendResponse({ ok: true });
           break;
         }
