@@ -8,6 +8,7 @@ import {
   Check,
   CheckCircle2,
   Copy,
+  Crop,
   ExternalLink,
   ImagePlus,
   Loader2,
@@ -27,6 +28,10 @@ import type { ListingStudioDraftResponse } from "@/app/api/ai/listing-studio/rou
 import type { StudioConditionChoice } from "@/lib/ebay";
 import { printThermalSkuLabels } from "@/lib/thermal-label";
 import type { InventoryItem, MarketplaceType } from "@/lib/types";
+import {
+  PhotoCropModal,
+  type NormalizedCropRect,
+} from "./PhotoCropModal";
 
 interface ListingStudioPanelProps {
   draftItems: InventoryItem[];
@@ -42,8 +47,9 @@ interface StudioPhoto {
   id: string;
   name: string;
   originalDataUrl: string; // EXIF-stripped resized <= 1600px JPEG
-  processedDataUrl: string; // after rotation + enhance + whiteBg
+  processedDataUrl: string; // after rotation + crop + enhance + whiteBg
   rotation: number; // 0 | 90 | 180 | 270
+  crop: NormalizedCropRect | null;
   enhanced: boolean;
   whiteBg: boolean;
   hostedUrl?: string | null;
@@ -163,15 +169,20 @@ async function normalizeUploadedPhoto(file: File): Promise<string> {
 }
 
 /**
- * Applies optional Rotation, Auto-Enhance (brightness/contrast/saturation boost),
+ * Applies optional Rotation, Crop, Auto-Enhance (brightness/contrast/saturation boost),
  * and White Studio Background (edge-flood corner-color removal onto a crisp #FFFFFF
  * 1:1 studio canvas) cleanly in the browser without modifying the original photo.
  */
 async function renderProcessedPhoto(
   originalDataUrl: string,
-  opts: { rotation: number; enhanced: boolean; whiteBg: boolean }
+  opts: {
+    rotation: number;
+    crop: NormalizedCropRect | null;
+    enhanced: boolean;
+    whiteBg: boolean;
+  }
 ): Promise<string> {
-  if (opts.rotation === 0 && !opts.enhanced && !opts.whiteBg) {
+  if (opts.rotation === 0 && !opts.crop && !opts.enhanced && !opts.whiteBg) {
     return originalDataUrl;
   }
 
@@ -184,8 +195,36 @@ async function renderProcessedPhoto(
 
   const rad = ((opts.rotation % 360) * Math.PI) / 180;
   const rotated = opts.rotation % 180 !== 0;
-  const srcW = rotated ? img.naturalHeight : img.naturalWidth;
-  const srcH = rotated ? img.naturalWidth : img.naturalHeight;
+  const rotW = rotated ? img.naturalHeight : img.naturalWidth;
+  const rotH = rotated ? img.naturalWidth : img.naturalHeight;
+
+  // Step 1: Draw rotated image onto intermediate canvas
+  const rotCanvas = document.createElement("canvas");
+  rotCanvas.width = rotW;
+  rotCanvas.height = rotH;
+  const rotCtx = rotCanvas.getContext("2d");
+  if (!rotCtx) return originalDataUrl;
+
+  rotCtx.fillStyle = "#FFFFFF";
+  rotCtx.fillRect(0, 0, rotW, rotH);
+  rotCtx.save();
+  rotCtx.translate(rotW / 2, rotH / 2);
+  rotCtx.rotate(rad);
+  if (opts.enhanced) {
+    rotCtx.filter = "brightness(1.08) contrast(1.09) saturate(1.07)";
+  }
+  rotCtx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
+  rotCtx.restore();
+
+  // Step 2: Apply normalized crop rectangle (if set)
+  const cropX = opts.crop ? Math.round(opts.crop.x * rotW) : 0;
+  const cropY = opts.crop ? Math.round(opts.crop.y * rotH) : 0;
+  const srcW = opts.crop
+    ? Math.max(16, Math.round(opts.crop.w * rotW))
+    : rotW;
+  const srcH = opts.crop
+    ? Math.max(16, Math.round(opts.crop.h * rotH))
+    : rotH;
 
   const canvas = document.createElement("canvas");
   canvas.width = srcW;
@@ -195,15 +234,7 @@ async function renderProcessedPhoto(
 
   ctx.fillStyle = "#FFFFFF";
   ctx.fillRect(0, 0, srcW, srcH);
-
-  ctx.save();
-  ctx.translate(srcW / 2, srcH / 2);
-  ctx.rotate(rad);
-  if (opts.enhanced) {
-    ctx.filter = "brightness(1.08) contrast(1.09) saturate(1.07)";
-  }
-  ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
-  ctx.restore();
+  ctx.drawImage(rotCanvas, cropX, cropY, srcW, srcH, 0, 0, srcW, srcH);
 
   if (opts.whiteBg) {
     const imgData = ctx.getImageData(0, 0, srcW, srcH);
@@ -461,6 +492,11 @@ export function ListingStudioPanel({
     queuedCrossLists: string[];
     facebookCopy: string;
   } | null>(null);
+  const [cropModal, setCropModal] = useState<{
+    photoId: string;
+    previewUrl: string;
+    initialCrop: NormalizedCropRect | null;
+  } | null>(null);
 
   useEffect(() => {
     try {
@@ -506,6 +542,7 @@ export function ListingStudioPanel({
           originalDataUrl: normalized,
           processedDataUrl: normalized,
           rotation: 0,
+          crop: null,
           enhanced: false,
           whiteBg: false,
           hostedUrl: null,
@@ -520,12 +557,23 @@ export function ListingStudioPanel({
 
   const updatePhotoTransform = async (
     photoId: string,
-    patch: Partial<Pick<StudioPhoto, "rotation" | "enhanced" | "whiteBg">>
+    patch: Partial<
+      Pick<StudioPhoto, "rotation" | "crop" | "enhanced" | "whiteBg">
+    >
   ) => {
     const target = photos.find((p) => p.id === photoId);
     if (!target) return;
+    const nextRotation =
+      patch.rotation !== undefined ? patch.rotation : target.rotation;
+    const nextCrop =
+      patch.crop !== undefined
+        ? patch.crop
+        : patch.rotation !== undefined && patch.rotation !== target.rotation
+          ? null
+          : target.crop;
     const nextOpts = {
-      rotation: patch.rotation !== undefined ? patch.rotation : target.rotation,
+      rotation: nextRotation,
+      crop: nextCrop,
       enhanced: patch.enhanced !== undefined ? patch.enhanced : target.enhanced,
       whiteBg: patch.whiteBg !== undefined ? patch.whiteBg : target.whiteBg,
     };
@@ -550,6 +598,23 @@ export function ListingStudioPanel({
     } finally {
       setProcessingPhotoId(null);
     }
+  };
+
+  const openCropForPhoto = async (photo: StudioPhoto) => {
+    const previewUrl =
+      photo.rotation === 0
+        ? photo.originalDataUrl
+        : await renderProcessedPhoto(photo.originalDataUrl, {
+            rotation: photo.rotation,
+            crop: null,
+            enhanced: false,
+            whiteBg: false,
+          });
+    setCropModal({
+      photoId: photo.id,
+      previewUrl,
+      initialCrop: photo.crop,
+    });
   };
 
   const movePhoto = (fromIdx: number, toIdx: number) => {
@@ -1178,10 +1243,24 @@ export function ListingStudioPanel({
                       <button
                         type="button"
                         disabled={busy}
+                        onClick={() => openCropForPhoto(p)}
+                        title={p.crop ? "Edit or reset crop" : "Crop photo"}
+                        className={`inline-flex items-center justify-center gap-0.5 px-1.5 py-1 rounded text-[10px] font-semibold border transition cursor-pointer ${
+                          p.crop
+                            ? "bg-[#ECFDF5] border-[#0F766E] text-[#0F766E]"
+                            : "bg-white border-[#DDE2DF] text-[#444B52] hover:border-[#0F766E]"
+                        }`}
+                      >
+                        <Crop className="w-2.5 h-2.5" />
+                        Crop
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy}
                         onClick={() =>
                           updatePhotoTransform(p.id, { enhanced: !p.enhanced })
                         }
-                        className={`flex-1 inline-flex items-center justify-center gap-0.5 px-1.5 py-1 rounded text-[10px] font-semibold border transition cursor-pointer ${
+                        className={`flex-1 inline-flex items-center justify-center gap-0.5 px-1 py-1 rounded text-[10px] font-semibold border transition cursor-pointer ${
                           p.enhanced
                             ? "bg-[#ECFDF5] border-[#0F766E] text-[#0F766E]"
                             : "bg-white border-[#DDE2DF] text-[#444B52] hover:border-[#0F766E]"
@@ -1196,14 +1275,14 @@ export function ListingStudioPanel({
                         onClick={() =>
                           updatePhotoTransform(p.id, { whiteBg: !p.whiteBg })
                         }
-                        className={`flex-1 inline-flex items-center justify-center gap-0.5 px-1.5 py-1 rounded text-[10px] font-semibold border transition cursor-pointer ${
+                        className={`flex-1 inline-flex items-center justify-center gap-0.5 px-1 py-1 rounded text-[10px] font-semibold border transition cursor-pointer ${
                           p.whiteBg
                             ? "bg-[#EFF6FF] border-[#1D4ED8] text-[#1D4ED8]"
                             : "bg-white border-[#DDE2DF] text-[#444B52] hover:border-[#1D4ED8]"
                         }`}
                       >
                         <Square className="w-2.5 h-2.5" />
-                        White BG
+                        White
                       </button>
                     </div>
                     {photos.length > 1 && (
@@ -2052,6 +2131,18 @@ export function ListingStudioPanel({
             </button>
           </div>
         </section>
+      )}
+      {cropModal && (
+        <PhotoCropModal
+          imageSrc={cropModal.previewUrl}
+          initialCrop={cropModal.initialCrop}
+          onCancel={() => setCropModal(null)}
+          onApply={async (nextCrop) => {
+            const targetId = cropModal.photoId;
+            setCropModal(null);
+            await updatePhotoTransform(targetId, { crop: nextCrop });
+          }}
+        />
       )}
     </div>
   );
