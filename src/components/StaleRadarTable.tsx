@@ -26,6 +26,7 @@ import {
   Zap,
 } from "lucide-react";
 import { MarketplaceIcon } from "./MarketplaceIcons";
+import { RelistSanityModal } from "./RelistSanityModal";
 import type {
   ChannelJob,
   EbayActionRequest,
@@ -279,6 +280,10 @@ export function StaleRadarTable({
   const [togglingExemptItemId, setTogglingExemptItemId] = useState<
     string | null
   >(null);
+  const [relistCheckRow, setRelistCheckRow] = useState<StaleRadarRow | null>(
+    null
+  );
+  const [isRelistingFromModal, setIsRelistingFromModal] = useState(false);
   const [mountNow] = useState(() => Date.now());
 
   const [notesMap, setNotesMap] = useStoredMap<Record<string, string>>(
@@ -1334,14 +1339,9 @@ export function StaleRadarTable({
                                 title={
                                   row.stale_radar_exempt
                                     ? "Protected evergreen listing — click Protected to unlock before ending & selling similar"
-                                    : "Ends stale eBay listing & publishes a fresh item ID (increments Relist Counter)"
+                                    : "Run quick AI Pre-Relist Sanity Check (price, title, shipping, views) before ending & selling similar"
                                 }
-                                onClick={() =>
-                                  onExecuteAction({
-                                    action: "end_and_sell_similar",
-                                    listingIds: [row.listing_id],
-                                  })
-                                }
+                                onClick={() => setRelistCheckRow(row)}
                                 className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium border border-[#DDE2DF] bg-white text-[#171A1D] hover:border-[#0F766E] hover:text-[#0F766E] disabled:opacity-40 transition cursor-pointer"
                               >
                                 <RefreshCcw className="w-3 h-3" />
@@ -1901,6 +1901,36 @@ export function StaleRadarTable({
             </div>
           </div>
         </div>
+      )}
+      {relistCheckRow && (
+        <RelistSanityModal
+          row={relistCheckRow}
+          isRelisting={isRelistingFromModal}
+          onClose={() => setRelistCheckRow(null)}
+          onConfirmRelist={async ({ newPrice, newTitle }) => {
+            const target = relistCheckRow;
+            setIsRelistingFromModal(true);
+            try {
+              await onExecuteAction({
+                action: "end_and_sell_similar",
+                listingIds: [target.listing_id],
+                newPrice,
+                newTitle,
+              });
+              setRelistCheckRow(null);
+            } finally {
+              setIsRelistingFromModal(false);
+            }
+          }}
+          onSwitchToDonate={
+            onDisposeItem
+              ? (target) => {
+                  setDisposeTargetRow(target);
+                  setDisposeNote("");
+                }
+              : undefined
+          }
+        />
       )}
     </div>
   );

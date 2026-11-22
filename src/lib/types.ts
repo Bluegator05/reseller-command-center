@@ -387,6 +387,8 @@ export interface EbayActionRequest {
   dropPct?: number;
   offerPct?: number;
   offerMessage?: string;
+  newPrice?: number;
+  newTitle?: string;
 }
 
 export interface EbayActionItemResult {

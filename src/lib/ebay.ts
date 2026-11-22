@@ -765,6 +765,7 @@ export async function endAndSellSimilarEbayOffer(params: {
   offerId: string;
   sku?: string;
   newPrice?: number;
+  newTitle?: string;
 }): Promise<{
   previousOfferId: string;
   previousListingId: string | null;
@@ -772,7 +773,8 @@ export async function endAndSellSimilarEbayOffer(params: {
   newListingId: string;
   newExternalUrl: string;
 }> {
-  const { offerId: rawId, sku, newPrice } = params;
+  const { offerId: rawId, sku, newPrice, newTitle } = params;
+  const cleanNewTitle = newTitle?.trim().slice(0, 80) || "";
   const { webBase } = getEbayBaseUrls();
   const invOfferId = await resolveInventoryOfferId(rawId, sku);
 
@@ -794,6 +796,29 @@ export async function endAndSellSimilarEbayOffer(params: {
       `/sell/inventory/v1/offer/${encodeURIComponent(invOfferId)}`,
       { method: "DELETE" }
     );
+
+    // If title changed and SKU exists on Inventory API, update product.title first
+    if (cleanNewTitle && sku) {
+      try {
+        const invItem = await ebayRequest<Record<string, unknown>>(
+          `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`
+        );
+        const prod =
+          (invItem.product as Record<string, unknown> | undefined) || {};
+        await ebayRequest(
+          `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`,
+          {
+            method: "PUT",
+            body: JSON.stringify({
+              ...invItem,
+              product: { ...prod, title: cleanNewTitle },
+            }),
+          }
+        );
+      } catch (err) {
+        console.warn("[ebay] Inventory item title update warning:", err);
+      }
+    }
 
     const clonePayload: Record<string, unknown> = { ...existingOffer };
     delete clonePayload.offerId;
@@ -843,6 +868,9 @@ export async function endAndSellSimilarEbayOffer(params: {
      <EndingReason>NotAvailable</EndingReason>`
   );
 
+  const titleOverrideXml = cleanNewTitle
+    ? `<Title>${escapeXml(cleanNewTitle)}</Title>`
+    : "";
   const priceOverrideXml =
     typeof newPrice === "number" && newPrice > 0
       ? `<StartPrice currencyID="USD">${roundCurrency(newPrice).toFixed(2)}</StartPrice>`
@@ -852,6 +880,7 @@ export async function endAndSellSimilarEbayOffer(params: {
     "RelistFixedPriceItem",
     `<Item>
       <ItemID>${rawId}</ItemID>
+      ${titleOverrideXml}
       ${priceOverrideXml}
     </Item>`
   );

@@ -11,7 +11,7 @@ import {
   sendEbayOfferToWatchers,
   updateEbayOfferPrice,
 } from "@/lib/ebay";
-import { computeClampedPriceDrop } from "@/lib/stale-engine";
+import { computeClampedPriceDrop, roundCurrency } from "@/lib/stale-engine";
 import { getSupabaseServerClient, isSupabaseConfigured } from "@/lib/supabase";
 import type {
   EbayActionItemResult,
@@ -238,10 +238,20 @@ export async function POST(request: Request) {
             throw new Error("Missing external eBay offer ID");
           }
 
+          const targetRelistPrice =
+            typeof body.newPrice === "number" && body.newPrice > 0
+              ? roundCurrency(body.newPrice)
+              : currentPrice;
+          const targetRelistTitle =
+            typeof body.newTitle === "string" && body.newTitle.trim().length >= 3
+              ? body.newTitle.trim().slice(0, 80)
+              : undefined;
+
           const relisted = await endAndSellSimilarEbayOffer({
             offerId: listing.external_listing_id,
             sku: inv.sku,
-            newPrice: currentPrice,
+            newPrice: targetRelistPrice,
+            newTitle: targetRelistTitle,
           });
 
           const existingSpecs = (inv.item_specifics || {}) as Record<
@@ -260,6 +270,10 @@ export async function POST(request: Request) {
           await supabase!
             .from("inventory_items")
             .update({
+              ...(targetRelistTitle ? { title: targetRelistTitle } : {}),
+              ...(targetRelistPrice !== currentPrice
+                ? { target_price: targetRelistPrice }
+                : {}),
               item_specifics: {
                 ...existingSpecs,
                 relist_count: String(nextRelistCount),
@@ -274,6 +288,7 @@ export async function POST(request: Request) {
             .update({
               external_listing_id: relisted.newListingId,
               external_url: relisted.newExternalUrl,
+              listed_price: targetRelistPrice,
               listed_at: nowIso,
               last_refreshed_at: nowIso,
               last_synced_at: nowIso,
@@ -292,25 +307,37 @@ export async function POST(request: Request) {
                 newListingId: relisted.newListingId,
                 newOfferId: relisted.newOfferId,
                 relistCount: nextRelistCount,
+                updatedPrice: targetRelistPrice,
+                updatedTitle: targetRelistTitle ?? null,
               },
               completed_at: new Date().toISOString(),
             })
             .eq("id", jobId);
 
+          const tweakNotes: string[] = [];
+          if (targetRelistPrice !== currentPrice) {
+            tweakNotes.push(
+              `$${currentPrice.toFixed(2)} → $${targetRelistPrice.toFixed(2)}`
+            );
+          }
+          if (targetRelistTitle && targetRelistTitle !== inv.title) {
+            tweakNotes.push("title upgraded");
+          }
+
           results.push({
             listingId: listing.id,
             itemId: inv.id,
             sku: inv.sku,
-            title: inv.title,
+            title: targetRelistTitle || inv.title,
             action,
             status: "completed",
             previousPrice: currentPrice,
-            newPrice: currentPrice,
+            newPrice: targetRelistPrice,
             floorPrice,
             wasClampedToFloor: false,
             newExternalListingId: relisted.newListingId,
             jobId,
-            message: `Relisted (#${nextRelistCount}) as fresh listing #${relisted.newListingId}`,
+            message: `Relisted (#${nextRelistCount}) as #${relisted.newListingId}${tweakNotes.length > 0 ? ` (${tweakNotes.join(", ")})` : ""}`,
           });
         } catch (err) {
           const msg =
