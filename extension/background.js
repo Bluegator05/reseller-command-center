@@ -710,6 +710,69 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     } catch {
       // fall back to closet URL
     }
+  } else if (watch.marketplace === "mercari" && url.includes("/mypage/")) {
+    try {
+      const injected = await chrome.scripting.executeScript({
+        target: { tabId },
+        args: [watch.title || ""],
+        func: async (targetTitle) => {
+          const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+          const stop = new Set([
+            "the", "and", "for", "with", "from", "new", "size", "of", "in", "on", "to", "by",
+          ]);
+          const tok = (s) =>
+            String(s || "")
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, " ")
+              .split(/\s+/)
+              .filter((w) => w.length >= 2 && !stop.has(w));
+          const targetTokens = new Set(tok(targetTitle));
+          const score = (text) => {
+            if (targetTokens.size === 0) return 0;
+            const cand = new Set(tok(text));
+            if (cand.size === 0) return 0;
+            let hit = 0;
+            for (const w of targetTokens) {
+              if (cand.has(w)) hit += 1;
+            }
+            const dice = (2 * hit) / (targetTokens.size + cand.size);
+            const contain = hit / Math.min(targetTokens.size, cand.size);
+            return dice * 0.65 + contain * 0.35;
+          };
+          for (let attempt = 0; attempt < 4; attempt++) {
+            const links = Array.from(
+              document.querySelectorAll('a[href*="/us/item/m"], a[href*="/item/m"]')
+            );
+            let bestUrl = null;
+            let bestScore = 0;
+            for (const link of links) {
+              const href = link.getAttribute("href") || "";
+              const full = href.startsWith("http")
+                ? href.split("?")[0]
+                : `https://www.mercari.com${href.split("?")[0]}`;
+              const cardText =
+                link.getAttribute("title") ||
+                link.querySelector("img")?.getAttribute("alt") ||
+                link.textContent ||
+                "";
+              const s = score(cardText);
+              if (s > bestScore) {
+                bestScore = s;
+                bestUrl = full;
+              }
+            }
+            if (bestScore >= 0.65 && bestUrl) return bestUrl;
+            await sleep(1400);
+          }
+          return null;
+        },
+      });
+      if (injected?.[0]?.result) {
+        finalUrl = injected[0].result;
+      }
+    } catch {
+      // fall back to mypage URL
+    }
   }
 
   try {

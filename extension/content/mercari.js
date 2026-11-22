@@ -1,8 +1,9 @@
 /**
- * Mercari DOM Auto-Filler Content Script (v0.9.5)
+ * Mercari DOM Auto-Filler Content Script (v0.9.6)
  * Targets https://www.mercari.com/sell/
  * Fills up to 12 photos, Title (<=80), Description (<=1000), Brand,
  * multi-line Condition card (New / Like new / Good / Fair / Poor), Price (whole dollars),
+ * disables Mercari Smart pricing (prevents the "$9 floor price" validation error),
  * and auto-clicks the purple "List" button + syncs live URL back to Command Center!
  */
 (function initMercariAgent() {
@@ -28,6 +29,138 @@
       return "fair";
     }
     return "good";
+  }
+
+  /**
+   * Turns OFF Mercari's "Smart pricing" ("Adjusts price automatically" -> ON button)
+   * so Mercari never throws "The floor price needs to be more than $9." on items <= $12
+   * and doesn't silently slash prices out of sync with Command Center.
+   */
+  async function disableMercariSmartPricing(sleep, debugLog) {
+    // 1. Direct testid / input selectors if present
+    const directSelectors = [
+      'button[data-testid="SmartPricingToggle"]',
+      'button[data-testid="SmartPricingButton"]',
+      '[data-testid="SmartPricing"] button',
+      '[data-testid*="SmartPricing"] button',
+      'input[name="smartPricing"]',
+      'input[name="autoDrop"]',
+    ];
+    for (const sel of directSelectors) {
+      const el = document.querySelector(sel);
+      if (!el) continue;
+      const txt = (el.textContent || "").trim();
+      const isOn =
+        (el.tagName === "INPUT" && el.checked) ||
+        el.getAttribute("aria-pressed") === "true" ||
+        el.getAttribute("aria-checked") === "true" ||
+        /^on$/i.test(txt);
+      if (isOn) {
+        el.scrollIntoView({ block: "center" });
+        await sleep(150);
+        el.click();
+        await sleep(350);
+        debugLog.push(`SmartPricing: turned OFF via ${sel}`);
+        return true;
+      }
+      if (/^off$/i.test(txt) || (el.tagName === "INPUT" && !el.checked)) {
+        debugLog.push("SmartPricing: already OFF");
+        return true;
+      }
+    }
+
+    // 2. Locate "Adjusts price automatically" row and click its "ON" button
+    const anchor = Array.from(
+      document.querySelectorAll("div, section, p, span, h3, h4, label")
+    ).find((el) => {
+      if (el.closest("#rcc-companion-hud")) return false;
+      const txt = (el.textContent || "").trim();
+      return /^adjusts price automatically$/i.test(txt);
+    });
+
+    if (anchor) {
+      let container = anchor.parentElement;
+      for (let depth = 0; depth < 6 && container; depth++) {
+        const toggleBtn = Array.from(
+          container.querySelectorAll(
+            'button, [role="switch"], [role="button"], input[type="checkbox"]'
+          )
+        ).find((b) => {
+          const r = b.getBoundingClientRect();
+          if (r.width === 0 || r.height === 0) return false;
+          const t = (b.textContent || "").trim();
+          return (
+            /^on$/i.test(t) ||
+            (b.tagName === "INPUT" && b.checked) ||
+            b.getAttribute("aria-checked") === "true" ||
+            b.getAttribute("aria-pressed") === "true"
+          );
+        });
+        if (toggleBtn) {
+          toggleBtn.scrollIntoView({ block: "center" });
+          await sleep(150);
+          toggleBtn.click();
+          await sleep(350);
+          debugLog.push(`SmartPricing: clicked "${(toggleBtn.textContent || "ON").trim()}" -> OFF`);
+          return true;
+        }
+        const offBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+          /^off$/i.test((b.textContent || "").trim())
+        );
+        if (offBtn) {
+          debugLog.push("SmartPricing: already OFF");
+          return true;
+        }
+        container = container.parentElement;
+      }
+    }
+
+    // 3. Fallback: any visible button with exact text "ON" inside a Smart pricing section
+    const onBtns = Array.from(document.querySelectorAll("button")).filter((b) => {
+      if (b.closest("#rcc-companion-hud")) return false;
+      const r = b.getBoundingClientRect();
+      return r.width > 20 && r.height > 20 && /^on$/i.test((b.textContent || "").trim());
+    });
+    for (const btn of onBtns) {
+      let p = btn.parentElement;
+      for (let d = 0; d < 6 && p; d++) {
+        if (/smart pricing|adjusts price automatically/i.test(p.textContent || "")) {
+          btn.scrollIntoView({ block: "center" });
+          await sleep(150);
+          btn.click();
+          await sleep(350);
+          debugLog.push("SmartPricing: clicked ON via section scan -> OFF");
+          return true;
+        }
+        p = p.parentElement;
+      }
+    }
+
+    debugLog.push("SmartPricing: toggle not found");
+    return false;
+  }
+
+  /**
+   * Detects visible red inline validation messages on Mercari /sell/
+   */
+  function detectMercariValidationError() {
+    const knownErrorRe =
+      /floor price needs to be|please enter|is required|must be at least|select a condition|add at least one photo|select a category|enter a valid/i;
+    const nodes = Array.from(document.querySelectorAll("p, span, div"));
+    for (const el of nodes) {
+      if (el.closest("#rcc-companion-hud") || el.children.length > 1) continue;
+      const txt = (el.textContent || "").trim();
+      if (!txt || txt.length > 140) continue;
+      if (!knownErrorRe.test(txt)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) continue;
+      const cs = window.getComputedStyle(el);
+      if (cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0") {
+        continue;
+      }
+      return txt;
+    }
+    return null;
   }
 
   /**
@@ -251,7 +384,7 @@
           debugLog
         );
 
-        // 6. Whole-dollar Price ($5+)
+        // 6. Whole-dollar Price ($5+) + Disable Mercari Smart Pricing
         const priceInput = await waitForSelector(
           [
             'input[data-testid="Price"]',
@@ -263,6 +396,9 @@
         if (priceInput && payload.suggestedPrice) {
           priceInput.scrollIntoView({ block: "center" });
           setNativeValue(priceInput, Math.max(5, Math.round(Number(payload.suggestedPrice))));
+          // Wait for Mercari's Smart pricing box to react to the entered price, then turn it OFF
+          await sleep(500);
+          await disableMercariSmartPricing(sleep, debugLog);
         }
 
         const fieldSummary = [
@@ -272,10 +408,11 @@
         ].join(" · ");
 
         if (debugLog.length > 0) {
-          console.log("[RCC Mercari v0.9.5]", debugLog.join(" | "));
+          console.log("[RCC Mercari v0.9.6]", debugLog.join(" | "));
         }
 
         // 7. Auto-Publish: If Condition was selected, wait for photos to settle & click the purple "List" button!
+        let validationError = null;
         if (conditionMatched) {
           showRccHud({
             title: `Publishing to Mercari (${payload.sku || "SKU"})`,
@@ -285,7 +422,10 @@
 
           await sleep(Math.min(6000, Math.max(1800, uploadedCount * 350)));
 
-          const listBtn =
+          // Double-check Smart pricing is OFF right before submitting
+          await disableMercariSmartPricing(sleep, debugLog);
+
+          const findListBtn = () =>
             document.querySelector('button[data-testid="ListButton"]') ||
             Array.from(document.querySelectorAll('button, [role="button"]')).find((b) => {
               if (b.disabled || b.closest("#rcc-companion-hud")) return false;
@@ -293,22 +433,46 @@
               return r.width > 80 && r.height > 28 && /^list$/i.test((b.textContent || "").trim());
             });
 
+          const listBtn = findListBtn();
           if (listBtn) {
             listBtn.scrollIntoView({ block: "center" });
             await sleep(250);
             listBtn.click();
 
-            // Handle any optional confirmation modal ("List anyway" / "Confirm" / "Continue")
+            // Handle any optional confirmation modal ("List anyway" / "Confirm" / "List item")
             await sleep(1200);
             await clickButtonByText([/^list anyway$/i, /^confirm$/i, /^list item$/i], 2000);
 
-            showRccHud({
-              title: `Listed on Mercari! (${payload.sku || "SKU"})`,
-              message: `Submitted to Mercari — automatically syncing live link back to Command Center...`,
-              tone: "success",
-            });
-            sendResponse({ ok: true, autoPublished: true });
-            return;
+            // Verify Mercari didn't block submission with an inline validation error
+            await sleep(900);
+            if (window.location.pathname.includes("/sell")) {
+              validationError = detectMercariValidationError();
+              if (validationError && /floor price/i.test(validationError)) {
+                debugLog.push(`Retry after error: ${validationError}`);
+                await disableMercariSmartPricing(sleep, debugLog);
+                await sleep(350);
+                const retryBtn = findListBtn();
+                if (retryBtn) {
+                  retryBtn.click();
+                  await sleep(1200);
+                  await clickButtonByText([/^list anyway$/i, /^confirm$/i, /^list item$/i], 1500);
+                  await sleep(900);
+                  validationError = window.location.pathname.includes("/sell")
+                    ? detectMercariValidationError()
+                    : null;
+                }
+              }
+            }
+
+            if (!validationError) {
+              showRccHud({
+                title: `Listed on Mercari! (${payload.sku || "SKU"})`,
+                message: `Submitted to Mercari — automatically syncing live link back to Command Center...`,
+                tone: "success",
+              });
+              sendResponse({ ok: true, autoPublished: true });
+              return;
+            }
           }
         }
 
@@ -351,8 +515,12 @@
 
         // 9. Interactive fallback HUD (auto-links as soon as user clicks List!)
         showRccHud({
-          title: `Mercari Almost Ready (${payload.sku || "SKU"})`,
-          message: `Auto-filled · ${fieldSummary}. Pick any missing field & click List — Command Center will auto-sync once posted!`,
+          title: validationError
+            ? `Mercari Needs Quick Fix (${payload.sku || "SKU"})`
+            : `Mercari Almost Ready (${payload.sku || "SKU"})`,
+          message: validationError
+            ? `Mercari flagged: "${validationError}". Fix that field & click List — Command Center will auto-sync once posted!`
+            : `Auto-filled · ${fieldSummary}. Pick any missing field & click List — Command Center will auto-sync once posted!`,
           tone: "confirm",
           actionLabel: "Mark Listed Manually",
           onAction: async () => {
@@ -371,19 +539,23 @@
               tone: "success",
             });
           },
-          secondaryLabel: !conditionMatched ? "Copy Mercari Debug Info" : null,
-          onSecondaryAction: !conditionMatched
-            ? async () => {
-                const txt = `Mercari v0.9.5 Debug (${targetCond}):\n${debugLog.join("\n")}`;
-                try {
-                  await navigator.clipboard.writeText(txt);
-                  const btn = document.getElementById("rcc-hud-secondary");
-                  if (btn) btn.textContent = "Copied! Paste into chat";
-                } catch {
-                  alert(txt);
+          secondaryLabel:
+            !conditionMatched || validationError ? "Copy Mercari Debug Info" : null,
+          onSecondaryAction:
+            !conditionMatched || validationError
+              ? async () => {
+                  const txt = `Mercari v0.9.6 Debug (${targetCond}):\n${debugLog.join("\n")}${
+                    validationError ? `\nValidation: ${validationError}` : ""
+                  }`;
+                  try {
+                    await navigator.clipboard.writeText(txt);
+                    const btn = document.getElementById("rcc-hud-secondary");
+                    if (btn) btn.textContent = "Copied! Paste into chat";
+                  } catch {
+                    alert(txt);
+                  }
                 }
-              }
-            : null,
+              : null,
         });
 
         sendResponse({ ok: true });
