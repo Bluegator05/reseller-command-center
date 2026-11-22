@@ -418,6 +418,7 @@ export async function PATCH(request: Request) {
     jobId?: string;
     status?: JobStatusType;
     externalUrl?: string;
+    externalListingId?: string;
     listedPrice?: number;
     errorMessage?: string;
   };
@@ -459,6 +460,75 @@ export async function PATCH(request: Request) {
     const job = existingJob as ChannelJob;
     let listingId = job.listing_id;
 
+    // 1. Atomic claim guard when a worker starts `processing` so two devices/alarms can NEVER double-post
+    if (status === "processing") {
+      if (job.action === "create") {
+        const { data: activeExisting } = await supabase
+          .from("marketplace_listings")
+          .select("id")
+          .eq("item_id", job.item_id)
+          .eq("marketplace", job.marketplace)
+          .eq("status", "active")
+          .maybeSingle();
+
+        if (activeExisting) {
+          await supabase
+            .from("channel_jobs")
+            .update({
+              status: "failed",
+              completed_at: nowIso,
+              error_message: `Already listed on ${job.marketplace.toUpperCase()} — prevented duplicate post.`,
+            })
+            .eq("id", jobId)
+            .in("status", ["pending", "needs_user_confirm"]);
+
+          return NextResponse.json(
+            {
+              error: `Already listed on ${job.marketplace.toUpperCase()} — prevented duplicate post.`,
+              alreadyClaimed: true,
+              alreadyListed: true,
+            },
+            { status: 409, headers: CORS_HEADERS }
+          );
+        }
+      }
+
+      const { data: claimed, error: claimErr } = await supabase
+        .from("channel_jobs")
+        .update({
+          status: "processing",
+          attempts: (job.attempts || 0) + 1,
+          started_at: nowIso,
+          error_message: null,
+        })
+        .eq("id", jobId)
+        .in("status", ["pending", "needs_user_confirm"])
+        .select("*")
+        .maybeSingle();
+
+      if (claimErr) {
+        return NextResponse.json(
+          { error: claimErr.message },
+          { status: 500, headers: CORS_HEADERS }
+        );
+      }
+
+      if (!claimed) {
+        return NextResponse.json(
+          {
+            error: "Job already claimed or completed by another worker.",
+            alreadyClaimed: true,
+          },
+          { status: 409, headers: CORS_HEADERS }
+        );
+      }
+
+      return NextResponse.json(
+        { mode: "live", job: claimed },
+        { headers: CORS_HEADERS }
+      );
+    }
+
     if (status === "completed" && job.action === "create") {
       const price = roundCurrency(
         Number(listedPrice ?? job.payload?.suggestedPrice ?? 0)
@@ -471,14 +541,62 @@ export async function PATCH(request: Request) {
             ? `https://www.mercari.com/us/item/${fallbackExtId}/`
             : `https://www.facebook.com/marketplace/item/${fallbackExtId}/`;
 
+      const cleanUrl = (externalUrl || "").trim();
+      let resolvedExtId =
+        (typeof body.externalListingId === "string" &&
+          body.externalListingId.trim()) ||
+        "";
+      if (!resolvedExtId && cleanUrl) {
+        if (job.marketplace === "poshmark") {
+          const m = cleanUrl.match(/([0-9a-f]{24})(?:[/?#]|$)/i);
+          if (m) resolvedExtId = m[1];
+        } else if (job.marketplace === "mercari") {
+          const m = cleanUrl.match(/(?:^|[^a-z0-9])(m\d{9,13})(?:$|[^a-z0-9])/i);
+          if (m) resolvedExtId = m[1];
+        } else if (job.marketplace === "facebook") {
+          const m = cleanUrl.match(/\/item\/(\d{6,})/);
+          if (m) resolvedExtId = m[1];
+        }
+      }
+
+      let safeUrl = cleanUrl || fallbackUrl;
+      let safeExtId = resolvedExtId || fallbackExtId;
+
+      // Cross-item URL/ID collision guard: never link this item to a Poshmark/Mercari listing owned by a different item
+      if (resolvedExtId || cleanUrl) {
+        const filters: string[] = [];
+        if (resolvedExtId) filters.push(`external_listing_id.eq.${resolvedExtId}`);
+        if (cleanUrl && /\/(?:listing|item)\//i.test(cleanUrl)) {
+          filters.push(`external_url.eq.${cleanUrl}`);
+        }
+        if (filters.length > 0) {
+          const { data: collision } = await supabase
+            .from("marketplace_listings")
+            .select("id, item_id")
+            .eq("marketplace", job.marketplace)
+            .neq("item_id", job.item_id)
+            .or(filters.join(","))
+            .limit(1)
+            .maybeSingle();
+
+          if (collision) {
+            console.warn(
+              `[extension/jobs PATCH] Blocked colliding ${job.marketplace} URL (${safeUrl}) already linked to item ${collision.item_id}`
+            );
+            safeUrl = fallbackUrl;
+            safeExtId = fallbackExtId;
+          }
+        }
+      }
+
       const { data: listingRow } = await supabase
         .from("marketplace_listings")
         .upsert(
           {
             item_id: job.item_id,
             marketplace: job.marketplace,
-            external_listing_id: fallbackExtId,
-            external_url: externalUrl || fallbackUrl,
+            external_listing_id: safeExtId,
+            external_url: safeUrl,
             listed_price: price,
             shipping_price: 0,
             status: "active",
@@ -507,10 +625,6 @@ export async function PATCH(request: Request) {
       .update({
         status,
         listing_id: listingId,
-        attempts:
-          status === "processing" ? (job.attempts || 0) + 1 : job.attempts,
-        started_at:
-          status === "processing" ? nowIso : job.started_at,
         completed_at:
           status === "completed" || status === "failed" ? nowIso : null,
         error_message: errorMessage ?? null,

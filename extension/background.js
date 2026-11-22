@@ -152,6 +152,10 @@ async function updateJobStatus(jobId, status, extra = {}) {
       "Owner passcode required — open Connection Settings below and enter your Command Center passcode."
     );
   }
+  if (res.status === 409) {
+    const conflict = await res.json().catch(() => ({}));
+    return { alreadyClaimed: true, ...conflict };
+  }
   if (!res.ok) throw new Error(`API bridge update failed (${res.status})`);
   return res.json();
 }
@@ -178,7 +182,8 @@ async function updateBadgeCount(jobs, config) {
 }
 
 async function runAutoPilotCycle(jobs, config) {
-  if (!config?.autoPilot || autoPilotBusy) return;
+  // Never start a second Auto-Pilot job while another tab is still publishing / waiting for URL capture
+  if (!config?.autoPilot || autoPilotBusy || watchedPublishTabs.size > 0) return;
   const now = Date.now();
 
   // Priority 1 (URGENT — 0s delay): Auto-delist jobs run IMMEDIATELY to stop double-sells!
@@ -219,7 +224,7 @@ async function runAutoPilotCycle(jobs, config) {
     // Cooldown before picking up the next queued item
     setTimeout(() => {
       autoPilotBusy = false;
-    }, 6000);
+    }, 10000);
   }
 }
 
@@ -288,7 +293,15 @@ async function dispatchJobToTab(job, options = {}) {
   }
 
   if (job?.id) dispatchedJobIds.add(job.id);
-  await updateJobStatus(job.id, "processing");
+  const claimResult = await updateJobStatus(job.id, "processing");
+  if (claimResult?.alreadyClaimed) {
+    console.log(
+      `[RCC] Skipping job ${job.id} — already claimed or listed:`,
+      claimResult.error || ""
+    );
+    await refreshJobsCache(false);
+    return { ok: true, alreadyClaimed: true };
+  }
 
   const tab = await chrome.tabs.create({ url: targetUrl, active: true });
 
@@ -1315,7 +1328,12 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   let finalUrl = url.split("?")[0];
   let finalExternalId = null;
 
-  if (watch.marketplace === "mercari") {
+  if (watch.marketplace === "poshmark") {
+    const directPm = finalUrl.match(/([0-9a-f]{24})(?:[/?#]|$)/i);
+    if (directPm) {
+      finalExternalId = directPm[1];
+    }
+  } else if (watch.marketplace === "mercari") {
     const directId = finalUrl.match(/(?:^|[^a-z0-9])(m\d{9,13})(?:$|[^a-z0-9])/i);
     if (directId) {
       finalExternalId = directId[1];
@@ -1327,8 +1345,8 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     try {
       const injected = await chrome.scripting.executeScript({
         target: { tabId },
-        args: [watch.title || ""],
-        func: async (targetTitle) => {
+        args: [watch.title || "", watch.watchStartedAtMs || Date.now()],
+        func: async (targetTitle, watchStartedAtMs) => {
           const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
           const stop = new Set([
             "the", "and", "for", "with", "from", "new", "size", "of", "in", "on", "to", "by",
@@ -1341,6 +1359,18 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
               .filter((w) => w.length >= 2 && !stop.has(w));
           const targetTokens = new Set(tok(targetTitle));
 
+          // Every Poshmark listing URL ends with a 24-hex MongoDB ObjectId whose first 8 hex
+          // digits are its exact Unix creation timestamp in seconds!
+          const extractIdAndCreatedMs = (urlStr) => {
+            const m = String(urlStr || "").match(/([0-9a-f]{24})(?:[/?#]|$)/i);
+            if (!m) return { id: null, createdMs: null };
+            const sec = parseInt(m[1].slice(0, 8), 16);
+            return {
+              id: m[1],
+              createdMs: Number.isFinite(sec) ? sec * 1000 : null,
+            };
+          };
+
           const scoreCandidate = (textOrSlug) => {
             if (targetTokens.size === 0) return 0;
             const candTokens = new Set(tok(textOrSlug));
@@ -1351,18 +1381,30 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
             }
             const dice = (2 * hit) / (targetTokens.size + candTokens.size);
             const contain = hit / Math.min(targetTokens.size, candTokens.size);
-            return dice * 0.65 + contain * 0.35;
+            return dice * 0.72 + contain * 0.28;
           };
+
+          // Reject any listing created > 3 minutes before this publish job started!
+          // This makes it mathematically impossible to match an older sibling listing
+          // (like an earlier Ertl figurine or duplicate brand item).
+          const minFreshCreatedMs = Number(watchStartedAtMs || Date.now()) - 180_000;
 
           const searchDoc = (doc) => {
             const links = Array.from(doc.querySelectorAll('a[href*="/listing/"]'));
-            let bestUrl = null;
+            let best = null;
             let bestScore = 0;
+            let bestCreatedMs = 0;
+
             for (const link of links) {
               const href = link.getAttribute("href") || "";
               const full = href.startsWith("http")
                 ? href.split("?")[0]
                 : `https://poshmark.com${href.split("?")[0]}`;
+              const { id, createdMs } = extractIdAndCreatedMs(full);
+              if (!id || !createdMs || createdMs < minFreshCreatedMs) {
+                continue;
+              }
+
               const card =
                 link.closest('[data-et-name="listing"], .card, .tile, article, li') ||
                 link.parentElement;
@@ -1372,16 +1414,21 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
                 link.querySelector("img")?.getAttribute("alt") ||
                 href.replace(/\/listing\//i, "").replace(/-[0-9a-f]{24}$/i, "");
               const score = Math.max(scoreCandidate(titleText), scoreCandidate(href));
-              if (score > bestScore) {
+
+              if (
+                score > bestScore ||
+                (Math.abs(score - bestScore) < 0.02 && createdMs > bestCreatedMs)
+              ) {
                 bestScore = score;
-                bestUrl = full;
+                bestCreatedMs = createdMs;
+                best = { url: full, id };
               }
             }
-            return bestScore >= 0.65 ? bestUrl : null;
+            return bestScore >= 0.55 ? best : null;
           };
 
-          // Retry up to 4 times (Poshmark closet index can lag 1-3s right after publishing)
-          for (let attempt = 0; attempt < 4; attempt++) {
+          // Retry up to 8 times (~12s) because Poshmark's closet feed can lag several seconds after publishing
+          for (let attempt = 0; attempt < 8; attempt++) {
             const fromDom = searchDoc(document);
             if (fromDom) return fromDom;
 
@@ -1406,8 +1453,9 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
           return null;
         },
       });
-      if (injected?.[0]?.result) {
-        finalUrl = injected[0].result;
+      if (injected?.[0]?.result?.url) {
+        finalUrl = injected[0].result.url;
+        finalExternalId = injected[0].result.id || finalExternalId;
       }
     } catch {
       // fall back to closet URL
@@ -1609,6 +1657,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               title: message.title || "",
               listedPrice: message.listedPrice,
               autoPilot: Boolean(message.autoPilot),
+              watchStartedAtMs: Date.now(),
             });
           }
           sendResponse({ ok: true });
