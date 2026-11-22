@@ -6,6 +6,11 @@ import {
 } from "@/lib/demo-store";
 import { fetchEbayItemDetails } from "@/lib/ebay";
 import { mapItemForMarketplace } from "@/lib/gemini-mapper";
+import {
+  evaluateMarketplaceCompliance,
+  MARKETPLACE_LIMITS,
+  sanitizeMarketplaceCopy,
+} from "@/lib/marketplace-compliance";
 import { roundCurrency } from "@/lib/stale-engine";
 import { getSupabaseServerClient, isSupabaseConfigured } from "@/lib/supabase";
 import type {
@@ -236,24 +241,66 @@ export async function POST(request: Request) {
     });
 
     const override = targetIds.length === 1 ? body.draft : undefined;
-    const suggestedPrice = roundCurrency(
-      Math.max(
-        Number(item.floor_price),
-        override?.pricing?.suggestedPrice ?? baseDraft.pricing.suggestedPrice
-      )
+    const limits = MARKETPLACE_LIMITS[marketplace];
+    const rawPrice = Math.max(
+      Number(item.floor_price),
+      override?.pricing?.suggestedPrice ?? baseDraft.pricing.suggestedPrice
     );
+    const suggestedPrice = limits.wholeDollarOnly
+      ? Math.max(limits.minPrice, Math.ceil(rawPrice))
+      : roundCurrency(rawPrice);
+
+    const structuredCategory =
+      override?.structuredCategory ?? baseDraft.structuredCategory;
+
+    const sanitized = sanitizeMarketplaceCopy({
+      title: override?.mappedTitle?.trim() || baseDraft.mappedTitle,
+      description:
+        override?.descriptionPlain?.trim() || baseDraft.descriptionPlain,
+      targetMarketplace: marketplace,
+    });
+
+    if (action === "create") {
+      const compliance = evaluateMarketplaceCompliance({
+        item,
+        targetMarketplace: marketplace,
+        suggestedPrice,
+        whenMade: override?.whenMade ?? baseDraft.whenMade,
+        isSupply: override?.isSupply ?? baseDraft.isSupply,
+        aiPolicyIssues: baseDraft.compliance?.issues?.filter((i) =>
+          i.code.startsWith("AI_POLICY_")
+        ),
+      });
+
+      if (!compliance.allowed) {
+        const blockReasons = compliance.issues
+          .filter((i) => i.severity === "block")
+          .map((i) => `${i.rule}: ${i.detail}`)
+          .join(" | ");
+        if (targetIds.length === 1) {
+          return NextResponse.json(
+            {
+              error: `Blocked by ${marketplace.toUpperCase()} policy — ${blockReasons}`,
+              compliance,
+            },
+            { status: 422, headers: CORS_HEADERS }
+          );
+        }
+        continue;
+      }
+    }
 
     const jobPayload = {
       sku: item.sku,
-      mappedTitle: override?.mappedTitle?.trim() || baseDraft.mappedTitle,
-      descriptionPlain:
-        override?.descriptionPlain?.trim() || baseDraft.descriptionPlain,
+      mappedTitle: sanitized.title,
+      descriptionPlain: sanitized.description,
       brand: item.brand,
-      condition: item.condition,
+      condition: structuredCategory?.conditionLabel || item.condition,
       categoryPath: override?.categoryPath || baseDraft.categoryPath,
-      targetPrice: Number(item.target_price),
+      structuredCategory,
+      targetPrice: Math.ceil(Number(item.target_price)),
       suggestedPrice,
-      imageUrls: item.image_urls || [],
+      imageUrls: (item.image_urls || []).slice(0, limits.maxPhotos),
       requiresUserConfirm: marketplace === "facebook",
     };
 

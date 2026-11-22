@@ -1,6 +1,8 @@
 /**
- * Poshmark DOM Auto-Filler Content Script (v0.7.0)
+ * Poshmark DOM Auto-Filler Content Script (v0.8.0)
  * Targets https://poshmark.com/create-listing
+ * Fills up to 16 photos, Title (<=80), Description (<=1500), Category/Subcategory,
+ * Size, NWT Condition, Brand, Original Price, and Listing Price (whole dollars).
  * Supports both Interactive 1-Click Mode (iMac/MacBook Air) and Mac Mini Auto-Pilot Save Draft Mode.
  */
 (function initPoshmarkAgent() {
@@ -16,17 +18,19 @@
         injectImageBlobs,
         sleep,
         clickButtonByText,
+        selectDropdownSequence,
         showRccHud,
       } = window.__rccHelpers;
       const job = message.job;
       const payload = job.payload || {};
+      const sc = payload.structuredCategory || {};
       const isAutoPilot = Boolean(message.autoPilot);
       const shouldSaveDraft = Boolean(message.autoPilot && message.autoPilotSaveDraft);
 
       try {
         showRccHud({
           title: `${isAutoPilot ? "Auto-Pilot · " : ""}Poshmark (${payload.sku || "SKU"})`,
-          message: `Uploading ${(payload.imageUrls || []).length} eBay photos & filling listing details...`,
+          message: `Uploading ${(payload.imageUrls || []).length} eBay photos & filling category, size, condition, and details...`,
           tone: "info",
         });
 
@@ -52,7 +56,7 @@
           await sleep(800);
         }
 
-        // 2. Fill Title, Description, Brand, Original Price, Listing Price
+        // 2. Fill Title (<=80 chars) & Description (<=1500 chars)
         const titleInput = await waitForSelector([
           'input[data-vv-name="title"]',
           'input[placeholder*="What are you selling"]',
@@ -71,9 +75,46 @@
           4000
         );
         if (descInput && payload.descriptionPlain) {
-          setNativeValue(descInput, payload.descriptionPlain);
+          setNativeValue(descInput, String(payload.descriptionPlain).slice(0, 1500));
         }
 
+        // 3. Auto-select Poshmark Category (Department -> Category -> Subcategory)
+        const catSequence = [sc.department, sc.category, sc.subcategory].filter(Boolean);
+        let categoryMatched = false;
+        if (catSequence.length > 0) {
+          categoryMatched = await selectDropdownSequence(
+            [
+              '[data-et-name="select_category"]',
+              '[data-vv-name="category"]',
+              'div[class*="category"] .dropdown__selector',
+              'button[aria-label*="Category"]',
+            ],
+            catSequence
+          );
+          await sleep(400);
+        }
+
+        // 4. Auto-select Poshmark Size (defaults to OS for Home/Bags/Crafts/Electronics)
+        let sizeMatched = false;
+        if (sc.sizeLabel) {
+          sizeMatched = await selectDropdownSequence(
+            [
+              '[data-et-name="select_size"]',
+              '[data-vv-name="size"]',
+              'div[class*="size"] .dropdown__selector',
+              'button[aria-label*="Size"]',
+            ],
+            [sc.sizeLabel === "OS" ? "OS" : sc.sizeLabel, "One Size"]
+          );
+          await sleep(300);
+        }
+
+        // 5. Set NWT ("New With Tags") button if applicable
+        if (sc.conditionLabel && /new with tags|nwt/i.test(sc.conditionLabel)) {
+          await clickButtonByText([/^yes$/i, /^new with tags$/i], 1200);
+        }
+
+        // 6. Brand & Whole-Dollar Prices
         const brandInput = await waitForSelector(
           ['input[placeholder*="Enter the Brand"]', 'input[name="brand"]'],
           3000
@@ -87,7 +128,7 @@
           2000
         );
         if (originalPriceInput && payload.targetPrice) {
-          setNativeValue(originalPriceInput, Math.round(Number(payload.targetPrice)));
+          setNativeValue(originalPriceInput, Math.max(3, Math.round(Number(payload.targetPrice))));
         }
 
         const listingPriceInput = await waitForSelector(
@@ -95,18 +136,25 @@
           3000
         );
         if (listingPriceInput && payload.suggestedPrice) {
-          setNativeValue(listingPriceInput, Math.round(Number(payload.suggestedPrice)));
+          setNativeValue(listingPriceInput, Math.max(3, Math.round(Number(payload.suggestedPrice))));
         }
 
-        // 3. Mac Mini Auto-Pilot Save Draft flow (pops straight into Poshmark iPhone app Drafts!)
+        const fieldSummary = [
+          `${uploadedCount} photos`,
+          categoryMatched ? `Category ✓ (${catSequence.join(" › ")})` : `Category: pick "${catSequence.join(" › ") || "category"}"`,
+          sizeMatched ? `Size ✓ (${sc.sizeLabel})` : sc.sizeLabel ? `Size: pick "${sc.sizeLabel}"` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+
+        // 7. Mac Mini Auto-Pilot Save Draft flow (never blind-publishes!)
         if (shouldSaveDraft) {
           showRccHud({
             title: `Auto-Pilot · Saving Poshmark Draft (${payload.sku || "SKU"})`,
-            message: `Uploaded ${uploadedCount} photos. Waiting for photo upload to finish, then clicking Save Draft...`,
+            message: `${fieldSummary}. Waiting for photo upload, then saving Draft...`,
             tone: "info",
           });
 
-          // Give Poshmark CDN time to finish uploading multi-photo batch
           await sleep(Math.min(7000, Math.max(2500, uploadedCount * 450)));
 
           const saved = await clickButtonByText(
@@ -122,12 +170,12 @@
               status: "needs_user_confirm",
               extra: {
                 listedPrice: payload.suggestedPrice,
-                errorMessage: `Saved as Poshmark Draft (${uploadedCount} photos) — open Poshmark app on iPhone/Mac → Drafts, pick Category/Size & tap List!`,
+                errorMessage: `Saved Poshmark Draft (${fieldSummary}) — open Poshmark app → Drafts to verify & tap List!`,
               },
             });
             showRccHud({
               title: `Poshmark Draft Saved (${payload.sku || "SKU"})`,
-              message: `Ready in your Poshmark Drafts on iPhone & Mac (${uploadedCount} photos). Closing worker tab...`,
+              message: `Ready in your Poshmark Drafts on iPhone & Mac (${fieldSummary}). Closing worker tab...`,
               tone: "success",
             });
             await sleep(2000);
@@ -137,10 +185,10 @@
           }
         }
 
-        // 4. Interactive Mode HUD (iMac / MacBook Air 1-click flow)
+        // 8. Interactive Mode HUD (iMac / MacBook Air 1-click flow)
         showRccHud({
           title: `Poshmark Ready (${payload.sku || "SKU"})`,
-          message: `Filled listing at $${Number(payload.suggestedPrice || 0).toFixed(2)} (${uploadedCount} photos injected). Pick Category & Size, click Next → List This Item, then click below.`,
+          message: `Filled at $${Math.round(Number(payload.suggestedPrice || 0))} · ${fieldSummary}. Review & click Next → List This Item, then click below.`,
           tone: "success",
           actionLabel: "Mark Listed in Command Center",
           onAction: async () => {

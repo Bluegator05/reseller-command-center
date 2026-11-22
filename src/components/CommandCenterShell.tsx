@@ -816,10 +816,11 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
               ).filter(
                 (ch) => !row.cross_listings.some((c) => c.marketplace === ch)
               );
-              let dispatched = 0;
+              const dispatchedChannels: string[] = [];
+              const blockedChannels: string[] = [];
               for (const ch of missing) {
                 if (ch === "etsy") {
-                  await fetch("/api/etsy/crosslist", {
+                  const res = await fetch("/api/etsy/crosslist", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
@@ -827,9 +828,19 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
                       publishImmediately: true,
                     }),
                   });
-                  dispatched += 1;
+                  const data = (await res.json()) as {
+                    results?: unknown[];
+                    errors?: Array<{ error?: string }>;
+                  };
+                  if (res.ok && (data.results?.length ?? 0) > 0) {
+                    dispatchedChannels.push("Etsy");
+                  } else {
+                    blockedChannels.push(
+                      `Etsy (${data.errors?.[0]?.error ? "policy blocked" : "skipped"})`
+                    );
+                  }
                 } else {
-                  await fetch("/api/extension/jobs", {
+                  const res = await fetch("/api/extension/jobs", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
@@ -838,14 +849,26 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
                       action: "create",
                     }),
                   });
-                  dispatched += 1;
+                  if (res.ok) {
+                    dispatchedChannels.push(
+                      ch.charAt(0).toUpperCase() + ch.slice(1)
+                    );
+                  } else if (res.status === 422) {
+                    blockedChannels.push(
+                      `${ch.charAt(0).toUpperCase() + ch.slice(1)} (policy blocked)`
+                    );
+                  }
                 }
               }
               await refreshInventory();
               pushToast(
-                "success",
-                `${row.sku} Dispatched Everywhere`,
-                `Published/queued across ${dispatched} remaining marketplace${dispatched === 1 ? "" : "s"}.`
+                dispatchedChannels.length > 0 ? "success" : "error",
+                dispatchedChannels.length > 0
+                  ? `${row.sku} Dispatched (${dispatchedChannels.join(", ")})`
+                  : `${row.sku} Blocked on Remaining Channels`,
+                blockedChannels.length > 0
+                  ? `Policy Guardrail skipped: ${blockedChannels.join(" · ")}.`
+                  : `Queued across ${dispatchedChannels.length} compliant marketplace${dispatchedChannels.length === 1 ? "" : "s"}.`
               );
             }}
             onUpdateExtensionJob={handleUpdateExtensionJob}

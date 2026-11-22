@@ -193,12 +193,137 @@
     }
   }
 
+  function normalizeLabel(s) {
+    return String(s || "")
+      .toLowerCase()
+      .replace(/&/g, " and ")
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  }
+
+  function scoreOptionText(optionText, targetText) {
+    const a = normalizeLabel(optionText);
+    const b = normalizeLabel(targetText);
+    if (!a || !b) return 0;
+    if (a === b) return 1.0;
+    if (a.startsWith(b) || b.startsWith(a)) return 0.9;
+    if (a.includes(b) || b.includes(a)) return 0.82;
+    const tokA = new Set(a.split(" ").filter((t) => t.length >= 2));
+    const tokB = new Set(b.split(" ").filter((t) => t.length >= 2));
+    if (tokA.size === 0 || tokB.size === 0) return 0;
+    let overlap = 0;
+    for (const t of tokB) {
+      if (tokA.has(t)) overlap += 1;
+    }
+    return overlap / Math.max(tokA.size, tokB.size);
+  }
+
+  /**
+   * Finds and clicks the best visible option matching `targetLabel` inside
+   * dropdown menus, listboxes, or native <select> elements.
+   */
+  async function clickMatchingOption(targetLabel, timeoutMs = 2800, rootEl = document) {
+    if (!targetLabel) return false;
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const candidates = Array.from(
+        rootEl.querySelectorAll(
+          '[role="option"], [role="menuitem"], [role="menuitemradio"], li, button, a, label, span[data-test], div[role="button"]'
+        )
+      );
+      let bestEl = null;
+      let bestScore = 0;
+
+      for (const el of candidates) {
+        if (el.disabled || el.closest("#rcc-companion-hud")) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        // Skip huge container elements so we click the specific leaf option
+        if (rect.height > 90) continue;
+        const txt = (el.textContent || "").replace(/\s+/g, " ").trim();
+        if (!txt || txt.length > 70) continue;
+
+        const score = scoreOptionText(txt, targetLabel);
+        if (score > bestScore) {
+          bestScore = score;
+          bestEl = el;
+        }
+      }
+
+      if (bestEl && bestScore >= 0.72) {
+        bestEl.scrollIntoView({ block: "nearest" });
+        bestEl.click();
+        return true;
+      }
+      await sleep(220);
+    }
+    return false;
+  }
+
+  /**
+   * Selects a value on a native <select> element by fuzzy label matching.
+   */
+  function selectNativeOption(selectEl, targetLabel) {
+    if (!selectEl || selectEl.tagName !== "SELECT" || !targetLabel) return false;
+    let bestOpt = null;
+    let bestScore = 0;
+    for (const opt of Array.from(selectEl.options)) {
+      const score = scoreOptionText(opt.textContent || opt.label || opt.value, targetLabel);
+      if (score > bestScore) {
+        bestScore = score;
+        bestOpt = opt;
+      }
+    }
+    if (bestOpt && bestScore >= 0.65) {
+      selectEl.value = bestOpt.value;
+      selectEl.dispatchEvent(new Event("input", { bubbles: true }));
+      selectEl.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Opens a custom dropdown/combobox trigger and clicks through 1 or more cascading
+   * option labels (e.g., Department -> Category -> Subcategory).
+   */
+  async function selectDropdownSequence(triggerSelectors, labels) {
+    const cleanLabels = (labels || []).filter((l) => Boolean(l && String(l).trim()));
+    if (cleanLabels.length === 0) return false;
+
+    const trigger = await waitForSelector(triggerSelectors, 2500);
+    if (!trigger) return false;
+
+    if (trigger.tagName === "SELECT") {
+      return selectNativeOption(trigger, cleanLabels[cleanLabels.length - 1]);
+    }
+
+    trigger.scrollIntoView({ block: "center" });
+    trigger.click();
+    await sleep(450);
+
+    let matchedAny = false;
+    for (const label of cleanLabels) {
+      const ok = await clickMatchingOption(label, 2500);
+      if (ok) {
+        matchedAny = true;
+        await sleep(450);
+      } else {
+        break;
+      }
+    }
+    return matchedAny;
+  }
+
   window.__rccHelpers = {
     waitForSelector,
     setNativeValue,
     injectImageBlobs,
     sleep,
     clickButtonByText,
+    clickMatchingOption,
+    selectNativeOption,
+    selectDropdownSequence,
     showRccHud,
   };
 })();

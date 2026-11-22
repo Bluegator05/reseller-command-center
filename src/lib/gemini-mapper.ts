@@ -1,21 +1,22 @@
 import { generateGeminiJson, getGeminiApiKey } from "./gemini-client";
+import {
+  evaluateMarketplaceCompliance,
+  inferStructuredCategory,
+  mapConditionForMarketplace,
+  MARKETPLACE_LIMITS,
+  sanitizeMarketplaceCopy,
+} from "./marketplace-compliance";
 import { DEFAULT_EBAY_FEE_PCT, roundCurrency } from "./stale-engine";
 import { getEnvReadiness } from "./supabase";
 import type {
+  ComplianceIssue,
   CrossListDraftPayload,
   CrossListPriceBreakdown,
   InventoryItem,
   MarketplaceAccount,
   MarketplaceType,
+  StructuredCategoryMapping,
 } from "./types";
-
-const MARKETPLACE_TITLE_LIMITS: Record<MarketplaceType, number> = {
-  ebay: 80,
-  etsy: 140,
-  poshmark: 80,
-  mercari: 80,
-  facebook: 99,
-};
 
 const DEFAULT_CHANNEL_FEES: Record<
   MarketplaceType,
@@ -32,12 +33,23 @@ interface EtsyTaxonomyMatch {
   taxonomyId: number;
   categoryPath: string;
   whenMade: string;
+  isSupply?: boolean;
 }
 
 const ETSY_TAXONOMY_RULES: Array<{
   keywords: RegExp;
   match: EtsyTaxonomyMatch;
 }> = [
+  {
+    keywords:
+      /stampin|punch|die cut|scrapbook|rubber stamp|clear stamp|embossing|cardstock|yarn|crochet|knitting|sewing pattern|craft supply/i,
+    match: {
+      taxonomyId: 6692,
+      categoryPath: "Craft Supplies & Tools > Paper, Party & Kids > Paper Punches & Stamps",
+      whenMade: "2020_2026",
+      isSupply: true,
+    },
+  },
   {
     keywords: /camera|slr|lens|35mm|film|olympus|canon|nikon/i,
     match: {
@@ -112,10 +124,10 @@ export function stripHtmlToPlainText(htmlOrText: string | null): string {
     .replace(/<\/(p|div|li|br|h[1-6])>/gi, "\n")
     .replace(/<li[^>]*>/gi, "• ")
     .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .replace(/[ \t]{2,}/g, " ")
@@ -124,7 +136,8 @@ export function stripHtmlToPlainText(htmlOrText: string | null): string {
 
 /**
  * Fee-adjusted cross-listing price calculator.
- * Preserves or improves net margin relative to eBay while respecting markup & floor_price.
+ * Preserves or improves net margin relative to eBay while respecting markup,
+ * whole-dollar rules (Poshmark/Mercari/FB), minimum prices, and floor_price.
  */
 export function computeCrossListPrice(params: {
   ebayListedPrice: number;
@@ -144,6 +157,7 @@ export function computeCrossListPrice(params: {
   } = params;
 
   const defaults = DEFAULT_CHANNEL_FEES[targetMarketplace];
+  const limits = MARKETPLACE_LIMITS[targetMarketplace];
   const targetFeePct = Number(
     targetAccount?.default_fee_pct ?? defaults.feePct
   );
@@ -154,18 +168,27 @@ export function computeCrossListPrice(params: {
   const ebayFeeAmt = roundCurrency(ebayListedPrice * (ebayFeePct / 100));
   const ebayNetProfit = roundCurrency(ebayListedPrice - ebayFeeAmt - cogs);
 
-  // Price needed to preserve net profit after target marketplace fees + optional markup cushion
   const feeRatio = (1 - ebayFeePct / 100) / Math.max(0.5, 1 - targetFeePct / 100);
   const feeAdjusted = ebayListedPrice * feeRatio;
   const markedUp = feeAdjusted * (1 + targetMarkupPct / 100);
 
-  // Round to clean retail ending (.00 or .99 when under $50)
   const rawSuggested = roundCurrency(markedUp);
-  const cleanedPrice =
-    rawSuggested >= 50 ? Math.ceil(rawSuggested) : roundCurrency(Math.ceil(rawSuggested) - 0.01);
+  let cleanedPrice: number;
+  if (limits.wholeDollarOnly) {
+    cleanedPrice = Math.max(limits.minPrice, Math.ceil(rawSuggested));
+  } else {
+    cleanedPrice =
+      rawSuggested >= 50
+        ? Math.ceil(rawSuggested)
+        : roundCurrency(Math.ceil(rawSuggested) - 0.01);
+  }
 
   const respectedFloor = cleanedPrice >= floorPrice;
-  const suggestedPrice = respectedFloor ? cleanedPrice : roundCurrency(floorPrice);
+  const suggestedPrice = respectedFloor
+    ? cleanedPrice
+    : limits.wholeDollarOnly
+      ? Math.max(limits.minPrice, Math.ceil(floorPrice))
+      : roundCurrency(floorPrice);
   const targetFeeAmount = roundCurrency(suggestedPrice * (targetFeePct / 100));
   const targetNetProfit = roundCurrency(suggestedPrice - targetFeeAmount - cogs);
   const netProfitDelta = roundCurrency(targetNetProfit - ebayNetProfit);
@@ -215,11 +238,23 @@ function matchEtsyTaxonomy(item: InventoryItem): EtsyTaxonomyMatch {
       return rule.match;
     }
   }
+  const looksVintage = /\b(vintage|vtg|retro|antique|19[5-9]\d|200[0-6]|70s|80s|90s|y2k)\b/i.test(
+    haystack
+  );
   return {
     taxonomyId: 1,
-    categoryPath: "Vintage & Collectibles > General Curated Goods",
-    whenMade: "2000_2006",
+    categoryPath: looksVintage
+      ? "Vintage & Collectibles > General Curated Goods"
+      : "Home & Living > General Goods",
+    whenMade: looksVintage ? "1990_1999" : "2020_2026",
+    isSupply: false,
   };
+}
+
+function formatCategoryBreadcrumb(sc: StructuredCategoryMapping): string {
+  return [sc.department, sc.category, sc.subcategory]
+    .filter((p): p is string => Boolean(p && p.trim()))
+    .join(" > ");
 }
 
 function buildHeuristicDraft(params: {
@@ -229,8 +264,9 @@ function buildHeuristicDraft(params: {
   targetAccount?: MarketplaceAccount;
 }): CrossListDraftPayload {
   const { item, ebayListedPrice, targetMarketplace, targetAccount } = params;
-  const maxLen = MARKETPLACE_TITLE_LIMITS[targetMarketplace];
+  const limits = MARKETPLACE_LIMITS[targetMarketplace];
   const taxonomy = matchEtsyTaxonomy(item);
+  const structuredCategory = inferStructuredCategory(item, targetMarketplace);
   const pricing = computeCrossListPrice({
     ebayListedPrice,
     cogs: Number(item.cogs),
@@ -239,22 +275,28 @@ function buildHeuristicDraft(params: {
     targetAccount,
   });
 
-  // Optimize title for Etsy SEO (or shorten for Poshmark/Mercari 80-char caps)
   let mappedTitle = item.title.replace(/\s+/g, " ").trim();
   if (targetMarketplace === "etsy") {
     const suffixParts: string[] = [];
-    if (item.category_hint && !mappedTitle.toLowerCase().includes(item.category_hint.toLowerCase())) {
+    if (
+      item.category_hint &&
+      !mappedTitle.toLowerCase().includes(item.category_hint.toLowerCase())
+    ) {
       suffixParts.push(item.category_hint);
     }
-    if (!/vintage|retro|classic/i.test(mappedTitle) && taxonomy.whenMade !== "2020_2026") {
+    if (
+      !taxonomy.isSupply &&
+      !/vintage|retro|classic/i.test(mappedTitle) &&
+      taxonomy.whenMade !== "2020_2026"
+    ) {
       suffixParts.push("Vintage Curated");
     }
-    if (suffixParts.length > 0 && mappedTitle.length + suffixParts.join(" | ").length + 3 <= maxLen) {
+    if (
+      suffixParts.length > 0 &&
+      mappedTitle.length + suffixParts.join(" | ").length + 3 <= limits.maxTitle
+    ) {
       mappedTitle = `${mappedTitle} | ${suffixParts.join(" | ")}`;
     }
-  }
-  if (mappedTitle.length > maxLen) {
-    mappedTitle = mappedTitle.slice(0, maxLen - 1).trim();
   }
 
   const basePlain =
@@ -262,27 +304,47 @@ function buildHeuristicDraft(params: {
     stripHtmlToPlainText(item.description_html) ||
     item.title;
 
-  const specLines = Object.entries(item.item_specifics || {}).map(
-    ([k, v]) => `• ${k}: ${Array.isArray(v) ? v.join(", ") : v}`
-  );
+  const specLines = Object.entries(item.item_specifics || {})
+    .slice(0, 12)
+    .map(([k, v]) => `• ${k}: ${Array.isArray(v) ? v.join(", ") : v}`);
 
   const descriptionSections = [
     basePlain,
     "",
     "Item Details:",
     item.brand ? `• Brand: ${item.brand}` : null,
-    `• Condition: ${item.condition}`,
+    `• Condition: ${structuredCategory.conditionLabel}`,
+    structuredCategory.sizeLabel ? `• Size: ${structuredCategory.sizeLabel}` : null,
     item.weight_oz ? `• Approx. Weight: ${item.weight_oz} oz` : null,
     ...specLines,
-    "",
-    `Inventory Ref: ${item.sku}`,
   ].filter((line): line is string => line !== null);
+
+  const sanitized = sanitizeMarketplaceCopy({
+    title: mappedTitle,
+    description: descriptionSections.join("\n"),
+    targetMarketplace,
+  });
+
+  const compliance = evaluateMarketplaceCompliance({
+    item,
+    targetMarketplace,
+    suggestedPrice: pricing.suggestedPrice,
+    whenMade: taxonomy.whenMade,
+    isSupply: Boolean(taxonomy.isSupply),
+    whoMade: "someone_else",
+  });
+  compliance.sanitizedAdjustments = [...sanitized.adjustments];
+  if (limits.wholeDollarOnly) {
+    compliance.sanitizedAdjustments.push(
+      `Rounded price to whole dollar ($${pricing.suggestedPrice.toFixed(0)}) per ${targetMarketplace} pricing rules`
+    );
+  }
 
   const rawTagCandidates: string[] = [];
   if (item.brand) rawTagCandidates.push(item.brand);
   if (item.category_hint) rawTagCandidates.push(item.category_hint);
-  if (taxonomy.whenMade !== "2020_2026") rawTagCandidates.push("vintage");
-  rawTagCandidates.push("reseller curated");
+  if (taxonomy.isSupply) rawTagCandidates.push("craft supplies");
+  else if (taxonomy.whenMade !== "2020_2026") rawTagCandidates.push("vintage");
 
   for (const val of Object.values(item.item_specifics || {})) {
     const str = Array.isArray(val) ? val.join(" ") : String(val);
@@ -291,7 +353,9 @@ function buildHeuristicDraft(params: {
 
   const titleWords = item.title
     .split(/[\s/,|()-]+/)
-    .filter((w) => w.length >= 4 && !/^(with|mens|womens|size|tested|good|very)$/i.test(w));
+    .filter(
+      (w) => w.length >= 4 && !/^(with|mens|womens|size|tested|good|very)$/i.test(w)
+    );
   for (let i = 0; i < titleWords.length; i++) {
     rawTagCandidates.push(titleWords[i]);
     if (i + 1 < titleWords.length) {
@@ -300,37 +364,43 @@ function buildHeuristicDraft(params: {
   }
 
   const tags = sanitizeEtsyTags(rawTagCandidates);
+  const categoryPath =
+    targetMarketplace === "etsy"
+      ? taxonomy.categoryPath
+      : formatCategoryBreadcrumb(structuredCategory);
 
   return {
     itemId: item.id,
     sku: item.sku,
     targetMarketplace,
     mapperMode: "heuristic",
-    modelUsed: "deterministic-mapper-v1",
+    modelUsed: "deterministic-mapper-v2",
     sourceTitle: item.title,
-    mappedTitle,
-    maxTitleLength: maxLen,
-    descriptionPlain: descriptionSections.join("\n"),
+    mappedTitle: sanitized.title,
+    maxTitleLength: limits.maxTitle,
+    maxDescriptionLength: limits.maxDescription,
+    descriptionPlain: sanitized.description,
     taxonomyId: taxonomy.taxonomyId,
-    categoryPath: taxonomy.categoryPath,
+    categoryPath,
+    structuredCategory,
     whoMade: "someone_else",
     whenMade: taxonomy.whenMade,
-    isSupply: false,
+    isSupply: Boolean(taxonomy.isSupply),
     tags,
     pricing,
+    compliance,
     translationNotes: [
-      `Stripped HTML and formatted ${specLines.length} item specifics into plain-text bullets.`,
-      `Mapped to Etsy taxonomy #${taxonomy.taxonomyId} (${taxonomy.categoryPath}).`,
-      `Adjusted price from $${ebayListedPrice.toFixed(2)} to $${pricing.suggestedPrice.toFixed(2)} for ${pricing.targetFeePct}% fee + ${pricing.targetMarkupPct}% cushion.`,
-      `Generated ${tags.length}/13 Etsy-compliant SEO tags (<=20 chars each).`,
+      `Stripped HTML & sanitized off-platform text (${specLines.length} specifics preserved).`,
+      `Mapped ${targetMarketplace} category: ${categoryPath} · Condition: ${structuredCategory.conditionLabel}${structuredCategory.sizeLabel ? ` · Size: ${structuredCategory.sizeLabel}` : ""}.`,
+      `Adjusted price from $${ebayListedPrice.toFixed(2)} to $${pricing.suggestedPrice.toFixed(2)} (${pricing.targetFeePct}% fee + ${pricing.targetMarkupPct}% cushion).`,
+      ...sanitized.adjustments,
     ],
   };
 }
 
 /**
- * Translates an eBay master inventory item into a marketplace-ready cross-list payload.
- * Uses Gemini API when GEMINI_API_KEY is configured, falling back seamlessly to the
- * deterministic mapper so Phase 2 workflows remain fast and testable without API keys.
+ * Translates an eBay master inventory item into a marketplace-ready cross-list payload
+ * with native marketplace category/condition/size mapping and policy compliance checks.
  */
 export async function mapItemForMarketplace(params: {
   item: InventoryItem;
@@ -349,18 +419,53 @@ export async function mapItemForMarketplace(params: {
   if (!apiKey) {
     return heuristic;
   }
-  const maxLen = MARKETPLACE_TITLE_LIMITS[params.targetMarketplace];
+
+  const target = params.targetMarketplace;
+  const limits = MARKETPLACE_LIMITS[target];
+
+  const marketplaceRulesGuide: Record<MarketplaceType, string> = {
+    poshmark: [
+      `Poshmark Departments MUST be one of: "Women", "Men", "Kids", "Home", "Pets", "Electronics".`,
+      `Poshmark Condition MUST be "New With Tags" or "Pre-owned". Size should be "OS" for Home/Bags/Crafts/Electronics or the exact garment/shoe size.`,
+      `Poshmark Policy: PROHIBITED items include perfumes, colognes, nail polish, aerosols, flammable liquids, used/opened makeup/skincare, medical devices, supplements, food, weapons/knives, heavy appliances/power tools/TVs/furniture, digital goods, and items over 10 lbs.`,
+    ].join(" "),
+    mercari: [
+      `Mercari uses a 3-level Category tree (department > category > subcategory), e.g. "Arts & crafts > Stamping & embossing > Paper punches" or "Men > Coats & jackets > Fleece jacket".`,
+      `Mercari Condition MUST be one of: "New", "Like new", "Good", "Fair", "Poor".`,
+      `Mercari Policy: PROHIBITED items include weapons/knives, medical devices, supplements, food, digital goods, gift cards, recalled goods, and counterfeit/replicas. Fragrances/aerosols require a hazmat ground warning.`,
+    ].join(" "),
+    facebook: [
+      `Facebook Marketplace top-level category MUST be one of: "Arts & Crafts", "Home Goods", "Clothing & Accessories", "Bags & Luggage", "Electronics", "Toys & Games", "Antiques & Collectibles", "Tools", "Sporting Goods", "Kitchen & Dining", "Books, Movies & Music", "Musical Instruments", "Jewelry & Watches", "Garden".`,
+      `Facebook Condition MUST be one of: "New", "Used - Like New", "Used - Good", "Used - Fair".`,
+      `Facebook Commerce Policy: STRICTLY PROHIBITED (high ban risk) are medical/healthcare items (braces, monitors, thermometers, supplements, masks, mobility aids), weapons, alcohol/tobacco/vapes, adult items, digital goods, and recalled items.`,
+    ].join(" "),
+    etsy: [
+      `Etsy ONLY allows Handmade, Vintage (20+ years old, i.e., 2006 or earlier), or Craft Supplies & Tools (isSupply = true, e.g., paper punches, stamps, yarn, beads, fabric, sewing patterns).`,
+      `If the item is a modern mass-produced resale item (2007+) and NOT a craft supply, set policyAllowed = false and explain in policyBlockReason.`,
+    ].join(" "),
+    ebay: `eBay standard resale listing rules.`,
+  };
 
   const prompt = [
-    `You are an e-commerce cross-listing field mapper converting an eBay listing for ${params.targetMarketplace.toUpperCase()}.`,
+    `You are a strict e-commerce cross-listing mapper & policy compliance officer converting an eBay listing for ${target.toUpperCase()}.`,
+    marketplaceRulesGuide[target],
+    `Never mention "eBay" or other rival marketplaces, external URLs, emails, or phone numbers in mappedTitle or descriptionPlain.`,
     `Return ONLY valid JSON matching this schema:`,
     `{`,
-    `  "mappedTitle": string (<= ${maxLen} characters, keyword-rich, no spammy caps),`,
-    `  "descriptionPlain": string (clean plain text, zero HTML tags, bullet points for specifics),`,
-    `  "categoryPath": string (best ${params.targetMarketplace} category breadcrumb),`,
+    `  "mappedTitle": string (<= ${limits.maxTitle} chars, keyword-rich, no spammy caps),`,
+    `  "descriptionPlain": string (<= ${limits.maxDescription} chars, clean plain text, zero HTML, zero eBay mentions),`,
+    `  "department": string | null,`,
+    `  "category": string (official ${target} category name),`,
+    `  "subcategory": string | null,`,
+    `  "conditionLabel": string (exact ${target} condition dropdown label),`,
+    `  "sizeLabel": string | null,`,
     `  "whenMade": string (one of: "2020_2026", "2010_2019", "2000_2006", "1990_1999", "1980s", "1970s", "before_1970"),`,
-    `  "tags": string[] (up to 13 SEO tags, each <= 20 characters, alphanumeric and spaces only),`,
-    `  "translationNotes": string[] (2-4 concise notes explaining title/category/description adjustments)`,
+    `  "isSupply": boolean (true if craft supply/tool like stamps, punches, yarn, dies, fabric),`,
+    `  "tags": string[] (up to 13 SEO tags, each <= 20 chars, alphanumeric & spaces only),`,
+    `  "policyAllowed": boolean (false ONLY if genuinely prohibited by ${target}'s official seller policy),`,
+    `  "policyBlockReason": string | null (required if policyAllowed is false),`,
+    `  "policyWarnings": string[] (0-2 important seller warnings, e.g., overweight shipping or sealed requirement),`,
+    `  "translationNotes": string[] (2-4 concise notes explaining category/title/compliance adjustments)`,
     `}`,
     ``,
     `Source Listing:`,
@@ -383,9 +488,17 @@ export async function mapItemForMarketplace(params: {
     const { data: parsed, modelUsed } = await generateGeminiJson<{
       mappedTitle?: string;
       descriptionPlain?: string;
-      categoryPath?: string;
+      department?: string | null;
+      category?: string;
+      subcategory?: string | null;
+      conditionLabel?: string;
+      sizeLabel?: string | null;
       whenMade?: string;
+      isSupply?: boolean;
       tags?: string[];
+      policyAllowed?: boolean;
+      policyBlockReason?: string | null;
+      policyWarnings?: string[];
       translationNotes?: string[];
     }>({
       task: "mapper",
@@ -393,18 +506,89 @@ export async function mapItemForMarketplace(params: {
       parts: [{ text: prompt }],
     });
 
+    const structuredCategory: StructuredCategoryMapping = {
+      department:
+        parsed.department !== undefined
+          ? parsed.department
+          : heuristic.structuredCategory.department,
+      category: parsed.category?.trim() || heuristic.structuredCategory.category,
+      subcategory:
+        parsed.subcategory !== undefined
+          ? parsed.subcategory
+          : heuristic.structuredCategory.subcategory,
+      conditionLabel:
+        parsed.conditionLabel?.trim() ||
+        mapConditionForMarketplace(params.item.condition, target),
+      sizeLabel:
+        parsed.sizeLabel !== undefined
+          ? parsed.sizeLabel
+          : heuristic.structuredCategory.sizeLabel,
+    };
+
+    const sanitized = sanitizeMarketplaceCopy({
+      title: parsed.mappedTitle || heuristic.mappedTitle,
+      description:
+        stripHtmlToPlainText(parsed.descriptionPlain || "") ||
+        heuristic.descriptionPlain,
+      targetMarketplace: target,
+    });
+
+    const whenMade = parsed.whenMade || heuristic.whenMade;
+    const isSupply =
+      typeof parsed.isSupply === "boolean" ? parsed.isSupply : heuristic.isSupply;
+
+    const aiPolicyIssues: ComplianceIssue[] = [];
+    if (parsed.policyAllowed === false && parsed.policyBlockReason) {
+      aiPolicyIssues.push({
+        code: "AI_POLICY_BLOCK",
+        severity: "block",
+        rule: `${target.toUpperCase()} Seller Policy Check`,
+        detail: parsed.policyBlockReason.trim(),
+      });
+    }
+    if (Array.isArray(parsed.policyWarnings)) {
+      for (let i = 0; i < Math.min(parsed.policyWarnings.length, 3); i++) {
+        const w = String(parsed.policyWarnings[i] || "").trim();
+        if (w) {
+          aiPolicyIssues.push({
+            code: `AI_POLICY_WARN_${i + 1}`,
+            severity: "warning",
+            rule: `${target.toUpperCase()} Listing Reminder`,
+            detail: w,
+          });
+        }
+      }
+    }
+
+    const compliance = evaluateMarketplaceCompliance({
+      item: params.item,
+      targetMarketplace: target,
+      suggestedPrice: heuristic.pricing.suggestedPrice,
+      whenMade,
+      isSupply,
+      whoMade: heuristic.whoMade,
+      aiPolicyIssues,
+    });
+    compliance.sanitizedAdjustments = [...sanitized.adjustments];
+    if (limits.wholeDollarOnly) {
+      compliance.sanitizedAdjustments.push(
+        `Rounded price to whole dollar ($${heuristic.pricing.suggestedPrice.toFixed(0)}) per ${target} pricing rules`
+      );
+    }
+
+    const categoryPath = formatCategoryBreadcrumb(structuredCategory);
+
     return {
       ...heuristic,
       mapperMode: "gemini",
       modelUsed,
-      mappedTitle: (parsed.mappedTitle || heuristic.mappedTitle)
-        .slice(0, maxLen)
-        .trim(),
-      descriptionPlain:
-        stripHtmlToPlainText(parsed.descriptionPlain || "") ||
-        heuristic.descriptionPlain,
-      categoryPath: parsed.categoryPath || heuristic.categoryPath,
-      whenMade: parsed.whenMade || heuristic.whenMade,
+      mappedTitle: sanitized.title,
+      descriptionPlain: sanitized.description,
+      categoryPath: categoryPath || heuristic.categoryPath,
+      structuredCategory,
+      whenMade,
+      isSupply,
+      compliance,
       tags:
         Array.isArray(parsed.tags) && parsed.tags.length > 0
           ? sanitizeEtsyTags(parsed.tags)
@@ -423,3 +607,4 @@ export async function mapItemForMarketplace(params: {
     return heuristic;
   }
 }
+

@@ -431,6 +431,30 @@ export interface CrossListPriceBreakdown {
   respectedFloor: boolean;
 }
 
+export type ComplianceStatus = "allowed" | "warning" | "blocked";
+
+export interface ComplianceIssue {
+  code: string;
+  severity: "block" | "warning";
+  rule: string;
+  detail: string;
+}
+
+export interface MarketplaceComplianceResult {
+  status: ComplianceStatus;
+  allowed: boolean;
+  issues: ComplianceIssue[];
+  sanitizedAdjustments: string[];
+}
+
+export interface StructuredCategoryMapping {
+  department: string | null;
+  category: string;
+  subcategory: string | null;
+  conditionLabel: string;
+  sizeLabel: string | null;
+}
+
 export interface CrossListDraftPayload {
   itemId: string;
   sku: string;
@@ -440,14 +464,17 @@ export interface CrossListDraftPayload {
   sourceTitle: string;
   mappedTitle: string;
   maxTitleLength: number;
+  maxDescriptionLength: number;
   descriptionPlain: string;
   taxonomyId: number;
   categoryPath: string;
+  structuredCategory: StructuredCategoryMapping;
   whoMade: "i_did" | "collective" | "someone_else";
   whenMade: string;
   isSupply: boolean;
   tags: string[];
   pricing: CrossListPriceBreakdown;
+  compliance: MarketplaceComplianceResult;
   translationNotes: string[];
   imageUrls?: string[];
 }

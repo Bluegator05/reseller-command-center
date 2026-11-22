@@ -9,6 +9,7 @@ import {
   Plus,
   Puzzle,
   ShieldAlert,
+  ShieldCheck,
   Sparkles,
   Tag,
   Truck,
@@ -138,6 +139,12 @@ function CrossListDrawerInner({
   const [description, setDescription] = useState("");
   const [priceStr, setPriceStr] = useState("");
   const [whenMade, setWhenMade] = useState("1990_1999");
+  const [isSupply, setIsSupply] = useState(false);
+  const [department, setDepartment] = useState("");
+  const [category, setCategory] = useState("");
+  const [subcategory, setSubcategory] = useState("");
+  const [conditionLabel, setConditionLabel] = useState("");
+  const [sizeLabel, setSizeLabel] = useState("");
   const [tags, setTags] = useState<string[]>([]);
   const [newTagInput, setNewTagInput] = useState("");
   const [publishImmediately, setPublishImmediately] = useState(true);
@@ -180,6 +187,12 @@ function CrossListDrawerInner({
         setDescription(data.descriptionPlain);
         setPriceStr(data.pricing.suggestedPrice.toFixed(2));
         setWhenMade(data.whenMade);
+        setIsSupply(Boolean(data.isSupply));
+        setDepartment(data.structuredCategory?.department || "");
+        setCategory(data.structuredCategory?.category || "");
+        setSubcategory(data.structuredCategory?.subcategory || "");
+        setConditionLabel(data.structuredCategory?.conditionLabel || "");
+        setSizeLabel(data.structuredCategory?.sizeLabel || "");
         setTags(data.tags);
       } catch (err) {
         if (!cancelled) {
@@ -198,12 +211,38 @@ function CrossListDrawerInner({
 
   const isEtsy = target === "etsy";
   const maxTitleLen = draft?.maxTitleLength ?? (isEtsy ? 140 : 80);
+  const maxDescLen =
+    draft?.maxDescriptionLength ??
+    (target === "mercari" ? 1000 : target === "poshmark" ? 1500 : 5000);
   const parsedPrice = Number(priceStr) || 0;
   const isBelowFloor = parsedPrice < row.floor_price - 0.005;
   const targetFeePct = draft?.pricing.targetFeePct ?? 9.5;
   const estTargetFee = round2(parsedPrice * (targetFeePct / 100));
   const estTargetNet = round2(parsedPrice - estTargetFee - row.cogs);
   const netDelta = round2(estTargetNet - row.est_net_profit);
+
+  // Re-evaluate Etsy eligibility live if user toggles Craft Supply or Vintage era
+  const isEtsyVintageOrSupply =
+    isSupply ||
+    ["before_1970", "1970s", "1980s", "1990_1999", "2000_2006"].includes(
+      whenMade
+    );
+  const complianceIssues = (draft?.compliance?.issues ?? []).filter((issue) => {
+    if (
+      isEtsy &&
+      isEtsyVintageOrSupply &&
+      issue.code === "ETSY_RESALE_PROHIBITED"
+    ) {
+      return false;
+    }
+    return true;
+  });
+  const isComplianceBlocked = complianceIssues.some(
+    (i) => i.severity === "block"
+  );
+  const hasComplianceWarning =
+    !isComplianceBlocked &&
+    complianceIssues.some((i) => i.severity === "warning");
 
   const handleAddTag = () => {
     const cleaned = newTagInput
@@ -222,9 +261,27 @@ function CrossListDrawerInner({
   };
 
   const handleSubmit = async () => {
-    if (!draft || isBelowFloor) return;
+    if (!draft || isBelowFloor || isComplianceBlocked) return;
     setIsSubmitting(true);
     setError(null);
+
+    const updatedStructuredCategory = {
+      department: department.trim() || null,
+      category: category.trim() || draft.structuredCategory?.category || "Other",
+      subcategory: subcategory.trim() || null,
+      conditionLabel:
+        conditionLabel.trim() ||
+        draft.structuredCategory?.conditionLabel ||
+        row.condition,
+      sizeLabel: sizeLabel.trim() || null,
+    };
+    const updatedBreadcrumb = [
+      updatedStructuredCategory.department,
+      updatedStructuredCategory.category,
+      updatedStructuredCategory.subcategory,
+    ]
+      .filter(Boolean)
+      .join(" > ");
 
     try {
       if (isEtsy) {
@@ -239,7 +296,9 @@ function CrossListDrawerInner({
               mappedTitle: title.trim(),
               descriptionPlain: description.trim(),
               whenMade,
+              isSupply,
               tags,
+              structuredCategory: updatedStructuredCategory,
               pricing: {
                 ...draft.pricing,
                 suggestedPrice: round2(parsedPrice),
@@ -279,6 +338,8 @@ function CrossListDrawerInner({
               ...draft,
               mappedTitle: title.trim(),
               descriptionPlain: description.trim(),
+              categoryPath: updatedBreadcrumb || draft.categoryPath,
+              structuredCategory: updatedStructuredCategory,
               pricing: {
                 ...draft.pricing,
                 suggestedPrice: round2(parsedPrice),
@@ -482,6 +543,60 @@ function CrossListDrawerInner({
                 );
               })()}
 
+              {/* Marketplace Policy & Compliance Shield */}
+              <div
+                className={`rounded-xl border p-3.5 text-xs space-y-2 ${
+                  isComplianceBlocked
+                    ? "bg-[#FEF2F2] border-[#FCA5A5] text-[#991B1B]"
+                    : hasComplianceWarning
+                      ? "bg-[#FFFBEB] border-[#FDE68A] text-[#92400E]"
+                      : "bg-[#ECFDF5] border-[#A7F3D0] text-[#065F46]"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 font-semibold">
+                    {isComplianceBlocked ? (
+                      <ShieldAlert className="w-4 h-4 text-[#B91C1C] shrink-0" />
+                    ) : hasComplianceWarning ? (
+                      <AlertTriangle className="w-4 h-4 text-[#B45309] shrink-0" />
+                    ) : (
+                      <ShieldCheck className="w-4 h-4 text-[#0F766E] shrink-0" />
+                    )}
+                    <span className="capitalize">
+                      {isComplianceBlocked
+                        ? `Blocked by ${target} Marketplace Policy`
+                        : hasComplianceWarning
+                          ? `${target} Policy Check — Review Warning`
+                          : `${target} Rules & Regulations Verified`}
+                    </span>
+                  </div>
+                  <span className="font-mono text-[10px] uppercase font-bold px-1.5 py-0.5 rounded bg-white/75">
+                    {isComplianceBlocked
+                      ? "BLOCKED"
+                      : hasComplianceWarning
+                        ? "WARNING"
+                        : "COMPLIANT"}
+                  </span>
+                </div>
+
+                {complianceIssues.length > 0 && (
+                  <ul className="space-y-1 pl-1">
+                    {complianceIssues.map((issue) => (
+                      <li key={issue.code} className="leading-snug">
+                        <strong>{issue.rule}:</strong> {issue.detail}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                {(draft.compliance?.sanitizedAdjustments?.length ?? 0) > 0 && (
+                  <div className="pt-1 border-t border-black/10 text-[11px] opacity-90">
+                    <strong>Auto-sanitized:</strong>{" "}
+                    {draft.compliance.sanitizedAdjustments.join(" · ")}
+                  </div>
+                )}
+              </div>
+
               {target === "facebook" && (
                 <div className="flex items-start gap-2.5 p-3 rounded-xl bg-[#FFFBEB] border border-[#FDE68A] text-xs text-[#92400E]">
                   <ShieldAlert className="w-4 h-4 text-[#B45309] shrink-0 mt-0.5" />
@@ -657,7 +772,88 @@ function CrossListDrawerInner({
                 />
               </div>
 
-              {/* Etsy-only Taxonomy + Era + SEO Tags */}
+              {/* Auto-Mapped Category, Condition & Size (Poshmark / Mercari / Facebook) */}
+              {!isEtsy && (
+                <div className="rounded-xl border border-[#E4E4DD] bg-[#FAF9F6] p-3.5 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-[#14151A] capitalize">
+                      Auto-Mapped {target} Category, Condition &amp; Size
+                    </span>
+                    <span className="text-[10px] font-mono text-[#0F766E]">
+                      Auto-selected by extension
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    {target !== "facebook" && (
+                      <div>
+                        <label className="block text-[11px] font-medium text-[#5C606B] mb-1">
+                          Department
+                        </label>
+                        <input
+                          type="text"
+                          value={department}
+                          onChange={(e) => setDepartment(e.target.value)}
+                          placeholder="e.g. Home / Women / Men"
+                          className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-[#DCDCD5] bg-white text-[#14151A]"
+                        />
+                      </div>
+                    )}
+                    <div className={target === "facebook" ? "sm:col-span-2" : ""}>
+                      <label className="block text-[11px] font-medium text-[#5C606B] mb-1">
+                        Category
+                      </label>
+                      <input
+                        type="text"
+                        value={category}
+                        onChange={(e) => setCategory(e.target.value)}
+                        placeholder="Category"
+                        className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-[#DCDCD5] bg-white text-[#14151A]"
+                      />
+                    </div>
+                    {target !== "facebook" && (
+                      <div>
+                        <label className="block text-[11px] font-medium text-[#5C606B] mb-1">
+                          Subcategory
+                        </label>
+                        <input
+                          type="text"
+                          value={subcategory}
+                          onChange={(e) => setSubcategory(e.target.value)}
+                          placeholder="Optional subcategory"
+                          className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-[#DCDCD5] bg-white text-[#14151A]"
+                        />
+                      </div>
+                    )}
+                    <div>
+                      <label className="block text-[11px] font-medium text-[#5C606B] mb-1">
+                        Condition
+                      </label>
+                      <input
+                        type="text"
+                        value={conditionLabel}
+                        onChange={(e) => setConditionLabel(e.target.value)}
+                        className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-[#DCDCD5] bg-white text-[#14151A]"
+                      />
+                    </div>
+                    {target !== "facebook" && (
+                      <div>
+                        <label className="block text-[11px] font-medium text-[#5C606B] mb-1">
+                          Size
+                        </label>
+                        <input
+                          type="text"
+                          value={sizeLabel}
+                          onChange={(e) => setSizeLabel(e.target.value)}
+                          placeholder="OS or garment size"
+                          className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-[#DCDCD5] bg-white text-[#14151A]"
+                        />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Etsy-only Taxonomy + Era + Craft Supply + SEO Tags */}
               {isEtsy && (
                 <>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -692,6 +888,19 @@ function CrossListDrawerInner({
                       </select>
                     </div>
                   </div>
+
+                  <label className="inline-flex items-center gap-2 text-xs text-[#444854] cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={isSupply}
+                      onChange={(e) => setIsSupply(e.target.checked)}
+                      className="rounded border-[#C8C8BE] accent-[#0F766E]"
+                    />
+                    <span>
+                      This item is a <strong>Craft Supply / Tool</strong>{" "}
+                      (eligible on Etsy regardless of age)
+                    </span>
+                  </label>
 
                   <div>
                     <div className="flex items-center justify-between mb-1.5">
@@ -758,15 +967,22 @@ function CrossListDrawerInner({
                     htmlFor="target-desc-input"
                     className="text-xs font-semibold text-[#14151A]"
                   >
-                    Plain-Text Description (HTML Stripped)
+                    Plain-Text Description (Sanitized · Zero HTML)
                   </label>
-                  <span className="text-[11px] text-[#0F766E]">
-                    Clean UTF-8 · Zero HTML
+                  <span
+                    className={`font-mono text-[11px] tabular-nums ${
+                      description.length > maxDescLen
+                        ? "text-[#B91C1C] font-semibold"
+                        : "text-[#0F766E]"
+                    }`}
+                  >
+                    {description.length} / {maxDescLen} chars
                   </span>
                 </div>
                 <textarea
                   id="target-desc-input"
                   rows={6}
+                  maxLength={maxDescLen}
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   className="w-full px-3 py-2 text-xs font-mono leading-relaxed rounded-lg border border-[#DCDCD5] bg-white text-[#14151A] focus:outline-none focus:border-[#14151A]"
@@ -825,26 +1041,36 @@ function CrossListDrawerInner({
             <button
               id="btn-submit-crosslist"
               type="button"
-              disabled={!draft || isSubmitting || isBelowFloor}
+              disabled={
+                !draft || isSubmitting || isBelowFloor || isComplianceBlocked
+              }
               onClick={handleSubmit}
-              className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold bg-[#14151A] text-white hover:bg-[#272A34] disabled:opacity-45 transition cursor-pointer"
+              className={`inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-45 transition cursor-pointer ${
+                isComplianceBlocked
+                  ? "bg-[#B91C1C]"
+                  : "bg-[#14151A] hover:bg-[#272A34]"
+              }`}
             >
               {isSubmitting ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : isComplianceBlocked ? (
+                <ShieldAlert className="w-3.5 h-3.5" />
               ) : (
                 <ArrowRight className="w-3.5 h-3.5" />
               )}
-              {isSubmitting
-                ? isEtsy
-                  ? "Publishing to Etsy..."
-                  : localExtensionReady
-                    ? "Opening & Auto-Filling..."
-                    : "Sending to Auto-Pilot..."
-                : isEtsy
-                  ? `Publish to Etsy ($${parsedPrice.toFixed(2)})`
-                  : localExtensionReady
-                    ? `Open & Auto-Fill ${TARGET_CHANNELS.find((c) => c.key === target)?.label} ($${parsedPrice.toFixed(2)})`
-                    : `Queue for ${TARGET_CHANNELS.find((c) => c.key === target)?.label} Auto-Pilot ($${parsedPrice.toFixed(2)})`}
+              {isComplianceBlocked
+                ? `Blocked on ${TARGET_CHANNELS.find((c) => c.key === target)?.label}`
+                : isSubmitting
+                  ? isEtsy
+                    ? "Publishing to Etsy..."
+                    : localExtensionReady
+                      ? "Opening & Auto-Filling..."
+                      : "Sending to Auto-Pilot..."
+                  : isEtsy
+                    ? `Publish to Etsy ($${parsedPrice.toFixed(2)})`
+                    : localExtensionReady
+                      ? `Open & Auto-Fill ${TARGET_CHANNELS.find((c) => c.key === target)?.label} ($${parsedPrice.toFixed(2)})`
+                      : `Queue for ${TARGET_CHANNELS.find((c) => c.key === target)?.label} Auto-Pilot ($${parsedPrice.toFixed(2)})`}
             </button>
           </div>
         </div>

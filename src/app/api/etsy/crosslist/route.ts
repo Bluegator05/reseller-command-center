@@ -6,6 +6,10 @@ import {
 } from "@/lib/demo-store";
 import { createEtsyListing, isEtsyConfigured } from "@/lib/etsy";
 import { mapItemForMarketplace } from "@/lib/gemini-mapper";
+import {
+  evaluateMarketplaceCompliance,
+  sanitizeMarketplaceCopy,
+} from "@/lib/marketplace-compliance";
 import { roundCurrency } from "@/lib/stale-engine";
 import { getSupabaseServerClient, isSupabaseConfigured } from "@/lib/supabase";
 import type {
@@ -133,6 +137,10 @@ export async function POST(request: Request) {
                 body.draft.categoryPath?.trim() || baseDraft.categoryPath,
               taxonomyId: body.draft.taxonomyId ?? baseDraft.taxonomyId,
               whenMade: body.draft.whenMade || baseDraft.whenMade,
+              isSupply:
+                typeof body.draft.isSupply === "boolean"
+                  ? body.draft.isSupply
+                  : baseDraft.isSupply,
               tags:
                 Array.isArray(body.draft.tags) && body.draft.tags.length > 0
                   ? body.draft.tags.slice(0, 13)
@@ -149,6 +157,35 @@ export async function POST(request: Request) {
               },
             }
           : baseDraft;
+
+      const sanitized = sanitizeMarketplaceCopy({
+        title: mergedDraft.mappedTitle,
+        description: mergedDraft.descriptionPlain,
+        targetMarketplace: "etsy",
+      });
+      mergedDraft.mappedTitle = sanitized.title;
+      mergedDraft.descriptionPlain = sanitized.description;
+
+      const etsyCompliance = evaluateMarketplaceCompliance({
+        item,
+        targetMarketplace: "etsy",
+        suggestedPrice: mergedDraft.pricing.suggestedPrice,
+        whenMade: mergedDraft.whenMade,
+        isSupply: mergedDraft.isSupply,
+        whoMade: mergedDraft.whoMade,
+        aiPolicyIssues: baseDraft.compliance?.issues?.filter((i) =>
+          i.code.startsWith("AI_POLICY_")
+        ),
+      });
+
+      if (!etsyCompliance.allowed) {
+        const blockMsg = etsyCompliance.issues
+          .filter((i) => i.severity === "block")
+          .map((i) => `${i.rule}: ${i.detail}`)
+          .join(" | ");
+        errors.push({ itemId, error: `Blocked by Etsy policy — ${blockMsg}` });
+        continue;
+      }
 
       const nowIso = new Date().toISOString();
 
