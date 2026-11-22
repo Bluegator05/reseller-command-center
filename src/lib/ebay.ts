@@ -366,6 +366,35 @@ export async function fetchEbayItemDetails(
   }
 }
 
+/**
+ * Lightweight Trading API `GetItem` call requesting only PictureDetails to
+ * backfill thumbnails for historical sold eBay orders.
+ */
+export async function fetchEbayItemThumbnail(
+  itemId: string
+): Promise<string | null> {
+  const cleanId = itemId.trim();
+  if (!cleanId || !/^\d+$/.test(cleanId)) return null;
+  if (!isEbayConfigured()) return null;
+
+  try {
+    const xml = await ebayTradingRequest(
+      "GetItem",
+      `<ItemID>${cleanId}</ItemID>
+      <OutputSelector>Item.PictureDetails.PictureURL</OutputSelector>
+      <OutputSelector>Item.PictureDetails.GalleryURL</OutputSelector>`
+    );
+
+    const picBlock = extractXmlTag(xml, "PictureDetails") || xml;
+    const firstPic = extractAllXmlTags(picBlock, "PictureURL")[0];
+    const gallery = extractXmlTag(picBlock, "GalleryURL");
+    const chosen = firstPic || gallery;
+    return chosen ? upgradeEbayImageUrl(chosen) || chosen : null;
+  } catch {
+    return null;
+  }
+}
+
 interface EbayInventoryItemRecord {
   sku: string;
   condition?: string;

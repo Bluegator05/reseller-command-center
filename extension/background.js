@@ -742,7 +742,14 @@ async function scrapeSoldOrdersFromDom(marketplace) {
       const listingMatch = (listingLink?.getAttribute("href") || "").match(/([0-9a-f]{24})/i);
       const listingId = listingMatch ? listingMatch[1] : null;
 
-      const imgAlt = (card?.querySelector("img")?.getAttribute("alt") || "").trim();
+      const cardImg = card?.querySelector("img");
+      const imgAlt = (cardImg?.getAttribute("alt") || "").trim();
+      const rawImgSrc =
+        cardImg?.currentSrc ||
+        cardImg?.getAttribute("src") ||
+        cardImg?.getAttribute("data-src") ||
+        "";
+      const imageUrl = /^https?:\/\//i.test(rawImgSrc) ? rawImgSrc : null;
       const lines = cardText
         .split(/\r?\n/)
         .map((s) => s.trim())
@@ -779,6 +786,7 @@ async function scrapeSoldOrdersFromDom(marketplace) {
         externalOrderId: orderId,
         externalListingId: listingId,
         title,
+        imageUrl,
         grossSalePrice: gross,
         marketplaceFees: fees,
         shippingCost: 0,
@@ -803,10 +811,16 @@ async function scrapeSoldOrdersFromDom(marketplace) {
           continue;
         }
         const titleEl = card?.querySelector(".tile__title, [data-et-name='listing_title']");
+        const tileImg = card?.querySelector("img");
+        const tileImgSrc =
+          tileImg?.currentSrc ||
+          tileImg?.getAttribute("src") ||
+          tileImg?.getAttribute("data-src") ||
+          "";
         const title = (
           titleEl?.textContent ||
           link.getAttribute("title") ||
-          card?.querySelector("img")?.getAttribute("alt") ||
+          tileImg?.getAttribute("alt") ||
           ""
         )
           .replace(/\s+/g, " ")
@@ -820,6 +834,7 @@ async function scrapeSoldOrdersFromDom(marketplace) {
           externalOrderId: extId,
           externalListingId: extId,
           title,
+          imageUrl: /^https?:\/\//i.test(tileImgSrc) ? tileImgSrc : null,
           grossSalePrice: gross,
           marketplaceFees: null,
           shippingCost: 0,
@@ -895,11 +910,14 @@ async function scrapeSoldOrdersFromDom(marketplace) {
         if (!item.id || seen.has(item.id)) continue;
         const rowText = (item.row?.innerText || "").trim();
         const linkText = (item.link?.innerText || item.link?.textContent || "").trim();
-        const imgAlt = (
-          item.img?.getAttribute("alt") ||
-          item.row?.querySelector("img")?.getAttribute("alt") ||
-          ""
-        ).trim();
+        const rowImg = item.img || item.row?.querySelector("img");
+        const imgAlt = (rowImg?.getAttribute("alt") || "").trim();
+        const rawImgSrc =
+          rowImg?.currentSrc ||
+          rowImg?.getAttribute("src") ||
+          rowImg?.getAttribute("data-src") ||
+          "";
+        const imageUrl = /^https?:\/\//i.test(rawImgSrc) ? rawImgSrc : null;
 
         const lines = rowText
           .split(/\r?\n/)
@@ -948,6 +966,7 @@ async function scrapeSoldOrdersFromDom(marketplace) {
           externalOrderId: item.id,
           externalListingId: item.id,
           title,
+          imageUrl,
           grossSalePrice: gross,
           marketplaceFees: fees,
           shippingCost: 0,

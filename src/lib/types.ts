@@ -277,6 +277,7 @@ export interface SalesOrderRecord {
   item_id: string;
   sku: string;
   title: string;
+  image_url?: string | null;
   marketplace: MarketplaceType;
   external_order_id: string | null;
   gross_sale_price: number;

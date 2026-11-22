@@ -8,6 +8,7 @@ import {
   ClipboardCheck,
   DollarSign,
   Download,
+  Image as ImageIcon,
   Loader2,
   Mail,
   Printer,
@@ -131,6 +132,11 @@ export function SalesLedgerPanel({
   const [refundAmountInput, setRefundAmountInput] = useState("");
   const [returnReasonInput, setReturnReasonInput] = useState("");
   const [restockChecked, setRestockChecked] = useState(true);
+  const [previewPhoto, setPreviewPhoto] = useState<{
+    url: string;
+    title: string;
+    sku: string;
+  } | null>(null);
 
   const pickListOrders = useMemo(() => {
     return salesOrders
@@ -575,6 +581,33 @@ export function SalesLedgerPanel({
                       >
                         {isPicked && <CheckCircle2 className="w-3.5 h-3.5" />}
                       </button>
+
+                      {order.image_url ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setPreviewPhoto({
+                              url: order.image_url!,
+                              title: order.title,
+                              sku: order.sku,
+                            })
+                          }
+                          title="View larger photo"
+                          className="w-11 h-11 rounded-lg overflow-hidden border border-[#E4E4DD] bg-[#FAF9F6] shrink-0 hover:ring-2 hover:ring-[#0F766E]/40 transition cursor-pointer"
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={order.image_url}
+                            alt={order.title}
+                            loading="lazy"
+                            className="w-full h-full object-cover"
+                          />
+                        </button>
+                      ) : (
+                        <div className="w-11 h-11 rounded-lg border border-[#E4E4DD] bg-[#FAF9F6] flex items-center justify-center text-[#9CA3AF] shrink-0">
+                          <ImageIcon className="w-4 h-4" />
+                        </div>
+                      )}
 
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
@@ -1042,36 +1075,67 @@ export function SalesLedgerPanel({
                 filteredOrders.map((order) => (
                   <tr key={order.id} className="hover:bg-[#FAF9F6]">
                     <td className="py-3 pl-4 pr-3">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="font-medium text-[#14151A] line-clamp-1">
-                          {order.title}
-                        </span>
-                        {statusBadge(order.fulfillment_status)}
-                        {order.restocked && (
-                          <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[#ECFDF5] text-[#0F766E]">
-                            Restocked ↻
-                          </span>
+                      <div className="flex items-start gap-3">
+                        {order.image_url ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setPreviewPhoto({
+                                url: order.image_url!,
+                                title: order.title,
+                                sku: order.sku,
+                              })
+                            }
+                            title="View larger photo"
+                            className="w-10 h-10 rounded-lg overflow-hidden border border-[#E4E4DD] bg-[#FAF9F6] shrink-0 mt-0.5 hover:ring-2 hover:ring-[#0F766E]/40 transition cursor-pointer"
+                          >
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={order.image_url}
+                              alt={order.title}
+                              loading="lazy"
+                              className="w-full h-full object-cover"
+                            />
+                          </button>
+                        ) : (
+                          <div className="w-10 h-10 rounded-lg border border-[#E4E4DD] bg-[#FAF9F6] flex items-center justify-center text-[#9CA3AF] shrink-0 mt-0.5">
+                            <ImageIcon className="w-4 h-4" />
+                          </div>
                         )}
-                      </div>
-                      <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] font-mono text-[#5C606B]">
-                        <code className="bg-[#F1F1EC] text-[#14151A] px-1.5 py-0.5 rounded">
-                          {order.sku}
-                        </code>
-                        {order.external_order_id && (
-                          <span>#{order.external_order_id}</span>
-                        )}
-                        <span>· {fmtDate(order.sold_at)}</span>
-                        {order.source_location && (
-                          <span className="text-[#8A8E99]">
-                            · {order.source_location}
-                          </span>
-                        )}
-                      </div>
-                      {order.return_reason && (
-                        <div className="mt-0.5 text-[11px] text-[#B91C1C]">
-                          Note: {order.return_reason}
+
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="font-medium text-[#14151A] line-clamp-1">
+                              {order.title}
+                            </span>
+                            {statusBadge(order.fulfillment_status)}
+                            {order.restocked && (
+                              <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[#ECFDF5] text-[#0F766E]">
+                                Restocked ↻
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] font-mono text-[#5C606B]">
+                            <code className="bg-[#F1F1EC] text-[#14151A] px-1.5 py-0.5 rounded">
+                              {order.sku}
+                            </code>
+                            {order.external_order_id && (
+                              <span>#{order.external_order_id}</span>
+                            )}
+                            <span>· {fmtDate(order.sold_at)}</span>
+                            {order.source_location && (
+                              <span className="text-[#8A8E99]">
+                                · {order.source_location}
+                              </span>
+                            )}
+                          </div>
+                          {order.return_reason && (
+                            <div className="mt-0.5 text-[11px] text-[#B91C1C]">
+                              Note: {order.return_reason}
+                            </div>
+                          )}
                         </div>
-                      )}
+                      </div>
                     </td>
                     <td className="py-3 px-3 whitespace-nowrap">
                       <span className="px-2 py-0.5 rounded text-xs font-semibold uppercase bg-[#EFF6FF] text-[#1D4ED8]">
@@ -1261,6 +1325,44 @@ export function SalesLedgerPanel({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      {/* Click-to-Enlarge Sold Item Photo Lightbox */}
+      {previewPhoto && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-[2px] p-4"
+          onClick={() => setPreviewPhoto(null)}
+        >
+          <div
+            className="bg-white border border-[#DCE2DF] rounded-2xl shadow-2xl max-w-md w-full overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-3 border-b border-[#ECEFE9] bg-[#FAFBF9] flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-[#171A1D] truncate">
+                  {previewPhoto.title}
+                </div>
+                <div className="text-[11px] font-mono text-[#5F666D]">
+                  {previewPhoto.sku}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPreviewPhoto(null)}
+                className="p-1 rounded-lg text-[#5F666D] hover:bg-[#EDF1EE] cursor-pointer shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 bg-[#FAF9F6] flex items-center justify-center">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={previewPhoto.url}
+                alt={previewPhoto.title}
+                className="max-h-[65vh] w-auto rounded-xl object-contain border border-[#E4E4DD] bg-white"
+              />
+            </div>
           </div>
         </div>
       )}

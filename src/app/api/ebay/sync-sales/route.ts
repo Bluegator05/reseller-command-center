@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { cascadeDelistOtherChannelsForSoldItem } from "@/lib/auto-delist";
-import { fetchEbaySalesOrders, isEbayConfigured } from "@/lib/ebay";
+import {
+  fetchEbayItemThumbnail,
+  fetchEbaySalesOrders,
+  isEbayConfigured,
+} from "@/lib/ebay";
 import { getEnvReadiness, getSupabaseServerClient } from "@/lib/supabase";
 
 export const maxDuration = 60;
@@ -55,6 +59,7 @@ export async function POST(request: Request) {
       string,
       {
         id: string;
+        item_id: string;
         fulfillment_status: string;
         refund_amount: number;
         marketplace_fees: number;
@@ -66,7 +71,7 @@ export async function POST(request: Request) {
       const { data, error } = await supabase
         .from("sales_orders")
         .select(
-          "id, external_order_id, fulfillment_status, refund_amount, marketplace_fees, shipped_at"
+          "id, item_id, external_order_id, fulfillment_status, refund_amount, marketplace_fees, shipped_at"
         )
         .eq("marketplace", "ebay")
         .range(from, from + 999);
@@ -75,6 +80,7 @@ export async function POST(request: Request) {
         if (row.external_order_id) {
           existingOrders.set(row.external_order_id, {
             id: row.id,
+            item_id: row.item_id,
             fulfillment_status: row.fulfillment_status,
             refund_amount: Number(row.refund_amount ?? 0),
             marketplace_fees: Number(row.marketplace_fees ?? 0),
@@ -85,16 +91,20 @@ export async function POST(request: Request) {
       if ((data ?? []).length < 1000) break;
     }
 
-    // 2. Load existing inventory_items (SKU -> id) and eBay listings (legacyItemId -> item_id)
+    // 2. Load existing inventory_items (SKU -> id, plus which ones already have photos)
     const skuToItemId = new Map<string, string>();
+    const itemsWithImages = new Set<string>();
     for (let from = 0; from < 10000; from += 1000) {
       const { data, error } = await supabase
         .from("inventory_items")
-        .select("id, sku")
+        .select("id, sku, image_urls")
         .range(from, from + 999);
       if (error) throw error;
       for (const row of data ?? []) {
         if (row.sku) skuToItemId.set(row.sku.trim().toLowerCase(), row.id);
+        if (Array.isArray(row.image_urls) && row.image_urls.length > 0) {
+          itemsWithImages.add(row.id);
+        }
       }
       if ((data ?? []).length < 1000) break;
     }
@@ -136,9 +146,21 @@ export async function POST(request: Request) {
       sold_at: string;
     }> = [];
 
+    // Collect (itemId -> legacyItemId) pairs missing a thumbnail so we can backfill them
+    const missingPhotos = new Map<string, string>();
+
     for (const line of orders) {
       const existing = existingOrders.get(line.externalOrderId);
       if (existing) {
+        if (
+          line.legacyItemId &&
+          existing.item_id &&
+          !itemsWithImages.has(existing.item_id) &&
+          !missingPhotos.has(existing.item_id)
+        ) {
+          missingPhotos.set(existing.item_id, line.legacyItemId);
+        }
+
         const needsUpdate =
           existing.fulfillment_status !== line.fulfillmentStatus ||
           Math.abs(existing.refund_amount - line.refundAmount) > 0.01 ||
@@ -225,9 +247,18 @@ export async function POST(request: Request) {
 
       if (!itemId) continue;
 
+      if (
+        line.legacyItemId &&
+        !itemsWithImages.has(itemId) &&
+        !missingPhotos.has(itemId)
+      ) {
+        missingPhotos.set(itemId, line.legacyItemId);
+      }
+
       // Prevent duplicate entries within the same batch
       existingOrders.set(line.externalOrderId, {
         id: "pending",
+        item_id: itemId,
         fulfillment_status: line.fulfillmentStatus,
         refund_amount: line.refundAmount,
         marketplace_fees: line.marketplaceFees,
@@ -261,6 +292,32 @@ export async function POST(request: Request) {
       importedCount += chunk.length;
     }
 
+    // 4b. Backfill thumbnails for sold eBay items missing photos (fast GetItem OutputSelector)
+    let photosBackfilled = 0;
+    if (missingPhotos.size > 0) {
+      const deadline = Date.now() + 20_000;
+      const entries = [...missingPhotos.entries()].slice(0, 60);
+      const batchSize = 6;
+      for (let i = 0; i < entries.length; i += batchSize) {
+        if (Date.now() > deadline) break;
+        const batch = entries.slice(i, i + batchSize);
+        await Promise.all(
+          batch.map(async ([invId, legacyId]) => {
+            const thumb = await fetchEbayItemThumbnail(legacyId);
+            if (!thumb) return;
+            const { error: picErr } = await supabase
+              .from("inventory_items")
+              .update({ image_urls: [thumb] })
+              .eq("id", invId);
+            if (!picErr) {
+              photosBackfilled += 1;
+              itemsWithImages.add(invId);
+            }
+          })
+        );
+      }
+    }
+
     // 5. Anti-Double-Sell Cascade (ONLY when explicitly enabled for live sale watch,
     //    and strictly limited to brand-new paid sales from the past 7 days!)
     const delistedCount = { total: 0 };
@@ -288,21 +345,29 @@ export async function POST(request: Request) {
       }
     }
 
+    const photoNote =
+      photosBackfilled > 0
+        ? ` · Added ${photosBackfilled} item photo${photosBackfilled === 1 ? "" : "s"}`
+        : "";
+
     return NextResponse.json({
       mode: "live",
       importedCount,
       updatedCount,
       skippedCount,
+      photosBackfilled,
       delistedCount: delistedCount.total,
       totalFetched: orders.length,
       sourceApi,
       daysBack: effectiveDays,
       message:
         importedCount > 0
-          ? `Imported ${importedCount} eBay sale${importedCount === 1 ? "" : "s"}${delistedCount.total > 0 ? ` & queued ${delistedCount.total} auto-delist${delistedCount.total === 1 ? "" : "s"}` : ""}${updatedCount > 0 ? ` (${updatedCount} updated)` : ""}.`
+          ? `Imported ${importedCount} eBay sale${importedCount === 1 ? "" : "s"}${delistedCount.total > 0 ? ` & queued ${delistedCount.total} auto-delist${delistedCount.total === 1 ? "" : "s"}` : ""}${updatedCount > 0 ? ` (${updatedCount} updated)` : ""}${photoNote}.`
           : updatedCount > 0
-            ? `Updated ${updatedCount} existing eBay order${updatedCount === 1 ? "" : "s"} (all ${orders.length} orders already synced).`
-            : `All ${orders.length} eBay orders from the past ${effectiveDays} days are already up to date.`,
+            ? `Updated ${updatedCount} existing eBay order${updatedCount === 1 ? "" : "s"}${photoNote}.`
+            : photosBackfilled > 0
+              ? `All ${orders.length} eBay orders are up to date — backfilled ${photosBackfilled} item thumbnail${photosBackfilled === 1 ? "" : "s"}!`
+              : `All ${orders.length} eBay orders from the past ${effectiveDays} days are already up to date.`,
     });
   } catch (error) {
     const message =

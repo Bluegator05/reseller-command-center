@@ -54,7 +54,7 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
           const { data: page, error } = await supabase
             .from("sales_orders")
             .select(
-              "*, inventory_items(sku, title, cogs, prep_cost, source_location, source_type, acquired_at, bin_location, weight_oz, length_in, width_in, height_in)"
+              "*, inventory_items(sku, title, image_urls, cogs, prep_cost, source_location, source_type, acquired_at, bin_location, weight_oz, length_in, width_in, height_in)"
             )
             .order("sold_at", { ascending: false })
             .range(from, from + pageSize - 1);
@@ -198,6 +198,7 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
             | {
                 sku?: string;
                 title?: string;
+                image_urls?: string[] | null;
                 cogs?: number;
                 prep_cost?: number;
                 source_location?: string | null;
@@ -212,6 +213,7 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
             | Array<{
                 sku?: string;
                 title?: string;
+                image_urls?: string[] | null;
                 cogs?: number;
                 prep_cost?: number;
                 source_location?: string | null;
@@ -242,12 +244,17 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
           rec.fulfillment_status ?? "shipped";
         const cogsApplied =
           rec.restocked || status === "unpaid" ? 0 : cogs + prepCost;
+        const firstImage =
+          Array.isArray(inv?.image_urls) && inv.image_urls.length > 0
+            ? inv.image_urls[0] || null
+            : null;
 
         return {
           id: rec.id,
           item_id: rec.item_id,
           sku: inv?.sku || rec.item_id.slice(0, 8),
           title: inv?.title || "Sold Item",
+          image_url: firstImage,
           marketplace: rec.marketplace,
           external_order_id: rec.external_order_id,
           gross_sale_price: Number(rec.gross_sale_price),

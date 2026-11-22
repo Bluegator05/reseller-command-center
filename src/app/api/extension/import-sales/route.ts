@@ -10,6 +10,7 @@ interface ScannedSaleInput {
   externalOrderId: string;
   externalListingId?: string | null;
   title: string;
+  imageUrl?: string | null;
   grossSalePrice: number;
   marketplaceFees?: number | null;
   shippingCost?: number | null;
@@ -136,6 +137,7 @@ export async function POST(request: Request) {
       string,
       {
         id: string;
+        item_id: string;
         fulfillment_status: string;
         marketplace_fees: number;
         refund_amount: number;
@@ -146,7 +148,7 @@ export async function POST(request: Request) {
       const { data, error } = await supabase
         .from("sales_orders")
         .select(
-          "id, external_order_id, fulfillment_status, marketplace_fees, refund_amount"
+          "id, item_id, external_order_id, fulfillment_status, marketplace_fees, refund_amount"
         )
         .eq("marketplace", marketplace)
         .range(from, from + 999);
@@ -155,6 +157,7 @@ export async function POST(request: Request) {
         if (row.external_order_id) {
           existingSales.set(row.external_order_id, {
             id: row.id,
+            item_id: row.item_id,
             fulfillment_status: row.fulfillment_status,
             marketplace_fees: Number(row.marketplace_fees ?? 0),
             refund_amount: Number(row.refund_amount ?? 0),
@@ -171,15 +174,19 @@ export async function POST(request: Request) {
       titleTokens: Set<string>;
     }> = [];
     const skuSet = new Set<string>();
+    const itemsWithImages = new Set<string>();
 
     for (let from = 0; from < 10000; from += 1000) {
       const { data, error } = await supabase
         .from("inventory_items")
-        .select("id, sku, title")
+        .select("id, sku, title, image_urls")
         .range(from, from + 999);
       if (error) throw error;
       for (const row of data ?? []) {
         if (row.sku) skuSet.add(row.sku.trim().toLowerCase());
+        if (Array.isArray(row.image_urls) && row.image_urls.length > 0) {
+          itemsWithImages.add(row.id);
+        }
         existingItems.push({
           id: row.id,
           sku: row.sku,
@@ -235,6 +242,11 @@ export async function POST(request: Request) {
       const title = String(raw.title || "").trim();
       if (!extOrderId || !title) continue;
 
+      const cleanImageUrl =
+        typeof raw.imageUrl === "string" && /^https?:\/\//i.test(raw.imageUrl.trim())
+          ? raw.imageUrl.trim()
+          : null;
+
       const gross = roundCurrency(Math.max(0, Number(raw.grossSalePrice) || 0));
       const fees =
         raw.marketplaceFees !== undefined &&
@@ -270,6 +282,18 @@ export async function POST(request: Request) {
 
       const existing = existingSales.get(extOrderId);
       if (existing) {
+        if (
+          cleanImageUrl &&
+          existing.item_id &&
+          !itemsWithImages.has(existing.item_id)
+        ) {
+          const { error: picErr } = await supabase
+            .from("inventory_items")
+            .update({ image_urls: [cleanImageUrl] })
+            .eq("id", existing.item_id);
+          if (!picErr) itemsWithImages.add(existing.item_id);
+        }
+
         const needsUpdate =
           existing.fulfillment_status !== status ||
           Math.abs(existing.marketplace_fees - fees) > 0.01 ||
@@ -331,6 +355,7 @@ export async function POST(request: Request) {
             floor_price: Math.max(0.01, gross),
             status: "sold",
             acquired_at: soldAt,
+            ...(cleanImageUrl ? { image_urls: [cleanImageUrl] } : {}),
           })
           .select("id")
           .single();
@@ -346,14 +371,22 @@ export async function POST(request: Request) {
 
         itemId = String(created.id);
         skuSet.add(sku.toLowerCase());
+        if (cleanImageUrl) itemsWithImages.add(itemId);
         existingItems.push({ id: itemId, sku, titleTokens: tokenize(title) });
         if (raw.externalListingId) {
           listingIdToItemId.set(raw.externalListingId.trim(), itemId);
         }
+      } else if (cleanImageUrl && !itemsWithImages.has(itemId)) {
+        const { error: picErr } = await supabase
+          .from("inventory_items")
+          .update({ image_urls: [cleanImageUrl] })
+          .eq("id", itemId);
+        if (!picErr) itemsWithImages.add(itemId);
       }
 
       existingSales.set(extOrderId, {
         id: "pending",
+        item_id: itemId,
         fulfillment_status: status,
         marketplace_fees: fees,
         refund_amount: refundAmount,
