@@ -564,6 +564,473 @@ async function scanActiveTabAndImport() {
   return { ok: true, ...data };
 }
 
+/**
+ * Injected into Poshmark My Sales (/order/sales) or Mercari My Listings (Sold -> Complete & In progress).
+ * Auto-scrolls to load all historical sales and extracts order ID, title, gross price, fees, date, and status.
+ */
+async function scrapeSoldOrdersFromDom(marketplace) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const results = [];
+  const seen = new Set();
+
+  function parseDateFromText(text) {
+    const raw = String(text || "");
+    const now = new Date();
+    // 1. "Oct 14, 2026" or "Oct 14 2026" or "October 14, 2026"
+    const mFull = raw.match(
+      /\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+(\d{1,2}),?\s+(20\d{2})\b/i
+    );
+    if (mFull) {
+      const ms = Date.parse(`${mFull[1]} ${mFull[2]}, ${mFull[3]}`);
+      if (!Number.isNaN(ms)) return new Date(ms).toISOString();
+    }
+    // 2. "MM/DD/YYYY" or "MM/DD/YY"
+    const mSlash = raw.match(/\b(0?[1-9]|1[0-2])\/(0?[1-9]|[12]\d|3[01])\/(20\d{2}|\d{2})\b/);
+    if (mSlash) {
+      const yr = mSlash[3].length === 2 ? `20${mSlash[3]}` : mSlash[3];
+      const ms = Date.parse(`${yr}-${mSlash[1].padStart(2, "0")}-${mSlash[2].padStart(2, "0")}T12:00:00Z`);
+      if (!Number.isNaN(ms)) return new Date(ms).toISOString();
+    }
+    // 3. "YYYY-MM-DD"
+    const mIso = raw.match(/\b(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b/);
+    if (mIso) {
+      const ms = Date.parse(`${mIso[0]}T12:00:00Z`);
+      if (!Number.isNaN(ms)) return new Date(ms).toISOString();
+    }
+    // 4. "Oct 14" (no year -> infer current or prior year)
+    const mShort = raw.match(
+      /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.?\s+(\d{1,2})\b/i
+    );
+    if (mShort) {
+      let yr = now.getFullYear();
+      let ms = Date.parse(`${mShort[1]} ${mShort[2]}, ${yr}`);
+      if (!Number.isNaN(ms)) {
+        if (ms > now.getTime() + 2 * 86400000) {
+          yr -= 1;
+          ms = Date.parse(`${mShort[1]} ${mShort[2]}, ${yr}`);
+        }
+        if (!Number.isNaN(ms)) return new Date(ms).toISOString();
+      }
+    }
+    return null;
+  }
+
+  function extractDollars(text) {
+    const matches = Array.from(String(text || "").matchAll(/\$\s*([0-9,]+(?:\.[0-9]{1,2})?)/g));
+    return matches
+      .map((m) => Number(m[1].replace(/,/g, "")))
+      .filter((n) => Number.isFinite(n) && n >= 0);
+  }
+
+  function inferStatus(text, fallback = "shipped") {
+    const lower = String(text || "").toLowerCase();
+    if (/\bcancel(?:ed|led)\b/.test(lower)) return "unpaid";
+    if (/\b(return(?:ed)?|refund(?:ed)?)\b/.test(lower)) return "returned";
+    if (
+      /\b(pending shipment|awaiting shipment|not shipped|ship by|to ship|in progress|print label|waiting for shipment)\b/.test(
+        lower
+      )
+    ) {
+      return "to_ship";
+    }
+    if (/\b(delivered|complete|completed|shipped|in transit|accepted|rated)\b/.test(lower)) {
+      return "shipped";
+    }
+    return fallback;
+  }
+
+  async function autoScrollAll(itemSelector) {
+    let lastCount = document.querySelectorAll(itemSelector).length;
+    let lastHeight = document.body.scrollHeight;
+    let stable = 0;
+
+    for (let step = 0; step < 35; step++) {
+      window.scrollTo({ top: document.body.scrollHeight, behavior: "instant" });
+      const moreBtn = Array.from(document.querySelectorAll("button, a")).find((b) => {
+        if (b.disabled) return false;
+        const r = b.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) return false;
+        const t = (b.textContent || "").trim().toLowerCase();
+        return t === "load more" || t === "show more" || t === "see more" || t === "view more";
+      });
+      if (moreBtn) moreBtn.click();
+      await sleep(800);
+
+      const nextCount = document.querySelectorAll(itemSelector).length;
+      const nextHeight = document.body.scrollHeight;
+      if (nextCount === lastCount && nextHeight === lastHeight) {
+        stable += 1;
+        if (stable >= 2) break;
+      } else {
+        stable = 0;
+        lastCount = nextCount;
+        lastHeight = nextHeight;
+      }
+    }
+    window.scrollTo({ top: 0, behavior: "instant" });
+  }
+
+  if (marketplace === "poshmark") {
+    await autoScrollAll('a[href*="/order/sales/"], a[href*="/listing/"]');
+
+    // Strategy 1: Poshmark /order/sales rows
+    const orderLinks = Array.from(
+      document.querySelectorAll('a[href*="/order/sales/"], a[href*="/sales/"]')
+    ).filter((a) => /[0-9a-f]{24}/i.test(a.getAttribute("href") || ""));
+
+    for (const link of orderLinks) {
+      const href = link.getAttribute("href") || "";
+      const idMatch = href.match(/([0-9a-f]{24})/i);
+      const orderId = idMatch ? idMatch[1] : "";
+      if (!orderId || seen.has(orderId)) continue;
+
+      let card =
+        link.closest('.order-item, .card, li, tr, article, [data-et-name*="order"]') ||
+        link.parentElement;
+      for (let up = 0; up < 4 && card && (card.innerText || "").trim().length < 20; up++) {
+        card = card.parentElement;
+      }
+      const cardText = (card?.innerText || link.innerText || "").trim();
+      const listingLink = card?.querySelector('a[href*="/listing/"]');
+      const listingMatch = (listingLink?.getAttribute("href") || "").match(/([0-9a-f]{24})/i);
+      const listingId = listingMatch ? listingMatch[1] : null;
+
+      const imgAlt = (card?.querySelector("img")?.getAttribute("alt") || "").trim();
+      const lines = cardText
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter(
+          (s) =>
+            s.length >= 4 &&
+            !/^\$/.test(s) &&
+            !/^@/.test(s) &&
+            !/^(order|sold|shipped|delivered|cancelled|canceled|returned|pending|earnings|net|total|buyer|size|qty|view|track)/i.test(
+              s
+            ) &&
+            !/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b/i.test(s) &&
+            !/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(s)
+        );
+      const title = (imgAlt.length >= 4 ? imgAlt : lines[0] || "").replace(/\s+/g, " ").trim();
+      if (title.length < 3) continue;
+
+      // Extract sale price & optional exact earnings
+      const prices = extractDollars(cardText);
+      const gross = prices.find((p) => p > 0) ?? 0;
+      const earnMatch = cardText.match(
+        /(?:earnings|you earn|net earnings)[^\n$]*\$\s*([0-9,]+(?:\.[0-9]{1,2})?)/i
+      );
+      let fees = null;
+      if (earnMatch && gross > 0) {
+        const earnings = Number(earnMatch[1].replace(/,/g, ""));
+        if (Number.isFinite(earnings) && earnings >= 0 && earnings <= gross) {
+          fees = Math.round((gross - earnings) * 100) / 100;
+        }
+      }
+
+      seen.add(orderId);
+      results.push({
+        externalOrderId: orderId,
+        externalListingId: listingId,
+        title,
+        grossSalePrice: gross,
+        marketplaceFees: fees,
+        shippingCost: 0,
+        fulfillmentStatus: inferStatus(cardText, "shipped"),
+        soldAt: parseDateFromText(cardText),
+      });
+    }
+
+    // Strategy 2: Fallback if user is on Sold Closet (?availability=sold_out)
+    if (results.length === 0) {
+      const listingLinks = Array.from(document.querySelectorAll('a[href*="/listing/"]'));
+      for (const link of listingLinks) {
+        const href = link.getAttribute("href") || "";
+        const idMatch = href.match(/([0-9a-f]{24})/i);
+        const extId = idMatch ? idMatch[1] : "";
+        if (!extId || seen.has(extId)) continue;
+        const card =
+          link.closest('[data-et-name="listing"], .card, .tile, article, li') ||
+          link.parentElement?.parentElement;
+        const cardText = (card?.innerText || "").trim();
+        if (!/\bsold\b/i.test(cardText) && !window.location.search.includes("sold_out")) {
+          continue;
+        }
+        const titleEl = card?.querySelector(".tile__title, [data-et-name='listing_title']");
+        const title = (
+          titleEl?.textContent ||
+          link.getAttribute("title") ||
+          card?.querySelector("img")?.getAttribute("alt") ||
+          ""
+        )
+          .replace(/\s+/g, " ")
+          .trim();
+        if (title.length < 3) continue;
+        const prices = extractDollars(cardText);
+        const gross = prices.find((p) => p > 0) ?? 0;
+
+        seen.add(extId);
+        results.push({
+          externalOrderId: extId,
+          externalListingId: extId,
+          title,
+          grossSalePrice: gross,
+          marketplaceFees: null,
+          shippingCost: 0,
+          fulfillmentStatus: "shipped",
+          soldAt: parseDateFromText(cardText),
+        });
+      }
+    }
+
+    return results;
+  }
+
+  if (marketplace === "mercari") {
+    const extractMercariId = (str) => {
+      const m = String(str || "").match(/(?:^|[^a-z0-9])(m\d{9,13})(?:$|[^a-z0-9])/i);
+      return m ? m[1] : null;
+    };
+
+    const clickSoldNavItem = async (labelRegex) => {
+      const navCandidates = Array.from(
+        document.querySelectorAll('a, button, [role="button"], li, div')
+      ).filter((el) => {
+        const r = el.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0 || r.left > 340 || r.height > 64) return false;
+        const t = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+        return labelRegex.test(t) && t.length <= 32;
+      });
+      // Prefer innermost matching element
+      navCandidates.sort(
+        (a, b) =>
+          a.getBoundingClientRect().width * a.getBoundingClientRect().height -
+          b.getBoundingClientRect().width * b.getBoundingClientRect().height
+      );
+      const target = navCandidates[0];
+      if (!target) return false;
+      target.click();
+      await sleep(2000);
+      return true;
+    };
+
+    const scrapeCurrentMercariView = async (defaultStatus) => {
+      await autoScrollAll('a[href*="m"], img[src*="mercdn"]');
+      const candidates = [];
+
+      // 1. Anchors containing Mercari item/order ID
+      for (const a of Array.from(document.querySelectorAll("a[href]"))) {
+        const href = a.getAttribute("href") || "";
+        const row =
+          a.closest('tr, [role="row"], [data-testid*="Item"], [data-testid*="Listing"], [data-testid*="Order"], li, article') ||
+          a.parentElement?.parentElement ||
+          a;
+        const id =
+          extractMercariId(href) ||
+          extractMercariId(row?.querySelector("img")?.getAttribute("src")) ||
+          extractMercariId(row?.innerHTML);
+        if (id) candidates.push({ id, row, link: a });
+      }
+
+      // 2. Mercari CDN thumbnails (photos/mXXXXXXXXXXX_1.jpg)
+      for (const img of Array.from(document.querySelectorAll("img[src]"))) {
+        const id = extractMercariId(img.getAttribute("src"));
+        if (!id) continue;
+        let row =
+          img.closest('tr, [role="row"], [data-testid*="Item"], [data-testid*="Listing"], [data-testid*="Order"], li, article') ||
+          img.parentElement;
+        for (let up = 0; up < 4 && row && (row.innerText || "").trim().length < 12; up++) {
+          row = row.parentElement;
+        }
+        candidates.push({ id, row, link: null, img });
+      }
+
+      for (const item of candidates) {
+        if (!item.id || seen.has(item.id)) continue;
+        const rowText = (item.row?.innerText || "").trim();
+        const linkText = (item.link?.innerText || item.link?.textContent || "").trim();
+        const imgAlt = (
+          item.img?.getAttribute("alt") ||
+          item.row?.querySelector("img")?.getAttribute("alt") ||
+          ""
+        ).trim();
+
+        const lines = rowText
+          .split(/\r?\n/)
+          .map((s) => s.trim())
+          .filter(
+            (s) =>
+              s.length >= 4 &&
+              !/^\$/.test(s) &&
+              !/^(promote|relist|delete|view order|order status|completed|complete|in progress|sold|shipped|delivered|cancelled|canceled|n\/a|\d+)$/i.test(
+                s
+              ) &&
+              !/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b/i.test(s) &&
+              !/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(s)
+          );
+
+        const title = (
+          (linkText.length >= 4 && !/^\$/.test(linkText) ? linkText : "") ||
+          (imgAlt.length >= 4 && !/^product photo$/i.test(imgAlt) ? imgAlt : "") ||
+          lines[0] ||
+          ""
+        )
+          .replace(/\s+/g, " ")
+          .trim();
+        if (title.length < 3) continue;
+
+        const prices = extractDollars(rowText);
+        let gross = prices.find((p) => p > 0) ?? 0;
+        if (gross === 0) {
+          const inp = item.row?.querySelector("input");
+          if (inp && Number(inp.value) > 0) gross = Number(inp.value);
+        }
+
+        const earnMatch = rowText.match(
+          /(?:you earn|net proceeds|earnings)[^\n$]*\$\s*([0-9,]+(?:\.[0-9]{1,2})?)/i
+        );
+        let fees = null;
+        if (earnMatch && gross > 0) {
+          const earnings = Number(earnMatch[1].replace(/,/g, ""));
+          if (Number.isFinite(earnings) && earnings >= 0 && earnings <= gross) {
+            fees = Math.round((gross - earnings) * 100) / 100;
+          }
+        }
+
+        seen.add(item.id);
+        results.push({
+          externalOrderId: item.id,
+          externalListingId: item.id,
+          title,
+          grossSalePrice: gross,
+          marketplaceFees: fees,
+          shippingCost: 0,
+          fulfillmentStatus: inferStatus(rowText, defaultStatus),
+          soldAt: parseDateFromText(rowText),
+        });
+      }
+    };
+
+    const currentUrl = window.location.href.toLowerCase();
+    const alreadyOnSoldView =
+      currentUrl.includes("/completed") ||
+      currentUrl.includes("/complete") ||
+      currentUrl.includes("/in_progress") ||
+      currentUrl.includes("/sold");
+
+    if (alreadyOnSoldView) {
+      await scrapeCurrentMercariView(
+        currentUrl.includes("in_progress") ? "to_ship" : "shipped"
+      );
+    } else {
+      // Starting on /mypage/listings/active/ -> click "Complete" under Sold, then "In progress"
+      const clickedComplete = await clickSoldNavItem(/^complete\b/i);
+      if (clickedComplete) {
+        await scrapeCurrentMercariView("shipped");
+      }
+      const clickedInProgress = await clickSoldNavItem(/^in progress\b/i);
+      if (clickedInProgress) {
+        await scrapeCurrentMercariView("to_ship");
+      }
+    }
+
+    return results;
+  }
+
+  return results;
+}
+
+async function importMarketplaceSales(marketplace) {
+  if (marketplace !== "poshmark" && marketplace !== "mercari") {
+    throw new Error(`Unsupported sales import marketplace: ${marketplace}`);
+  }
+
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  let targetTab = null;
+
+  if (
+    marketplace === "poshmark" &&
+    activeTab?.id &&
+    activeTab.url &&
+    activeTab.url.includes("poshmark.com") &&
+    (activeTab.url.includes("/order/sales") || activeTab.url.includes("sold_out"))
+  ) {
+    targetTab = activeTab;
+  } else if (
+    marketplace === "mercari" &&
+    activeTab?.id &&
+    activeTab.url &&
+    activeTab.url.includes("mercari.com/mypage/")
+  ) {
+    targetTab = activeTab;
+  } else {
+    const startUrl =
+      marketplace === "poshmark"
+        ? "https://poshmark.com/order/sales"
+        : "https://www.mercari.com/mypage/listings/active/";
+    const created = await chrome.tabs.create({ url: startUrl, active: true });
+    await new Promise((resolve) => {
+      const listener = (tabId, changeInfo) => {
+        if (tabId === created.id && changeInfo.status === "complete") {
+          chrome.tabs.onUpdated.removeListener(listener);
+          setTimeout(resolve, 2200);
+        }
+      };
+      chrome.tabs.onUpdated.addListener(listener);
+      // Safety timeout in case tab already completed
+      setTimeout(() => {
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      }, 15000);
+    });
+    targetTab = created;
+  }
+
+  const injected = await chrome.scripting.executeScript({
+    target: { tabId: targetTab.id },
+    func: scrapeSoldOrdersFromDom,
+    args: [marketplace],
+  });
+
+  const sales = injected?.[0]?.result || [];
+  if (sales.length === 0) {
+    throw new Error(
+      marketplace === "poshmark"
+        ? "No Poshmark sold orders detected. Make sure you are signed into Poshmark on the My Sales page and try again."
+        : "No Mercari sold orders detected. Make sure you are signed into Mercari (My listings → Sold → Complete) and try again."
+    );
+  }
+
+  const config = await getConfig();
+  const base = (
+    config.apiBaseUrl || "https://reseller-command-center-black.vercel.app"
+  ).replace(/\/+$/, "");
+
+  const res = await fetch(`${base}/api/extension/import-sales`, {
+    method: "POST",
+    headers: buildBridgeHeaders(config, true),
+    credentials: "include",
+    body: JSON.stringify({ marketplace, sales }),
+  });
+
+  if (res.status === 401) {
+    throw new Error(
+      "Owner passcode required — enter your Command Center passcode in Connection Settings below."
+    );
+  }
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || `Sales import failed (${res.status})`);
+  }
+
+  await broadcastToCommandCenterTabs({
+    type: "RCC_JOB_COMPLETED",
+    marketplace,
+    sku: `${sales.length} sales`,
+  });
+
+  return { ok: true, scannedCount: sales.length, ...data };
+}
+
 async function linkExistingMatch(payload) {
   const config = await getConfig();
   const base = (
@@ -1019,6 +1486,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             listedPrice: message.payload?.listedPrice,
           });
           sendResponse(linkResult);
+          break;
+        }
+        case "RCC_IMPORT_SALES": {
+          const salesRes = await importMarketplaceSales(message.marketplace);
+          sendResponse(salesRes);
           break;
         }
         default:

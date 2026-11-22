@@ -282,4 +282,48 @@ if (btnScanEl) {
   });
 }
 
+const btnImportPoshSales = document.getElementById("btn-import-posh-sales");
+const btnImportMercariSales = document.getElementById("btn-import-mercari-sales");
+const salesImportStatusEl = document.getElementById("sales-import-status");
+
+async function runSalesImport(marketplace, btn, defaultLabel) {
+  btn.disabled = true;
+  btn.textContent = "Importing...";
+  errorBarEl.style.display = "none";
+  if (salesImportStatusEl) salesImportStatusEl.style.display = "none";
+
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: "RCC_IMPORT_SALES",
+      marketplace,
+    });
+    if (!res?.ok) {
+      errorBarEl.style.display = "block";
+      errorBarEl.textContent = res?.error || `${marketplace} sales import failed`;
+      if (cfgDetailsEl && errorBarEl.textContent.includes("passcode")) {
+        cfgDetailsEl.open = true;
+      }
+      return;
+    }
+    if (salesImportStatusEl) {
+      salesImportStatusEl.style.display = "block";
+      salesImportStatusEl.innerHTML = `<strong>${marketplace.toUpperCase()}:</strong> ${res.message || `Imported ${res.importedCount} sales.`}`;
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = defaultLabel;
+  }
+}
+
+if (btnImportPoshSales) {
+  btnImportPoshSales.addEventListener("click", () =>
+    runSalesImport("poshmark", btnImportPoshSales, "Poshmark Sales")
+  );
+}
+if (btnImportMercariSales) {
+  btnImportMercariSales.addEventListener("click", () =>
+    runSalesImport("mercari", btnImportMercariSales, "Mercari Sales")
+  );
+}
+
 loadState();

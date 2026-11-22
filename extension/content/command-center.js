@@ -7,7 +7,7 @@
  * in 1 click (no toolbar icon click needed!).
  */
 (function initCommandCenterBridge() {
-  const EXT_VERSION = "0.9.9";
+  const EXT_VERSION = "1.0.0";
 
   function announceReady() {
     try {
