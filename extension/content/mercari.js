@@ -1,7 +1,7 @@
 /**
- * Mercari DOM Auto-Filler Content Script (v0.9.6)
+ * Mercari DOM Auto-Filler Content Script (v0.9.8)
  * Targets https://www.mercari.com/sell/
- * Fills up to 12 photos, Title (<=80), Description (<=1000), Brand,
+ * Fills up to 12 photos, Title (<=80), Description (<=1000), Brand (or "No brand / Not sure"),
  * multi-line Condition card (New / Like new / Good / Fair / Poor), Price (whole dollars),
  * disables Mercari Smart pricing (prevents the "$9 floor price" validation error),
  * and auto-clicks the purple "List" button + syncs live URL back to Command Center!
@@ -29,6 +29,134 @@
       return "fair";
     }
     return "good";
+  }
+
+  /**
+   * Selects a Brand on Mercari, or clicks Mercari's "No brand / Not sure" pill
+   * (unbranded) whenever no brand is provided or Mercari doesn't recognize the brand.
+   */
+  async function selectMercariBrand(rawBrand, helpers, debugLog, forceUnbranded = false) {
+    const { waitForSelector, setNativeValue, sleep, clickMatchingOption } = helpers;
+
+    const findBrandInput = () =>
+      document.querySelector(
+        'input[data-testid="Brand"], input[placeholder*="brand" i], input[aria-label*="brand" i], input[name="brand"]'
+      );
+
+    const clickBrandPill = async (patterns) => {
+      const candidates = Array.from(
+        document.querySelectorAll('button, [role="button"], [role="option"], li')
+      );
+      for (const pat of patterns) {
+        const hit = candidates.find((el) => {
+          if (el.closest("#rcc-companion-hud") || el.disabled) return false;
+          const r = el.getBoundingClientRect();
+          if (r.width === 0 || r.height === 0) return false;
+          const txt = (el.textContent || "").trim();
+          return pat.test(txt);
+        });
+        if (hit) {
+          hit.scrollIntoView({ block: "center" });
+          await sleep(150);
+          hit.click();
+          await sleep(350);
+          return (hit.textContent || "").trim();
+        }
+      }
+      return null;
+    };
+
+    const brandInput =
+      findBrandInput() ||
+      (await waitForSelector(
+        [
+          'input[data-testid="Brand"]',
+          'input[placeholder*="brand" i]',
+          'input[aria-label*="brand" i]',
+          'input[name="brand"]',
+        ],
+        1500
+      ));
+
+    // Already has a non-empty brand value and we're not forcing unbranded
+    if (!forceUnbranded && brandInput && brandInput.value && brandInput.value.trim().length > 0) {
+      debugLog.push(`Brand: already filled ("${brandInput.value.trim()}")`);
+      return true;
+    }
+
+    const cleaned = String(rawBrand || "").trim();
+    const isUnbrandedLike =
+      forceUnbranded ||
+      !cleaned ||
+      /^(unbranded|none|n\/a|na|unknown|does not apply|generic|no brand|not sure|other)$/i.test(
+        cleaned
+      );
+
+    // 1. Try matching real brand first (via Suggested brands pill or autocomplete input)
+    if (!isUnbrandedLike && brandInput) {
+      const escaped = cleaned.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const pillHit = await clickBrandPill([new RegExp(`^${escaped}$`, "i")]);
+      if (pillHit) {
+        debugLog.push(`Brand: clicked suggested pill "${pillHit}"`);
+        return true;
+      }
+
+      brandInput.scrollIntoView({ block: "center" });
+      brandInput.focus();
+      brandInput.click();
+      setNativeValue(brandInput, cleaned);
+      await sleep(550);
+      const picked = await clickMatchingOption(cleaned, 1400);
+      await sleep(300);
+      if (picked) {
+        debugLog.push(`Brand: selected "${cleaned}" from dropdown`);
+        return true;
+      }
+      // Clear unrecognized text so Mercari shows "No brand / Not sure" cleanly
+      setNativeValue(brandInput, "");
+      await sleep(250);
+    }
+
+    // 2. Fall back to Mercari's official "No brand / Not sure" pill (unbranded)
+    const noBrandPill = await clickBrandPill([
+      /^no brand\s*\/\s*not sure$/i,
+      /^no brand$/i,
+      /^unbranded$/i,
+    ]);
+    if (noBrandPill) {
+      debugLog.push(`Brand: selected "${noBrandPill}"`);
+      return true;
+    }
+
+    // 3. If the pill wasn't visible, open the Brand input and pick "No brand / Not sure" or "Unbranded"
+    const input2 = findBrandInput();
+    if (input2) {
+      input2.scrollIntoView({ block: "center" });
+      input2.focus();
+      input2.click();
+      await sleep(350);
+      const fromOpen = await clickBrandPill([
+        /^no brand\s*\/\s*not sure$/i,
+        /^no brand$/i,
+        /^unbranded$/i,
+      ]);
+      if (fromOpen) {
+        debugLog.push(`Brand: selected "${fromOpen}" from dropdown`);
+        return true;
+      }
+      setNativeValue(input2, "Unbranded");
+      await sleep(450);
+      const pickedUnbranded =
+        (await clickBrandPill([/^no brand\s*\/\s*not sure$/i, /^unbranded$/i])) ||
+        (await clickMatchingOption("Unbranded", 1200));
+      if (pickedUnbranded) {
+        debugLog.push("Brand: selected Unbranded via search");
+        return true;
+      }
+    }
+
+    debugLog.push("Brand: unable to select brand/unbranded");
+    return false;
   }
 
   /**
@@ -145,7 +273,7 @@
    */
   function detectMercariValidationError() {
     const knownErrorRe =
-      /floor price needs to be|please enter|is required|must be at least|select a condition|add at least one photo|select a category|enter a valid/i;
+      /floor price needs to be|please select|please enter|is required|must be at least|select a condition|add at least one photo|select a category|enter a valid/i;
     const nodes = Array.from(document.querySelectorAll("p, span, div"));
     for (const el of nodes) {
       if (el.closest("#rcc-companion-hud") || el.children.length > 1) continue;
@@ -361,20 +489,9 @@
           await sleep(400);
         }
 
-        // 4. Brand (optional)
-        const brandInput = await waitForSelector(
-          [
-            'input[data-testid="Brand"]',
-            'input[placeholder*="Brand"]',
-            'input[name="brand"]',
-          ],
-          1500
-        );
-        if (brandInput && payload.brand && !brandInput.value) {
-          setNativeValue(brandInput, payload.brand);
-          await sleep(450);
-          await clickMatchingOption(payload.brand, 1200);
-        }
+        // 4. Brand (select real brand or Mercari's "No brand / Not sure" unbranded pill)
+        const brandHelpers = { waitForSelector, setNativeValue, sleep, clickMatchingOption };
+        await selectMercariBrand(payload.brand || "", brandHelpers, debugLog, false);
 
         // 5. Condition card ("New", "Like new", "Good", "Fair", "Poor")
         const targetCond = sc.conditionLabel || payload.condition || "Good";
@@ -408,7 +525,7 @@
         ].join(" · ");
 
         if (debugLog.length > 0) {
-          console.log("[RCC Mercari v0.9.6]", debugLog.join(" | "));
+          console.log("[RCC Mercari v0.9.8]", debugLog.join(" | "));
         }
 
         // 7. Auto-Publish: If Condition was selected, wait for photos to settle & click the purple "List" button!
@@ -422,7 +539,13 @@
 
           await sleep(Math.min(6000, Math.max(1800, uploadedCount * 350)));
 
-          // Double-check Smart pricing is OFF right before submitting
+          // Double-check Brand & Smart pricing right before submitting
+          const brandCheck = document.querySelector(
+            'input[data-testid="Brand"], input[placeholder*="brand" i], input[aria-label*="brand" i], input[name="brand"]'
+          );
+          if (brandCheck && !brandCheck.value.trim()) {
+            await selectMercariBrand("", brandHelpers, debugLog, true);
+          }
           await disableMercariSmartPricing(sleep, debugLog);
 
           const findListBtn = () =>
@@ -443,25 +566,40 @@
             await sleep(1200);
             await clickButtonByText([/^list anyway$/i, /^confirm$/i, /^list item$/i], 2000);
 
-            // Verify Mercari didn't block submission with an inline validation error
-            await sleep(900);
-            if (window.location.pathname.includes("/sell")) {
-              validationError = detectMercariValidationError();
-              if (validationError && /floor price/i.test(validationError)) {
-                debugLog.push(`Retry after error: ${validationError}`);
-                await disableMercariSmartPricing(sleep, debugLog);
-                await sleep(350);
-                const retryBtn = findListBtn();
-                if (retryBtn) {
-                  retryBtn.click();
-                  await sleep(1200);
-                  await clickButtonByText([/^list anyway$/i, /^confirm$/i, /^list item$/i], 1500);
-                  await sleep(900);
-                  validationError = window.location.pathname.includes("/sell")
-                    ? detectMercariValidationError()
-                    : null;
-                }
+            // Verify Mercari didn't block submission with an inline validation error (up to 2 auto-fixes)
+            for (let retry = 0; retry < 2; retry++) {
+              await sleep(900);
+              if (!window.location.pathname.includes("/sell")) {
+                validationError = null;
+                break;
               }
+              validationError = detectMercariValidationError();
+              if (!validationError) break;
+
+              let fixedSomething = false;
+              if (/brand/i.test(validationError)) {
+                debugLog.push(`Auto-fix brand after error: ${validationError}`);
+                await selectMercariBrand("", brandHelpers, debugLog, true);
+                fixedSomething = true;
+              }
+              if (/floor price/i.test(validationError)) {
+                debugLog.push(`Auto-fix smart pricing after error: ${validationError}`);
+                await disableMercariSmartPricing(sleep, debugLog);
+                fixedSomething = true;
+              }
+              if (!fixedSomething) break;
+
+              await sleep(400);
+              const retryBtn = findListBtn();
+              if (!retryBtn) break;
+              retryBtn.scrollIntoView({ block: "center" });
+              retryBtn.click();
+              await sleep(1200);
+              await clickButtonByText([/^list anyway$/i, /^confirm$/i, /^list item$/i], 1500);
+            }
+
+            if (window.location.pathname.includes("/sell") && !validationError) {
+              validationError = detectMercariValidationError();
             }
 
             if (!validationError) {
@@ -544,7 +682,7 @@
           onSecondaryAction:
             !conditionMatched || validationError
               ? async () => {
-                  const txt = `Mercari v0.9.6 Debug (${targetCond}):\n${debugLog.join("\n")}${
+                  const txt = `Mercari v0.9.8 Debug (${targetCond}):\n${debugLog.join("\n")}${
                     validationError ? `\nValidation: ${validationError}` : ""
                   }`;
                   try {
