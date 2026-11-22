@@ -785,18 +785,20 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
         </header>
 
         <main className="flex-1 max-w-[1380px] w-full mx-auto px-4 sm:px-6 py-5 space-y-5">
-        <ChannelStatusStrip
-          mode={data.mode}
-          accounts={data.accounts}
-          channelCounts={data.channelCounts}
-          extensionPendingCount={extensionActionableCount}
-          lastSyncedAt={data.lastSyncedAt}
-          isSyncingEbay={isSyncingEbay}
-          isSyncingEtsy={isSyncingEtsy}
-          onSyncEbay={handleSyncEbay}
-          onSyncEtsy={handleSyncEtsy}
-          onOpenExtensionQueue={() => setActiveTab("extension")}
-        />
+        {activeTab !== "sourcing" && (
+          <ChannelStatusStrip
+            mode={data.mode}
+            accounts={data.accounts}
+            channelCounts={data.channelCounts}
+            extensionPendingCount={extensionActionableCount}
+            lastSyncedAt={data.lastSyncedAt}
+            isSyncingEbay={isSyncingEbay}
+            isSyncingEtsy={isSyncingEtsy}
+            onSyncEbay={handleSyncEbay}
+            onSyncEtsy={handleSyncEtsy}
+            onOpenExtensionQueue={() => setActiveTab("extension")}
+          />
+        )}
 
         {activeTab === "sourcing" ? (
           <SourcingCompsPanel
