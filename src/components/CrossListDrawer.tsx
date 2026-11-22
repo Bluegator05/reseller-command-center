@@ -241,6 +241,10 @@ function CrossListDrawerInner({
   const isComplianceBlocked = complianceIssues.some(
     (i) => i.severity === "block"
   );
+  const existingListingOnTarget = row.cross_listings.find(
+    (c) => c.marketplace === target
+  );
+  const isAlreadyLiveOnTarget = Boolean(existingListingOnTarget);
   const effectiveBlocked = isComplianceBlocked && !overrideCompliance;
   const hasComplianceWarning =
     !isComplianceBlocked &&
@@ -263,7 +267,7 @@ function CrossListDrawerInner({
   };
 
   const handleSubmit = async () => {
-    if (!draft || isBelowFloor || effectiveBlocked) return;
+    if (!draft || isBelowFloor || effectiveBlocked || isAlreadyLiveOnTarget) return;
     setIsSubmitting(true);
     setError(null);
 
@@ -1062,35 +1066,45 @@ function CrossListDrawerInner({
               id="btn-submit-crosslist"
               type="button"
               disabled={
-                !draft || isSubmitting || isBelowFloor || effectiveBlocked
+                !draft ||
+                isSubmitting ||
+                isBelowFloor ||
+                effectiveBlocked ||
+                isAlreadyLiveOnTarget
               }
               onClick={handleSubmit}
               className={`inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-45 transition cursor-pointer ${
                 effectiveBlocked
                   ? "bg-[#B91C1C]"
-                  : "bg-[#14151A] hover:bg-[#272A34]"
+                  : isAlreadyLiveOnTarget
+                    ? "bg-[#0F766E]"
+                    : "bg-[#14151A] hover:bg-[#272A34]"
               }`}
             >
               {isSubmitting ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
               ) : effectiveBlocked ? (
                 <ShieldAlert className="w-3.5 h-3.5" />
+              ) : isAlreadyLiveOnTarget ? (
+                <CheckCircle2 className="w-3.5 h-3.5" />
               ) : (
                 <ArrowRight className="w-3.5 h-3.5" />
               )}
-              {effectiveBlocked
-                ? `Blocked on ${TARGET_CHANNELS.find((c) => c.key === target)?.label}`
-                : isSubmitting
-                  ? isEtsy
-                    ? "Publishing to Etsy..."
-                    : localExtensionReady
-                      ? "Opening & Auto-Filling..."
-                      : "Sending to Auto-Pilot..."
-                  : isEtsy
-                    ? `Publish to Etsy ($${parsedPrice.toFixed(2)})`
-                    : localExtensionReady
-                      ? `Open & Auto-Fill ${TARGET_CHANNELS.find((c) => c.key === target)?.label} ($${parsedPrice.toFixed(2)})`
-                      : `Queue for ${TARGET_CHANNELS.find((c) => c.key === target)?.label} Auto-Pilot ($${parsedPrice.toFixed(2)})`}
+              {isAlreadyLiveOnTarget
+                ? `Already Listed on ${TARGET_CHANNELS.find((c) => c.key === target)?.label}`
+                : effectiveBlocked
+                  ? `Blocked on ${TARGET_CHANNELS.find((c) => c.key === target)?.label}`
+                  : isSubmitting
+                    ? isEtsy
+                      ? "Publishing to Etsy..."
+                      : localExtensionReady
+                        ? "Opening & Auto-Filling..."
+                        : "Sending to Auto-Pilot..."
+                    : isEtsy
+                      ? `Publish to Etsy ($${parsedPrice.toFixed(2)})`
+                      : localExtensionReady
+                        ? `Open & Auto-Fill ${TARGET_CHANNELS.find((c) => c.key === target)?.label} ($${parsedPrice.toFixed(2)})`
+                        : `Queue for ${TARGET_CHANNELS.find((c) => c.key === target)?.label} Auto-Pilot ($${parsedPrice.toFixed(2)})`}
             </button>
           </div>
         </div>

@@ -221,11 +221,16 @@ async function refreshJobsCache(allowAutoPilot = false) {
   }
 }
 
+const dispatchedJobIds = new Set();
+
 /**
  * Opens the target marketplace listing page and dispatches the job payload
  * once the content script finishes loading.
  */
 async function dispatchJobToTab(job, options = {}) {
+  if (job?.id && dispatchedJobIds.has(job.id)) {
+    return { ok: true, alreadyDispatched: true };
+  }
   const targetUrl =
     job.action === "delist" && job.payload?.externalUrl
       ? job.payload.externalUrl
@@ -235,6 +240,7 @@ async function dispatchJobToTab(job, options = {}) {
     throw new Error(`Unsupported extension marketplace: ${job.marketplace}`);
   }
 
+  if (job?.id) dispatchedJobIds.add(job.id);
   await updateJobStatus(job.id, "processing");
 
   const tab = await chrome.tabs.create({ url: targetUrl, active: true });
@@ -753,6 +759,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         case "RCC_LINK_EXISTING_MATCH": {
           const linkResult = await linkExistingMatch(message.payload || {});
+          await broadcastToCommandCenterTabs({
+            type: "RCC_JOB_COMPLETED",
+            marketplace: message.payload?.marketplace || "",
+            sku: message.payload?.sku || "",
+            externalUrl: message.payload?.externalUrl || "",
+            listedPrice: message.payload?.listedPrice,
+          });
           sendResponse(linkResult);
           break;
         }

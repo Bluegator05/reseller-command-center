@@ -261,6 +261,52 @@ export async function POST(request: Request) {
       targetMarketplace: marketplace,
     });
 
+    if (action === "create" && useLive && supabase) {
+      const [existingListingRes, existingJobRes] = await Promise.all([
+        supabase
+          .from("marketplace_listings")
+          .select("id, external_url, status")
+          .eq("item_id", item.id)
+          .eq("marketplace", marketplace)
+          .eq("status", "active")
+          .maybeSingle(),
+        supabase
+          .from("channel_jobs")
+          .select("id, status")
+          .eq("item_id", item.id)
+          .eq("marketplace", marketplace)
+          .eq("action", "create")
+          .in("status", ["pending", "processing", "needs_user_confirm"])
+          .maybeSingle(),
+      ]);
+
+      if (existingListingRes.data) {
+        if (targetIds.length === 1) {
+          return NextResponse.json(
+            {
+              error: `Already listed on ${marketplace.toUpperCase()} — unlink it first if you intend to relist.`,
+              alreadyListed: true,
+            },
+            { status: 409, headers: CORS_HEADERS }
+          );
+        }
+        continue;
+      }
+
+      if (existingJobRes.data) {
+        if (targetIds.length === 1) {
+          return NextResponse.json(
+            {
+              error: `This item is already queued / in progress for ${marketplace.toUpperCase()}.`,
+              alreadyQueued: true,
+            },
+            { status: 409, headers: CORS_HEADERS }
+          );
+        }
+        continue;
+      }
+    }
+
     if (action === "create" && !body.overrideCompliance) {
       const compliance = evaluateMarketplaceCompliance({
         item,

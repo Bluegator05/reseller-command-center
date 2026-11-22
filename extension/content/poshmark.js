@@ -183,6 +183,98 @@
     return changed;
   }
 
+  function tokenizeForDupCheck(raw) {
+    const stop = new Set([
+      "the", "and", "for", "with", "from", "new", "nwt", "nwot", "euc", "guc",
+      "size", "mens", "womens", "vintage", "lot", "of", "in", "on", "to", "by",
+    ]);
+    return norm(raw)
+      .split(/\s+/)
+      .filter((t) => t.length >= 2 && !stop.has(t));
+  }
+
+  function dupSimilarity(a, b) {
+    const ta = new Set(tokenizeForDupCheck(a));
+    const tb = new Set(tokenizeForDupCheck(b));
+    if (ta.size === 0 || tb.size === 0) return 0;
+    let inter = 0;
+    for (const t of ta) {
+      if (tb.has(t)) inter += 1;
+    }
+    const dice = (2 * inter) / (ta.size + tb.size);
+    const contain = inter / Math.min(ta.size, tb.size);
+    return dice * 0.65 + contain * 0.35;
+  }
+
+  /**
+   * Checks the seller's own live Poshmark closet (same-origin) BEFORE creating a
+   * listing so we never create a duplicate if it's already live on Poshmark!
+   */
+  async function findExistingInPoshmarkCloset(targetTitles) {
+    try {
+      const closetLink = Array.from(document.querySelectorAll('a[href*="/closet/"]')).find(
+        (a) => /\/closet\/[a-z0-9_.-]+/i.test(a.getAttribute("href") || "")
+      );
+      if (!closetLink) return null;
+      const m = (closetLink.getAttribute("href") || "").match(/\/closet\/([a-z0-9_.-]+)/i);
+      if (!m) return null;
+      const username = m[1];
+
+      const res = await fetch(
+        `/closet/${encodeURIComponent(username)}?availability=available`,
+        { credentials: "include" }
+      );
+      if (!res.ok) return null;
+      const html = await res.text();
+      const doc = new DOMParser().parseFromString(html, "text/html");
+
+      const links = Array.from(doc.querySelectorAll('a[href*="/listing/"]'));
+      const seen = new Set();
+      let bestMatch = null;
+      let bestScore = 0;
+
+      for (const link of links) {
+        const href = link.getAttribute("href") || "";
+        const idMatch = href.match(/([0-9a-f]{24})(?:[/?#]|$)/i);
+        const extId = idMatch ? idMatch[1] : href;
+        if (!extId || seen.has(extId)) continue;
+        seen.add(extId);
+
+        const card = link.closest('[data-et-name="listing"], .card, .tile, article, li') || link.parentElement;
+        const cardText = (card?.textContent || "").toLowerCase();
+        if (/\bsold\b|not for sale/.test(cardText)) continue;
+
+        const titleEl = card?.querySelector(".tile__title, [data-et-name='listing_title'], a.tile__title");
+        const title = (
+          titleEl?.textContent ||
+          link.getAttribute("title") ||
+          link.querySelector("img")?.getAttribute("alt") ||
+          link.textContent ||
+          ""
+        )
+          .replace(/\s+/g, " ")
+          .trim();
+        if (title.length < 4) continue;
+
+        for (const target of targetTitles) {
+          if (!target) continue;
+          const score = dupSimilarity(title, target);
+          if (score > bestScore) {
+            bestScore = score;
+            const fullUrl = href.startsWith("http")
+              ? href.split("?")[0]
+              : `https://poshmark.com${href.split("?")[0]}`;
+            bestMatch = { externalListingId: extId, externalUrl: fullUrl, title, score };
+          }
+        }
+      }
+
+      return bestScore >= 0.78 ? bestMatch : null;
+    } catch {
+      return null;
+    }
+  }
+
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type !== "RCC_EXECUTE_JOB" || message.job?.marketplace !== "poshmark") {
       return;
@@ -204,6 +296,42 @@
       const shouldSaveDraft = Boolean(message.autoPilot && message.autoPilotSaveDraft);
 
       try {
+        showRccHud({
+          title: `${isAutoPilot ? "Auto-Pilot · " : ""}Poshmark (${payload.sku || "SKU"})`,
+          message: `Checking your Poshmark closet for duplicates before listing...`,
+          tone: "info",
+        });
+
+        // 0. Live Duplicate Protection: check if this item is ALREADY active in your Poshmark closet!
+        const existingDup = await findExistingInPoshmarkCloset([
+          payload.mappedTitle,
+          job.item_title,
+        ]);
+        if (existingDup) {
+          await chrome.runtime.sendMessage({
+            type: "RCC_LINK_EXISTING_MATCH",
+            payload: {
+              itemId: job.item_id,
+              marketplace: "poshmark",
+              externalUrl: existingDup.externalUrl,
+              externalListingId: existingDup.externalListingId,
+              listedPrice: Math.max(3, Math.round(Number(payload.suggestedPrice || 0))),
+              sku: payload.sku || job.item_sku || "",
+            },
+          });
+          showRccHud({
+            title: `Already Listed on Poshmark! (Duplicate Prevented)`,
+            message: `Found "${existingDup.title}" already active in your closet. Linked it to your Command Center instead of creating a duplicate!`,
+            tone: "success",
+          });
+          if (isAutoPilot) {
+            await sleep(2000);
+            chrome.runtime.sendMessage({ type: "RCC_CLOSE_SENDER_TAB" });
+          }
+          sendResponse({ ok: true, duplicatePrevented: true });
+          return;
+        }
+
         // Tell background worker right away to watch this tab for successful publish redirect!
         chrome.runtime.sendMessage({
           type: "RCC_WATCH_PUBLISH_SUCCESS",
@@ -216,7 +344,7 @@
 
         showRccHud({
           title: `${isAutoPilot ? "Auto-Pilot · " : ""}Poshmark (${payload.sku || "SKU"})`,
-          message: `Uploading ${(payload.imageUrls || []).length} eBay photos & filling category, size, condition, and details...`,
+          message: `No duplicate found ✓ Uploading ${(payload.imageUrls || []).length} eBay photos & filling category, size, condition, and details...`,
           tone: "info",
         });
 
@@ -341,7 +469,6 @@
               );
             }
           } else {
-            // Some Poshmark categories (e.g., certain Home items) auto-hide Size when not required
             sizeMatched = true;
             debugLog.push("Size: not required for this category");
           }
@@ -378,7 +505,7 @@
           await sleep(350);
         }
 
-        // 6. Brand & Whole-Dollar Prices (closes Listing Price modal cleanly with Done!)
+        // 6. Brand & Whole-Dollar Prices (Original Price = 0 so Poshmark hides strikethrough!)
         const brandInput = await waitForSelector(
           ['input[placeholder*="Enter the Brand"]', 'input[name="brand"]'],
           3000
@@ -400,8 +527,9 @@
             ['.modal input[data-vv-name="originalPrice"]', 'input[data-vv-name="originalPrice"]', 'input[name="original_price"]'],
             1200
           );
-          if (modalOrig && payload.targetPrice) {
-            setNativeValue(modalOrig, Math.max(3, Math.round(Number(payload.targetPrice))));
+          if (modalOrig) {
+            // Setting Original Price to 0 hides the strikethrough price on Poshmark (avoids "$8 ~~$7~~"!)
+            setNativeValue(modalOrig, "0");
           }
 
           const modalPrice =
@@ -411,7 +539,6 @@
           setNativeValue(modalPrice, Math.max(3, Math.round(Number(payload.suggestedPrice))));
 
           await sleep(350);
-          // Click the black "Done" button in the Listing Price modal footer
           await clickButtonByText([/^done$/i], 2000);
           await sleep(450);
         }
