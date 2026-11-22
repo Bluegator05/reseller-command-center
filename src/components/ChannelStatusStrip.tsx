@@ -42,14 +42,6 @@ const CHANNEL_ORDER: ChannelMeta[] = [
     isExtension: false,
   },
   {
-    key: "etsy",
-    label: "Etsy",
-    integrationMode: "Open API v3",
-    defaultFee: 9.5,
-    markupPct: 5,
-    isExtension: false,
-  },
-  {
     key: "poshmark",
     label: "Poshmark",
     integrationMode: "MV3 Extension",
@@ -64,6 +56,14 @@ const CHANNEL_ORDER: ChannelMeta[] = [
     defaultFee: 10,
     markupPct: 5,
     isExtension: true,
+  },
+  {
+    key: "etsy",
+    label: "Etsy",
+    integrationMode: "Open API v3",
+    defaultFee: 9.5,
+    markupPct: 5,
+    isExtension: false,
   },
   {
     key: "facebook",

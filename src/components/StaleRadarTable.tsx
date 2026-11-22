@@ -110,9 +110,9 @@ const MATRIX_CHANNELS: Array<{
   markupPct: number;
 }> = [
   { key: "ebay", label: "eBay", feePct: 13.25, markupPct: 0 },
-  { key: "etsy", label: "Etsy", feePct: 9.5, markupPct: 5 },
   { key: "poshmark", label: "Poshmark", feePct: 20, markupPct: 12 },
   { key: "mercari", label: "Mercari", feePct: 10, markupPct: 5 },
+  { key: "etsy", label: "Etsy", feePct: 9.5, markupPct: 5 },
   { key: "facebook", label: "Facebook", feePct: 5, markupPct: 0 },
 ];
 
@@ -1032,7 +1032,7 @@ export function StaleRadarTable({
                       .length;
 
                   const missingChannels = (
-                    ["etsy", "poshmark", "mercari", "facebook"] as CrossListTarget[]
+                    ["poshmark", "mercari", "etsy", "facebook"] as CrossListTarget[]
                   ).filter(
                     (ch) =>
                       !row.cross_listings.some((c) => c.marketplace === ch) &&
