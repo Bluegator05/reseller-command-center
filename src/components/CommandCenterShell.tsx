@@ -79,6 +79,18 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
   const [lockEnabled, setLockEnabled] = useState(false);
   const [mountNow] = useState(() => Date.now());
   const [sentOfferIds, setSentOfferIds] = useState<Set<string>>(new Set());
+  const [passedOfferIds, setPassedOfferIds] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const raw = window.localStorage.getItem("rcc_passed_offer_ids_v1");
+      const parsed = raw ? (JSON.parse(raw) as unknown) : [];
+      return Array.isArray(parsed)
+        ? parsed.filter((id): id is string => typeof id === "string")
+        : [];
+    } catch {
+      return [];
+    }
+  });
   const [eligibleOfferExternalIds, setEligibleOfferExternalIds] =
     useState<Set<string> | null>(null);
   const [isCheckingEligible, setIsCheckingEligible] = useState(false);
@@ -553,6 +565,22 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
 
   const staleCount = data.items.filter((i) => i.is_stale).length;
 
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        "rcc_passed_offer_ids_v1",
+        JSON.stringify(passedOfferIds)
+      );
+    } catch {
+      // ignore
+    }
+  }, [passedOfferIds]);
+
+  const passedOfferSet = useMemo(
+    () => new Set(passedOfferIds),
+    [passedOfferIds]
+  );
+
   const eligibleOfferRows = useMemo(() => {
     const cutoff = mountNow - 96 * 60 * 60 * 1000;
     const recentlySent = new Set<string>(sentOfferIds);
@@ -568,6 +596,7 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
       .filter((row) => {
         if (row.is_at_floor) return false;
         if (recentlySent.has(row.listing_id)) return false;
+        if (passedOfferSet.has(row.listing_id)) return false;
         if (eligibleOfferExternalIds !== null) {
           return Boolean(
             row.external_listing_id &&
@@ -577,7 +606,14 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
         return row.watchers_count > 0;
       })
       .sort((a, b) => b.watchers_count - a.watchers_count);
-  }, [data.items, data.recentJobs, eligibleOfferExternalIds, mountNow, sentOfferIds]);
+  }, [
+    data.items,
+    data.recentJobs,
+    eligibleOfferExternalIds,
+    mountNow,
+    passedOfferSet,
+    sentOfferIds,
+  ]);
 
   const extensionActionableCount = data.extensionJobs.filter(
     (j) =>
@@ -967,6 +1003,9 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
         ) : activeTab === "offers" ? (
           <WatcherOffersPanel
             eligibleRows={eligibleOfferRows}
+            passedCount={
+              data.items.filter((i) => passedOfferSet.has(i.listing_id)).length
+            }
             isLive={isLiveMode}
             isCheckingEligible={isCheckingEligible}
             eligibleChecked={eligibleChecked}
@@ -987,6 +1026,26 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
                 }
                 return next;
               });
+            }}
+            onPassOffer={(row) => {
+              setPassedOfferIds((prev) =>
+                prev.includes(row.listing_id)
+                  ? prev
+                  : [...prev, row.listing_id]
+              );
+              pushToast(
+                "info",
+                `Passed Offer · ${row.sku}`,
+                "Removed from your Offers queue. Click 'Restore passed' anytime to bring it back."
+              );
+            }}
+            onRestorePassedOffers={() => {
+              setPassedOfferIds([]);
+              pushToast(
+                "info",
+                "Passed Offers Restored",
+                "Previously skipped items are back in your Offers queue."
+              );
             }}
           />
         ) : activeTab === "radar" ? (

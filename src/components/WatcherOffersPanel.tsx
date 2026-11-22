@@ -7,15 +7,18 @@ import {
   Eye,
   Loader2,
   RefreshCw,
+  RotateCcw,
   Search,
   Send,
   Sparkles,
+  X,
 } from "lucide-react";
 import { computeClampedPriceDrop } from "@/lib/stale-engine";
 import type { EbayActionRequest, StaleRadarRow } from "@/lib/types";
 
 interface WatcherOffersPanelProps {
   eligibleRows: StaleRadarRow[];
+  passedCount: number;
   isLive: boolean;
   isCheckingEligible: boolean;
   eligibleChecked: boolean;
@@ -23,6 +26,8 @@ interface WatcherOffersPanelProps {
   onRefreshEligible: () => Promise<void>;
   onSendOffer: (req: EbayActionRequest) => Promise<void>;
   onMarkSent: (rows: StaleRadarRow[]) => void;
+  onPassOffer: (row: StaleRadarRow) => void;
+  onRestorePassedOffers: () => void;
 }
 
 function fmtMoney(n: number): string {
@@ -31,6 +36,7 @@ function fmtMoney(n: number): string {
 
 export function WatcherOffersPanel({
   eligibleRows,
+  passedCount,
   isLive,
   isCheckingEligible,
   eligibleChecked,
@@ -38,6 +44,8 @@ export function WatcherOffersPanel({
   onRefreshEligible,
   onSendOffer,
   onMarkSent,
+  onPassOffer,
+  onRestorePassedOffers,
 }: WatcherOffersPanelProps) {
   const [offerPct, setOfferPct] = useState<number>(10);
   const [search, setSearch] = useState("");
@@ -116,6 +124,18 @@ export function WatcherOffersPanel({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {passedCount > 0 && (
+            <button
+              type="button"
+              onClick={onRestorePassedOffers}
+              title="Bring back offers you previously passed on"
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[#E4E4DD] bg-white text-xs font-medium text-[#5C606B] hover:text-[#14151A] hover:border-[#0F766E] transition cursor-pointer"
+            >
+              <RotateCcw className="w-3 h-3" />
+              <span>Restore {passedCount} passed</span>
+            </button>
+          )}
+
           {isLive && (
             <button
               type="button"
@@ -292,24 +312,37 @@ export function WatcherOffersPanel({
                   </div>
                 </div>
 
-                <button
-                  type="button"
-                  disabled={isBusy || isRowSending}
-                  onClick={() => void fireOffer([row])}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold transition cursor-pointer bg-white border border-[#DDE2DF] text-[#14151A] hover:border-[#0F766E] hover:bg-[#ECFDF5] hover:text-[#0F766E] disabled:opacity-50 shrink-0"
-                >
-                  {isRowSending ? (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>Sending…</span>
-                    </>
-                  ) : (
-                    <>
-                      <Send className="w-3.5 h-3.5" />
-                      <span>Send {fmtMoney(calc.nextPrice)}</span>
-                    </>
-                  )}
-                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    disabled={isBusy || isRowSending}
+                    onClick={() => onPassOffer(row)}
+                    title="Pass on sending an offer and remove from this list"
+                    className="inline-flex items-center gap-1 px-2.5 py-2 rounded-lg text-xs font-semibold transition cursor-pointer bg-white border border-[#E4E4DD] text-[#5C606B] hover:border-[#B91C1C] hover:bg-[#FEF2F2] hover:text-[#B91C1C] disabled:opacity-50"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                    <span>Pass</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isBusy || isRowSending}
+                    onClick={() => void fireOffer([row])}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold transition cursor-pointer bg-white border border-[#DDE2DF] text-[#14151A] hover:border-[#0F766E] hover:bg-[#ECFDF5] hover:text-[#0F766E] disabled:opacity-50"
+                  >
+                    {isRowSending ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Sending…</span>
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-3.5 h-3.5" />
+                        <span>Send {fmtMoney(calc.nextPrice)}</span>
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
             );
           })}
