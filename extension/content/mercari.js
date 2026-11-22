@@ -739,19 +739,98 @@
           setNativeValue(descInput, String(payload.descriptionPlain).slice(0, 1000));
         }
 
-        // Wait briefly for Mercari's smart auto-category & shipping recommendation to settle
-        await sleep(1000);
+        // Wait for Mercari's smart auto-category & shipping recommendation to settle
+        await sleep(1800);
 
         const debugLog = [];
 
-        // 3. Category (if Mercari didn't already auto-populate it)
+        // Helper: detect if Mercari already auto-populated Category (e.g. "Home > Seasonal decor > ...")
+        const getMercariCategoryText = () => {
+          const direct = document.querySelector(
+            '[data-testid="CategoryDropdown"], select[data-testid="CategoryId"], div[data-testid="Category"], button[aria-label*="Category"]'
+          );
+          if (direct) {
+            const t = (direct.value || direct.textContent || "").replace(/\s+/g, " ").trim();
+            if (t && !/^select category$/i.test(t) && !/^category$/i.test(t)) return t;
+          }
+          // Locate the "Category" label and inspect the dropdown box right next to / below it
+          const catLabel = Array.from(
+            document.querySelectorAll("label, p, span, div, h3, h4")
+          ).find((el) => {
+            if (el.closest("#rcc-companion-hud") || el.children.length > 0) return false;
+            return /^category$/i.test((el.textContent || "").trim());
+          });
+          if (catLabel) {
+            let box = catLabel.parentElement;
+            for (let d = 0; d < 3 && box; d++) {
+              const ctrl = Array.from(
+                box.querySelectorAll('button, input, [role="button"], [role="combobox"], div')
+              ).find((c) => {
+                if (c === catLabel || c.contains(catLabel)) return false;
+                const r = c.getBoundingClientRect();
+                if (r.width < 120 || r.height < 28 || r.height > 76) return false;
+                const t = (c.value || c.textContent || "").replace(/\s+/g, " ").trim();
+                return t.includes(">") && t.length < 140;
+              });
+              if (ctrl) {
+                return (ctrl.value || ctrl.textContent || "").replace(/\s+/g, " ").trim();
+              }
+              box = box.parentElement;
+            }
+          }
+          return "";
+        };
+
+        // Helper: if Mercari's Category modal was left open mid-tree, click "Other" (or "All ...") to finish & unlock Shipping
+        const finishOpenCategoryModal = async () => {
+          for (let guard = 0; guard < 3; guard++) {
+            const modalHeader = Array.from(
+              document.querySelectorAll("h1, h2, h3, h4, div, p, span")
+            ).find((el) => {
+              if (el.closest("#rcc-companion-hud") || el.children.length > 0) return false;
+              const r = el.getBoundingClientRect();
+              if (r.width === 0 || r.height === 0) return false;
+              // Modal header "Category" is centered near top of the modal dialog
+              return /^category$/i.test((el.textContent || "").trim()) && r.left > 200;
+            });
+            if (!modalHeader) break;
+            let modal = modalHeader.parentElement;
+            for (let up = 0; up < 5 && modal && modal.getBoundingClientRect().height < 260; up++) {
+              modal = modal.parentElement;
+            }
+            if (!modal) break;
+            const fallbackRow = Array.from(
+              modal.querySelectorAll('button, li, [role="option"], [role="button"], div')
+            ).find((el) => {
+              const r = el.getBoundingClientRect();
+              if (r.width < 100 || r.height < 24 || r.height > 72) return false;
+              const t = (el.textContent || "").replace(/\s+/g, " ").trim();
+              return /^other$/i.test(t) || /^all\s+[a-z]/i.test(t);
+            });
+            if (fallbackRow) {
+              fallbackRow.click();
+              debugLog.push(`Category modal: finished via "${(fallbackRow.textContent || "").trim()}"`);
+              await sleep(500);
+            } else {
+              // Close button fallback if nothing selectable
+              const closeBtn = modal.querySelector('button[aria-label*="close" i], button');
+              if (closeBtn) closeBtn.click();
+              await sleep(400);
+              break;
+            }
+          }
+        };
+
+        // 3. Category — NEVER clobber Mercari's smart auto-filled category ("A > B > C")!
         const catLevels = [sc.department, sc.category, sc.subcategory].filter(Boolean);
-        const catEl = document.querySelector(
-          '[data-testid="CategoryDropdown"], select[data-testid="CategoryId"], div[data-testid="Category"]'
-        );
-        const catTxt = (catEl?.textContent || "").trim();
-        if (catEl && catTxt && !/select category/i.test(catTxt)) {
-          debugLog.push(`Category: Mercari auto-filled ("${catTxt.slice(0, 40)}")`);
+        let autoCatTxt = getMercariCategoryText();
+        if (!autoCatTxt) {
+          // Give Mercari's smart category one more beat if still loading
+          await sleep(800);
+          autoCatTxt = getMercariCategoryText();
+        }
+        if (autoCatTxt) {
+          debugLog.push(`Category: Mercari auto-filled ("${autoCatTxt.slice(0, 50)}")`);
         } else if (catLevels.length > 0) {
           await selectDropdownSequence(
             [
@@ -765,6 +844,8 @@
             debugLog
           );
           await sleep(400);
+          await finishOpenCategoryModal();
+          await sleep(600);
         }
 
         // 4. Brand (select real brand or Mercari's "No brand / Not sure" unbranded pill)
