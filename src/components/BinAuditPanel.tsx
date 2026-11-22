@@ -73,6 +73,8 @@ function normalizeExplicitBin(raw: string): string | null {
   );
   if (garageBin) return `G${garageBin[1]}`;
 
+  if (/\bcloset\b/i.test(cleaned)) return "Closet";
+  if (/\brack\b/i.test(cleaned)) return "Rack";
   if (/^clothes?$/i.test(cleaned)) return "Clothes";
 
   return cleaned;
@@ -82,9 +84,11 @@ function normalizeExplicitBin(raw: string): string | null {
  * Parses custom reseller SKUs into clean physical locations:
  *  1) Any "Shelf <Letter>" anywhere in SKU -> "Shelf A", "Shelf E", "Shelf F", ...
  *  2) Garage bins G1–G9 anywhere in SKU    -> "G1", "G2", "G3", "G4", "G5", ...
- *  3) Explicit named containers (Tote, Rack, Closet, Box, Drawer, Tub, Cabinet, Bay)
- *  4) Clothing without a shelf (numeric-only SKUs or apparel items) -> "Clothes"
- *  5) Punctuation/asterisk-only or unlocated items -> "Unassigned"
+ *  3) Any "Closet" anywhere in SKU         -> "Closet" (all floor items in shipping closet)
+ *  4) Any "Rack" anywhere in SKU           -> "Rack"   (all items on shipping rack)
+ *  5) Other explicit named containers (Tote, Box, Drawer, Tub, Cabinet, Bay)
+ *  6) Clothing without a shelf (numeric-only SKUs or apparel items) -> "Clothes"
+ *  7) Punctuation/asterisk-only or unlocated items -> "Unassigned"
  */
 function parseCustomSkuLocation(
   skuRaw: string | null | undefined,
@@ -116,6 +120,7 @@ function parseCustomSkuLocation(
         firstToken &&
         !/^shelf\b/i.test(firstToken) &&
         !/^G[1-9]$/i.test(firstToken) &&
+        !/^(?:closet|rack)\b/i.test(firstToken) &&
         !/^\d+$/.test(firstToken)
       ) {
         source = firstToken;
@@ -163,9 +168,17 @@ function parseCustomSkuLocation(
     };
   }
 
-  // Priority 3: Other explicit named containers (ignores "/16 storage" count notes)
+  // Priority 3: Shipping Closet & Shipping Rack (each grouped into 1 unified bin)
+  if (/\bcloset\b/i.test(sku)) {
+    return { bin: "Closet", source, dateStr, itemNumber: null };
+  }
+  if (/\brack\b/i.test(sku)) {
+    return { bin: "Rack", source, dateStr, itemNumber: null };
+  }
+
+  // Priority 4: Other explicit named containers (ignores "/16 storage" count notes)
   const namedBinMatch = sku.match(
-    /\b((?:tote|rack|closet|box|drawer|tub|cabinet|bay)\s*[-#:]?\s*[A-Za-z0-9]+)\b/i
+    /\b((?:tote|box|drawer|tub|cabinet|bay)\s*[-#:]?\s*[A-Za-z0-9]+)\b/i
   );
   if (namedBinMatch) {
     const label = namedBinMatch[1]
@@ -180,7 +193,7 @@ function parseCustomSkuLocation(
     return { bin: formatted, source, dateStr, itemNumber: null };
   }
 
-  // Priority 4: Clothing without a Shelf / Garage bin -> "Clothes"
+  // Priority 5: Clothing without a Shelf / Garage bin -> "Clothes"
   // Strip storage count notes like "(1 Garage / 7 storage)", dates, and punctuation/asterisks
   const cleanedTokensStr = sku
     .replace(/\([^)]*(?:garage|storage)[^)]*\)/gi, " ")
@@ -210,9 +223,10 @@ function parseCustomSkuLocation(
 function getBinSortRank(bin: string): number {
   if (/^Shelf\b/i.test(bin)) return 0;
   if (/^G[1-9]\d?$/i.test(bin)) return 1;
-  if (bin === "Clothes") return 2;
-  if (bin === "Unassigned") return 4;
-  return 3;
+  if (bin === "Closet" || bin === "Rack") return 2;
+  if (bin === "Clothes") return 3;
+  if (bin === "Unassigned") return 5;
+  return 4;
 }
 
 export function BinAuditPanel({
@@ -376,10 +390,10 @@ export function BinAuditPanel({
                 {activeItems.length + draftItems.length} SKUs)
               </h2>
               <p className="text-xs text-[#5C606B] mt-0.5">
-                Grouped by <strong>Shelf A–Z</strong>, Garage bins{" "}
-                <strong>G1–G5</strong>, and <strong>Clothes</strong>{" "}
-                (number-labeled rotating boxes). Click any location to expand
-                everything stored there.
+                Grouped by <strong>Shelf A–Z</strong>, Garage{" "}
+                <strong>G1–G5</strong>, <strong>Closet</strong>,{" "}
+                <strong>Rack</strong>, and <strong>Clothes</strong>. Click any
+                location to expand everything stored there.
               </p>
             </div>
           </div>
@@ -469,10 +483,13 @@ export function BinAuditPanel({
             const isUnassigned = b.bin === "Unassigned";
             const isGarage = /^G[1-9]\d?$/i.test(b.bin);
             const isClothes = b.bin === "Clothes";
+            const isClosetOrRack = b.bin === "Closet" || b.bin === "Rack";
             const badgeClass = isUnassigned
               ? "bg-[#E5E7EB] text-[#4B5563]"
               : isGarage
               ? "bg-[#1D4ED8] text-white"
+              : isClosetOrRack
+              ? "bg-[#B45309] text-white"
               : isClothes
               ? "bg-[#6D28D9] text-white"
               : "bg-[#0F766E] text-white";
@@ -507,6 +524,11 @@ export function BinAuditPanel({
                     {isGarage && (
                       <span className="px-1.5 py-0.5 rounded bg-[#DBEAFE] text-[#1E40AF] text-[10px] font-semibold">
                         Garage
+                      </span>
+                    )}
+                    {isClosetOrRack && (
+                      <span className="px-1.5 py-0.5 rounded bg-[#FEF3C7] text-[#92400E] text-[10px] font-semibold">
+                        {b.bin === "Closet" ? "Shipping Closet" : "Shipping Rack"}
                       </span>
                     )}
                     <span className="text-xs font-mono font-semibold text-[#14151A]">
