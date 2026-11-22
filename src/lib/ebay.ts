@@ -277,13 +277,18 @@ export interface EbayFullItemDetails {
   condition: string | null;
   categoryHint: string | null;
   itemSpecifics: Record<string, string[]>;
+  weightOz: number | null;
+  lengthIn: number | null;
+  widthIn: number | null;
+  heightIn: number | null;
+  shippingProfileName: string | null;
+  shippingType: string | null;
 }
 
 /**
  * Fetches full listing details from eBay Trading API `GetItem` — including ALL
  * full-resolution photos (`<PictureURL>` array, up to 24), full HTML/plain
- * description, Brand, and Item Specifics (`GetMyeBaySelling` only returns 1
- * thumbnail `<GalleryURL>` and no description).
+ * description, Brand, Item Specifics, and real ShippingPackageDetails weight/dims.
  */
 export async function fetchEbayItemDetails(
   itemId: string
@@ -350,6 +355,32 @@ export async function fetchEbayItemDetails(
     const categoryBlock = extractXmlTag(itemBlock, "PrimaryCategory") || "";
     const categoryHint = extractXmlTag(categoryBlock, "CategoryName");
 
+    // Extract live package weight & dimensions from ShippingPackageDetails / CalculatedShippingRate
+    const pkgBlock =
+      extractXmlTag(itemBlock, "ShippingPackageDetails") ||
+      extractXmlTag(itemBlock, "CalculatedShippingRate") ||
+      "";
+    const wMajor = Number(extractXmlTag(pkgBlock, "WeightMajor") || 0);
+    const wMinor = Number(extractXmlTag(pkgBlock, "WeightMinor") || 0);
+    const totalOz = wMajor * 16 + wMinor;
+    const weightOz =
+      Number.isFinite(totalOz) && totalOz > 0 ? Math.round(totalOz) : null;
+
+    const rawLen = Number(extractXmlTag(pkgBlock, "PackageLength") || 0);
+    const rawWid = Number(extractXmlTag(pkgBlock, "PackageWidth") || 0);
+    const rawHgt = Number(extractXmlTag(pkgBlock, "PackageDepth") || 0);
+    const lengthIn = Number.isFinite(rawLen) && rawLen > 0 ? rawLen : null;
+    const widthIn = Number.isFinite(rawWid) && rawWid > 0 ? rawWid : null;
+    const heightIn = Number.isFinite(rawHgt) && rawHgt > 0 ? rawHgt : null;
+
+    const shipProfileBlock = extractXmlTag(itemBlock, "SellerShippingProfile") || "";
+    const shippingProfileName = extractXmlTag(
+      shipProfileBlock,
+      "ShippingProfileName"
+    );
+    const shipDetailsBlock = extractXmlTag(itemBlock, "ShippingDetails") || "";
+    const shippingType = extractXmlTag(shipDetailsBlock, "ShippingType");
+
     return {
       itemId: cleanId,
       imageUrls,
@@ -359,6 +390,12 @@ export async function fetchEbayItemDetails(
       condition,
       categoryHint,
       itemSpecifics,
+      weightOz,
+      lengthIn,
+      widthIn,
+      heightIn,
+      shippingProfileName,
+      shippingType,
     };
   } catch (err) {
     console.warn(`[ebay] GetItem(${cleanId}) warning:`, err);

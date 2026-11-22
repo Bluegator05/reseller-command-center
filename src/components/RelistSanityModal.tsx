@@ -50,6 +50,7 @@ export function RelistSanityModal({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            itemId: row.item_id,
             sku: row.sku,
             title: row.title,
             brand: row.brand,
@@ -65,6 +66,9 @@ export function RelistSanityModal({
             promotedAdRatePct: row.promoted_ad_rate_pct,
             relistCount: row.relist_count,
             weightOz: row.weight_oz,
+            lengthIn: row.length_in,
+            widthIn: row.width_in,
+            heightIn: row.height_in,
             imageUrls: row.image_urls,
             externalListingId: row.external_listing_id,
           }),

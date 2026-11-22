@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { fetchEbayItemDetails, isEbayConfigured } from "@/lib/ebay";
 import { generateGeminiJson, getGeminiApiKey } from "@/lib/gemini-client";
 import { roundCurrency } from "@/lib/stale-engine";
+import { getSupabaseServerClient, isSupabaseConfigured } from "@/lib/supabase";
 
 export const maxDuration = 30;
 
@@ -32,6 +33,7 @@ export interface RelistSanityCheckResponse {
 }
 
 interface RelistCheckBody {
+  itemId?: string;
   sku: string;
   title: string;
   brand?: string | null;
@@ -47,6 +49,9 @@ interface RelistCheckBody {
   promotedAdRatePct?: number;
   relistCount?: number;
   weightOz?: number | null;
+  lengthIn?: number | null;
+  widthIn?: number | null;
+  heightIn?: number | null;
   imageUrls?: string[];
   externalListingId?: string | null;
 }
@@ -74,8 +79,17 @@ export async function POST(request: Request) {
   let specificsCount = 0;
   let liveDescriptionSnippet = "";
   let primaryPhotoUrl = body.imageUrls?.[0] || null;
+  let liveBrand = body.brand || null;
+  let liveCategory = body.categoryHint || null;
+  let liveCondition = body.condition || null;
+  let liveWeightOz = body.weightOz ?? null;
+  let liveLengthIn = body.lengthIn ?? null;
+  let liveWidthIn = body.widthIn ?? null;
+  let liveHeightIn = body.heightIn ?? null;
+  let liveShippingProfileName: string | null = null;
+  let liveShippingType: string | null = null;
 
-  // Pull live eBay photo count + specifics count if available (fast single GetItem)
+  // Pull live eBay photo count, brand, category, weight, dims & shipping policy via GetItem
   if (
     body.externalListingId &&
     /^\d+$/.test(body.externalListingId.trim()) &&
@@ -89,6 +103,37 @@ export async function POST(request: Request) {
       }
       specificsCount = Object.keys(details.itemSpecifics || {}).length;
       liveDescriptionSnippet = (details.descriptionPlain || "").slice(0, 350);
+      if (details.brand) liveBrand = details.brand;
+      if (details.categoryHint) liveCategory = details.categoryHint;
+      if (details.condition) liveCondition = details.condition;
+      if (details.weightOz) liveWeightOz = details.weightOz;
+      if (details.lengthIn) liveLengthIn = details.lengthIn;
+      if (details.widthIn) liveWidthIn = details.widthIn;
+      if (details.heightIn) liveHeightIn = details.heightIn;
+      if (details.shippingProfileName) {
+        liveShippingProfileName = details.shippingProfileName;
+      }
+      if (details.shippingType) liveShippingType = details.shippingType;
+
+      // Silently backfill missing weight/dims/brand/category into Supabase so Pick List & future checks have them too
+      const supabase = getSupabaseServerClient();
+      if (body.itemId && supabase && isSupabaseConfigured()) {
+        const patch: Record<string, unknown> = {};
+        if (!body.weightOz && details.weightOz) patch.weight_oz = details.weightOz;
+        if (!body.lengthIn && details.lengthIn) patch.length_in = details.lengthIn;
+        if (!body.widthIn && details.widthIn) patch.width_in = details.widthIn;
+        if (!body.heightIn && details.heightIn) patch.height_in = details.heightIn;
+        if (!body.brand && details.brand) patch.brand = details.brand;
+        if (!body.categoryHint && details.categoryHint) {
+          patch.category_hint = details.categoryHint;
+        }
+        if (Object.keys(patch).length > 0) {
+          await supabase
+            .from("inventory_items")
+            .update({ ...patch, updated_at: new Date().toISOString() })
+            .eq("id", body.itemId);
+        }
+      }
     }
   }
 
@@ -186,26 +231,46 @@ export async function POST(request: Request) {
   let mode: "gemini" | "heuristic" = "heuristic";
   let modelUsed = "heuristic";
 
+  const weightLabel = liveWeightOz
+    ? liveWeightOz >= 16
+      ? `${Math.floor(liveWeightOz / 16)} lb ${liveWeightOz % 16} oz (${liveWeightOz} oz)`
+      : `${liveWeightOz} oz`
+    : "Unknown (not returned by eBay)";
+  const dimsLabel =
+    liveLengthIn && liveWidthIn && liveHeightIn
+      ? `${liveLengthIn} × ${liveWidthIn} × ${liveHeightIn} in`
+      : "Not returned";
+  const shippingSummary = [
+    liveShippingProfileName ? `Policy: "${liveShippingProfileName}"` : null,
+    liveShippingType ? `Type: ${liveShippingType}` : null,
+    shippingPrice > 0
+      ? `Displayed Cost: $${shippingPrice.toFixed(2)}`
+      : "Buyer Pays Calculated",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   if (apiKey) {
     try {
       const prompt = `You are a blunt, data-driven veteran eBay reseller auditing a stale listing BEFORE the seller clicks "End & Sell Similar".
 The seller wants to know WHY this item sat unsold instead of blindly reposting the same problem.
 
-LISTING TELEMETRY:
+LISTING TELEMETRY (LIVE FROM EBAY):
 - Current Title (${title.length}/80 chars): "${title}"
-- Brand: ${body.brand || "Unknown"}
-- Condition: ${body.condition || "Used"}
-- Category: ${body.categoryHint || "Unknown"}
+- Brand: ${liveBrand || "Not specified in Item Specifics"}
+- Condition: ${liveCondition || "Used"}
+- eBay Category: ${liveCategory || "Not returned"}
 - Current Ask Price: $${listedPrice.toFixed(2)}
-- Shipping Charged: ${shippingPrice > 0 ? `$${shippingPrice.toFixed(2)}` : "Calculated / Buyer Pays"}
+- Shipping: ${shippingSummary}
+- Packaged Weight on eBay: ${weightLabel}
+- Package Dimensions on eBay: ${dimsLabel}
 - Seller COGS: $${cogs.toFixed(2)} | Floor Price: $${floorPrice.toFixed(2)}
 - Days Listed: ${daysListed} | Views: ${views} | Watchers: ${watchers} | Promoted: ${promotedRate}%
 - Times Relisted Already: ${relistCount}
 - Photos: ${photoCount} | Item Specifics: ${specificsCount}
-- Packaged Weight (if set): ${body.weightOz ? `${body.weightOz} oz` : "Not set"}
 ${liveDescriptionSnippet ? `- Description snippet: ${liveDescriptionSnippet}` : ""}
 
-Analyze pricing vs realistic eBay sold comps, title keyword SEO (80-char limit), and shipping cost proportionality (note: seller uses Calculated USPS Ground Advantage or UPS Ground — NEVER recommend USPS Priority Mail).
+Analyze pricing vs realistic eBay sold comps, title keyword SEO (80-char limit), and whether the LIVE packaged weight/dimensions & shipping policy look accurate and reasonable for this item (note: seller uses Calculated USPS Ground Advantage or UPS Ground — NEVER recommend USPS Priority Mail; do NOT claim weight is unset if Packaged Weight above shows a number!).
 
 Return ONLY valid JSON with these exact keys:
 {
