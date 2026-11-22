@@ -609,12 +609,14 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     watch.marketplace === "mercari" &&
     url.includes("mercari.com") &&
     !url.includes("/sell") &&
-    (url.includes("/item/m") || url.includes("/mypage/"));
+    (url.includes("/item/m") || url.includes("/us/item/m") || url.includes("/mypage/"));
 
   if (!isPoshmarkPublished && !isMercariPublished) return;
 
-  // Wait for page load completion on /closet/ so we can grab the newest listing URL if needed
-  if (url.includes("/closet/") && changeInfo.status !== "complete") return;
+  // Wait for page load completion on closet / mypage so we can grab the exact matching listing URL
+  if ((url.includes("/closet/") || url.includes("/mypage/")) && changeInfo.status !== "complete") {
+    return;
+  }
 
   watchedPublishTabs.delete(tabId);
 

@@ -1,11 +1,130 @@
 /**
- * Mercari DOM Auto-Filler Content Script (v0.8.0)
+ * Mercari DOM Auto-Filler Content Script (v0.9.5)
  * Targets https://www.mercari.com/sell/
- * Fills up to 12 photos, Title (<=80), Description (<=1000), Category, Brand,
- * Condition, and Price (whole dollars).
- * Supports both Interactive 1-Click Mode (iMac/MacBook Air) and Mac Mini Auto-Pilot Save Draft Mode.
+ * Fills up to 12 photos, Title (<=80), Description (<=1000), Brand,
+ * multi-line Condition card (New / Like new / Good / Fair / Poor), Price (whole dollars),
+ * and auto-clicks the purple "List" button + syncs live URL back to Command Center!
  */
 (function initMercariAgent() {
+  function norm(s) {
+    return String(s || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  }
+
+  function mapToMercariCondition(raw) {
+    const c = norm(raw);
+    if (/\b(new with tags|nwt|brand new|sealed|unopened)\b/.test(c) || c === "new") {
+      return "new";
+    }
+    if (/\b(like new|nwot|new without tags|mint|excellent)\b/.test(c)) {
+      return "like new";
+    }
+    if (/\b(poor|parts|broken|damaged)\b/.test(c)) {
+      return "poor";
+    }
+    if (/\b(fair|acceptable|worn)\b/.test(c)) {
+      return "fair";
+    }
+    return "good";
+  }
+
+  /**
+   * Selects Mercari's multi-line Condition card ("New", "Like new", "Good", "Fair", "Poor").
+   * Matches the first line of each card so the subtitle ("New with tags (NWT)...") doesn't break matching.
+   */
+  async function selectMercariConditionCard(targetCond, sleep, debugLog) {
+    const normalizedTarget = mapToMercariCondition(targetCond);
+    const start = Date.now();
+
+    while (Date.now() - start < 3500) {
+      // 1. Direct data-testid / input[value] check first
+      const directMap = {
+        new: ['[data-testid="Condition-1"]', 'input[name="itemCondition"][value="1"]'],
+        "like new": ['[data-testid="Condition-2"]', 'input[name="itemCondition"][value="2"]'],
+        good: ['[data-testid="Condition-3"]', 'input[name="itemCondition"][value="3"]'],
+        fair: ['[data-testid="Condition-4"]', 'input[name="itemCondition"][value="4"]'],
+        poor: ['[data-testid="Condition-5"]', 'input[name="itemCondition"][value="5"]'],
+      };
+      for (const sel of directMap[normalizedTarget] || []) {
+        const direct = document.querySelector(sel);
+        if (direct) {
+          direct.scrollIntoView({ block: "center" });
+          direct.click();
+          const parent = direct.closest("label, button, div[role='button'], div[tabindex]");
+          if (parent && parent !== direct) parent.click();
+          await sleep(300);
+          debugLog.push(`Condition: OK via ${sel} ("${normalizedTarget}")`);
+          return true;
+        }
+      }
+
+      // 2. Scan visible Condition cards by their first-line title ("New", "Like new", "Good", "Fair", "Poor")
+      const all = Array.from(
+        document.querySelectorAll('label, button, [role="radio"], [role="button"], div[tabindex], div')
+      );
+      let bestCard = null;
+      let bestArea = Infinity;
+
+      for (const el of all) {
+        if (el.closest("#rcc-companion-hud")) continue;
+        const rect = el.getBoundingClientRect();
+        // Condition cards on Mercari are roughly 140-260px wide x 55-150px tall
+        if (rect.width < 70 || rect.width > 340 || rect.height < 42 || rect.height > 175) {
+          continue;
+        }
+        const cs = window.getComputedStyle(el);
+        if (cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0") {
+          continue;
+        }
+
+        const inner = (el.innerText || "").trim();
+        if (!inner) continue;
+        const lines = inner
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter(Boolean);
+        if (lines.length < 2) continue; // Mercari condition cards have Title + description lines!
+
+        const firstLine = norm(lines[0]);
+        if (firstLine !== normalizedTarget) continue;
+
+        // Confirm the subtitle looks like Mercari's condition copy so we never hit an unrelated card
+        const body = inner.toLowerCase();
+        const isConditionCopy =
+          /nwt|nwot|unopened|unused|signs of wear|gently used|minor flaws|functional|defects|major flaws|for parts/.test(
+            body
+          );
+        if (!isConditionCopy) continue;
+
+        const area = rect.width * rect.height;
+        if (area < bestArea) {
+          bestArea = area;
+          bestCard = el;
+        }
+      }
+
+      if (bestCard) {
+        bestCard.scrollIntoView({ block: "center" });
+        await sleep(150);
+        const radio = bestCard.querySelector('input[type="radio"]');
+        if (radio) radio.click();
+        bestCard.click();
+        const outerBtn = bestCard.closest('label, button, [role="radio"], [role="button"]');
+        if (outerBtn && outerBtn !== bestCard) outerBtn.click();
+        await sleep(350);
+        debugLog.push(`Condition: OK card ("${normalizedTarget}")`);
+        return true;
+      }
+
+      await sleep(250);
+    }
+
+    debugLog.push(`Condition: missed "${normalizedTarget}"`);
+    return false;
+  }
+
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type !== "RCC_EXECUTE_JOB" || message.job?.marketplace !== "mercari") {
       return;
@@ -29,12 +148,24 @@
       const shouldSaveDraft = Boolean(message.autoPilot && message.autoPilotSaveDraft);
 
       try {
+        // Tell background worker right away to watch this tab for live publish redirect!
+        chrome.runtime.sendMessage({
+          type: "RCC_WATCH_PUBLISH_SUCCESS",
+          jobId: job.id,
+          marketplace: "mercari",
+          sku: payload.sku || job.item_sku || "",
+          title: payload.mappedTitle || job.item_title || "",
+          listedPrice: Math.max(5, Math.round(Number(payload.suggestedPrice || 0))),
+          autoPilot: isAutoPilot,
+        });
+
         showRccHud({
           title: `${isAutoPilot ? "Auto-Pilot · " : ""}Mercari (${payload.sku || "SKU"})`,
-          message: `Uploading ${(payload.imageUrls || []).length} eBay photos & filling category, condition, and details...`,
+          message: `Uploading ${(payload.imageUrls || []).length} eBay photos & filling title, description, condition, and price...`,
           tone: "info",
         });
 
+        // 1. Inject up to 12 full-res photos
         const fileInput = await waitForSelector(
           ['input[type="file"][multiple]', 'input[type="file"]'],
           4000
@@ -45,6 +176,7 @@
           12
         );
 
+        // 2. Fill Title (<=80) & Description (<=1000)
         const titleInput = await waitForSelector([
           'input[data-testid="Title"]',
           'input[name="name"]',
@@ -66,10 +198,22 @@
           setNativeValue(descInput, String(payload.descriptionPlain).slice(0, 1000));
         }
 
-        // Auto-select Mercari Category (cascading dropdowns)
+        // Wait briefly for Mercari's smart auto-category & shipping recommendation to settle
+        await sleep(1000);
+
+        const debugLog = [];
+
+        // 3. Category (if Mercari didn't already auto-populate it)
         const catLevels = [sc.department, sc.category, sc.subcategory].filter(Boolean);
         let categoryMatched = false;
-        if (catLevels.length > 0) {
+        const catEl = document.querySelector(
+          '[data-testid="CategoryDropdown"], select[data-testid="CategoryId"], div[data-testid="Category"]'
+        );
+        const catTxt = (catEl?.textContent || "").trim();
+        if (catEl && catTxt && !/select category/i.test(catTxt)) {
+          categoryMatched = true;
+          debugLog.push(`Category: Mercari auto-filled ("${catTxt.slice(0, 40)}")`);
+        } else if (catLevels.length > 0) {
           categoryMatched = await selectDropdownSequence(
             [
               '[data-testid="CategoryDropdown"]',
@@ -77,36 +221,37 @@
               'button[aria-label*="Category"]',
               'div[data-testid="Category"]',
             ],
-            catLevels
+            catLevels,
+            [/^select category/i],
+            debugLog
           );
           await sleep(400);
         }
 
-        // Auto-fill Mercari Brand if present
+        // 4. Brand (optional)
         const brandInput = await waitForSelector(
           [
             'input[data-testid="Brand"]',
             'input[placeholder*="Brand"]',
             'input[name="brand"]',
           ],
-          2000
+          1500
         );
-        if (brandInput && payload.brand) {
+        if (brandInput && payload.brand && !brandInput.value) {
           setNativeValue(brandInput, payload.brand);
-          await sleep(500);
-          await clickMatchingOption(payload.brand, 1500);
+          await sleep(450);
+          await clickMatchingOption(payload.brand, 1200);
         }
 
-        // Auto-select Mercari Condition radio/button ("New", "Like new", "Good", "Fair", "Poor")
-        let conditionMatched = false;
-        if (sc.conditionLabel) {
-          const optRes = await clickMatchingOption(sc.conditionLabel, 1200);
-          conditionMatched =
-            Boolean(optRes?.ok) ||
-            (await clickButtonByText([sc.conditionLabel], 1500));
-          await sleep(250);
-        }
+        // 5. Condition card ("New", "Like new", "Good", "Fair", "Poor")
+        const targetCond = sc.conditionLabel || payload.condition || "Good";
+        const conditionMatched = await selectMercariConditionCard(
+          targetCond,
+          sleep,
+          debugLog
+        );
 
+        // 6. Whole-dollar Price ($5+)
         const priceInput = await waitForSelector(
           [
             'input[data-testid="Price"]',
@@ -116,24 +261,66 @@
           3000
         );
         if (priceInput && payload.suggestedPrice) {
+          priceInput.scrollIntoView({ block: "center" });
           setNativeValue(priceInput, Math.max(5, Math.round(Number(payload.suggestedPrice))));
         }
 
         const fieldSummary = [
           `${uploadedCount} photos`,
-          categoryMatched ? `Category ✓ (${catLevels.join(" › ")})` : `Category: verify "${catLevels.join(" › ") || "category"}"`,
-          conditionMatched ? `Condition ✓ (${sc.conditionLabel})` : `Condition: pick "${sc.conditionLabel || "Good"}"`,
+          conditionMatched ? `Condition ✓ (${targetCond})` : `Condition: pick "${targetCond}"`,
+          `$${Math.max(5, Math.round(Number(payload.suggestedPrice || 0)))}`,
         ].join(" · ");
 
-        if (shouldSaveDraft) {
+        if (debugLog.length > 0) {
+          console.log("[RCC Mercari v0.9.5]", debugLog.join(" | "));
+        }
+
+        // 7. Auto-Publish: If Condition was selected, wait for photos to settle & click the purple "List" button!
+        if (conditionMatched) {
           showRccHud({
-            title: `Auto-Pilot · Saving Mercari Draft (${payload.sku || "SKU"})`,
-            message: `${fieldSummary}. Waiting for photo upload, then saving Draft...`,
+            title: `Publishing to Mercari (${payload.sku || "SKU"})`,
+            message: `${fieldSummary}. Waiting for photos to finish uploading, then clicking List...`,
             tone: "info",
           });
 
-          await sleep(Math.min(7000, Math.max(2500, uploadedCount * 450)));
+          await sleep(Math.min(6000, Math.max(1800, uploadedCount * 350)));
 
+          const listBtn =
+            document.querySelector('button[data-testid="ListButton"]') ||
+            Array.from(document.querySelectorAll('button, [role="button"]')).find((b) => {
+              if (b.disabled || b.closest("#rcc-companion-hud")) return false;
+              const r = b.getBoundingClientRect();
+              return r.width > 80 && r.height > 28 && /^list$/i.test((b.textContent || "").trim());
+            });
+
+          if (listBtn) {
+            listBtn.scrollIntoView({ block: "center" });
+            await sleep(250);
+            listBtn.click();
+
+            // Handle any optional confirmation modal ("List anyway" / "Confirm" / "Continue")
+            await sleep(1200);
+            await clickButtonByText([/^list anyway$/i, /^confirm$/i, /^list item$/i], 2000);
+
+            showRccHud({
+              title: `Listed on Mercari! (${payload.sku || "SKU"})`,
+              message: `Submitted to Mercari — automatically syncing live link back to Command Center...`,
+              tone: "success",
+            });
+            sendResponse({ ok: true, autoPublished: true });
+            return;
+          }
+        }
+
+        // 8. Mac Mini Auto-Pilot fallback: Save draft if Condition/List couldn't auto-submit
+        if (shouldSaveDraft) {
+          showRccHud({
+            title: `Auto-Pilot · Saving Mercari Draft (${payload.sku || "SKU"})`,
+            message: `${fieldSummary}. Saving as Draft for quick review...`,
+            tone: "info",
+          });
+
+          await sleep(2000);
           const saved = await clickButtonByText(
             [/^save draft$/i, /^save as draft$/i, /save.*draft/i],
             4000
@@ -147,7 +334,7 @@
               status: "needs_user_confirm",
               extra: {
                 listedPrice: payload.suggestedPrice,
-                errorMessage: `Saved Mercari Draft (${fieldSummary}) — open Mercari app → Drafts to verify shipping & tap List!`,
+                errorMessage: `Saved Mercari Draft (${fieldSummary}) — open Mercari app → Drafts to verify & tap List!`,
               },
             });
             showRccHud({
@@ -162,11 +349,12 @@
           }
         }
 
+        // 9. Interactive fallback HUD (auto-links as soon as user clicks List!)
         showRccHud({
-          title: `Mercari Ready (${payload.sku || "SKU"})`,
-          message: `Auto-filled at $${Math.round(Number(payload.suggestedPrice || 0))} · ${fieldSummary}. Confirm shipping weight & click List, then confirm below.`,
-          tone: "success",
-          actionLabel: "Mark Listed in Command Center",
+          title: `Mercari Almost Ready (${payload.sku || "SKU"})`,
+          message: `Auto-filled · ${fieldSummary}. Pick any missing field & click List — Command Center will auto-sync once posted!`,
+          tone: "confirm",
+          actionLabel: "Mark Listed Manually",
           onAction: async () => {
             await chrome.runtime.sendMessage({
               type: "RCC_JOB_STATUS_UPDATE",
@@ -183,6 +371,19 @@
               tone: "success",
             });
           },
+          secondaryLabel: !conditionMatched ? "Copy Mercari Debug Info" : null,
+          onSecondaryAction: !conditionMatched
+            ? async () => {
+                const txt = `Mercari v0.9.5 Debug (${targetCond}):\n${debugLog.join("\n")}`;
+                try {
+                  await navigator.clipboard.writeText(txt);
+                  const btn = document.getElementById("rcc-hud-secondary");
+                  if (btn) btn.textContent = "Copied! Paste into chat";
+                } catch {
+                  alert(txt);
+                }
+              }
+            : null,
         });
 
         sendResponse({ ok: true });
