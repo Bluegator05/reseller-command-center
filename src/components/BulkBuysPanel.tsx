@@ -32,6 +32,7 @@ interface BulkBuysPanelProps {
   onRefresh: () => Promise<void>;
   onToast: (message: string) => void;
   onSelectActiveItem?: (row: StaleRadarRow) => void;
+  onSelectOrder?: (order: SalesOrderRecord) => void;
 }
 
 interface UnifiedLotItem {
@@ -45,12 +46,15 @@ interface UnifiedLotItem {
   listedPrice: number;
   grossSales: number;
   netBeforeCogs: number;
+  soldOrderCount: number;
+  latestSoldAt: string | null;
   soldYear: number | null;
   isClosedTaxYear: boolean;
   bulkBuyId: string | null;
   bulkBuyLocked: boolean;
   units: number;
   activeRow?: StaleRadarRow;
+  latestSaleOrder?: SalesOrderRecord;
 }
 
 const SOURCE_TYPE_LABELS: Record<string, string> = {
@@ -95,6 +99,7 @@ export function BulkBuysPanel({
   onRefresh,
   onToast,
   onSelectActiveItem,
+  onSelectOrder,
 }: BulkBuysPanelProps) {
   const currentYear = new Date().getFullYear();
 
@@ -115,6 +120,8 @@ export function BulkBuysPanel({
         listedPrice: Number(row.listed_price || 0),
         grossSales: 0,
         netBeforeCogs: 0,
+        soldOrderCount: 0,
+        latestSoldAt: null,
         soldYear: null,
         isClosedTaxYear: false,
         bulkBuyId: row.bulk_buy_id ?? null,
@@ -139,6 +146,8 @@ export function BulkBuysPanel({
         listedPrice: Number(d.target_price || 0),
         grossSales: 0,
         netBeforeCogs: 0,
+        soldOrderCount: 0,
+        latestSoldAt: null,
         soldYear: null,
         isClosedTaxYear: false,
         bulkBuyId:
@@ -165,6 +174,8 @@ export function BulkBuysPanel({
         listedPrice: 0,
         grossSales: 0,
         netBeforeCogs: 0,
+        soldOrderCount: 0,
+        latestSoldAt: null,
         soldYear: null,
         isClosedTaxYear: false,
         bulkBuyId: disp.bulk_buy_id,
@@ -188,6 +199,14 @@ export function BulkBuysPanel({
       if (existing) {
         existing.grossSales += orderGross;
         existing.netBeforeCogs += orderNetBeforeCogs;
+        existing.soldOrderCount += 1;
+        if (
+          !existing.latestSoldAt ||
+          Date.parse(o.sold_at || "") > Date.parse(existing.latestSoldAt)
+        ) {
+          existing.latestSoldAt = o.sold_at;
+          existing.latestSaleOrder = o;
+        }
         if (
           validYr !== null &&
           (existing.soldYear === null || validYr < existing.soldYear)
@@ -211,11 +230,14 @@ export function BulkBuysPanel({
           listedPrice: 0,
           grossSales: orderGross,
           netBeforeCogs: orderNetBeforeCogs,
+          soldOrderCount: 1,
+          latestSoldAt: o.sold_at,
           soldYear: validYr,
           isClosedTaxYear: validYr !== null && validYr < currentYear,
           bulkBuyId: o.bulk_buy_id ?? null,
           bulkBuyLocked: Boolean(o.bulk_buy_locked),
           units: 1,
+          latestSaleOrder: o,
         });
       }
     }
@@ -406,14 +428,25 @@ export function BulkBuysPanel({
     ? metricsByLot.get(activeBulkBuy.id) ?? null
     : null;
 
+  const [soldOutOnly, setSoldOutOnly] = useState(false);
+
   const filteredLotItems = useMemo(() => {
     if (!activeMetrics) return [];
     const q = itemSearch.trim().toLowerCase();
-    return activeMetrics.items.filter((it) => {
+    const list = activeMetrics.items.filter((it) => {
       if (statusFilter === "Active" && it.status !== "Active") return false;
       if (statusFilter === "Draft" && it.status !== "Draft") return false;
-      if (statusFilter === "Sold" && it.status !== "Sold" && it.grossSales <= 0)
-        return false;
+      if (statusFilter === "Sold") {
+        if (soldOutOnly) {
+          if (it.status !== "Sold") return false;
+        } else if (
+          it.status !== "Sold" &&
+          it.soldOrderCount <= 0 &&
+          it.grossSales <= 0
+        ) {
+          return false;
+        }
+      }
       if (
         statusFilter === "Disposed" &&
         it.status !== "Donated" &&
@@ -429,7 +462,21 @@ export function BulkBuysPanel({
       }
       return true;
     });
-  }, [activeMetrics, statusFilter, itemSearch]);
+
+    if (statusFilter === "Sold") {
+      return [...list].sort((a, b) => {
+        // Put fully Sold items FIRST before multi-qty Active items that still have units left
+        const aSold = a.status === "Sold" ? 0 : 1;
+        const bSold = b.status === "Sold" ? 0 : 1;
+        if (aSold !== bSold) return aSold - bSold;
+        // Within each group, newest sold first
+        const aMs = a.latestSoldAt ? Date.parse(a.latestSoldAt) : 0;
+        const bMs = b.latestSoldAt ? Date.parse(b.latestSoldAt) : 0;
+        return bMs - aMs;
+      });
+    }
+    return list;
+  }, [activeMetrics, statusFilter, soldOutOnly, itemSearch]);
 
   const availablePickerItems = useMemo(() => {
     const q = pickerSearch.trim().toLowerCase();
@@ -1293,21 +1340,41 @@ export function BulkBuysPanel({
                 {/* Lot Items Toolbar */}
                 <div className="flex flex-wrap items-center justify-between gap-2.5 pt-1">
                   <div className="flex items-center gap-1.5 flex-wrap">
-                    {(["All", "Active", "Draft", "Sold", "Disposed"] as const).map(
-                      (tab) => (
-                        <button
-                          key={tab}
-                          type="button"
-                          onClick={() => setStatusFilter(tab)}
-                          className={`px-2.5 py-1 rounded-full text-xs font-semibold border transition cursor-pointer ${
-                            statusFilter === tab
-                              ? "bg-[#14151A] text-white border-[#14151A]"
-                              : "bg-white text-[#5C606B] border-[#DDE2DF] hover:border-[#0F766E]"
-                          }`}
-                        >
-                          {tab}
-                        </button>
-                      )
+                    {(
+                      [
+                        { id: "All", count: activeMetrics.totalItems },
+                        { id: "Active", count: activeMetrics.activeCount },
+                        { id: "Draft", count: activeMetrics.draftCount },
+                        { id: "Sold", count: activeMetrics.soldCount },
+                        { id: "Disposed", count: activeMetrics.disposedCount },
+                      ] as const
+                    ).map((tab) => (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setStatusFilter(tab.id)}
+                        className={`px-2.5 py-1 rounded-full text-xs font-semibold border transition cursor-pointer ${
+                          statusFilter === tab.id
+                            ? "bg-[#14151A] text-white border-[#14151A]"
+                            : "bg-white text-[#5C606B] border-[#DDE2DF] hover:border-[#0F766E]"
+                        }`}
+                      >
+                        {tab.id} ({tab.count})
+                      </button>
+                    ))}
+                    {statusFilter === "Sold" && (
+                      <button
+                        type="button"
+                        onClick={() => setSoldOutOnly((v) => !v)}
+                        title="Hide multi-quantity items that are still active on eBay"
+                        className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border transition cursor-pointer ${
+                          soldOutOnly
+                            ? "bg-[#047857] text-white border-[#047857]"
+                            : "bg-[#ECFDF5] text-[#047857] border-[#A7F3D0] hover:bg-[#D1FAE5]"
+                        }`}
+                      >
+                        {soldOutOnly ? "Showing Sold Out Only" : "Sold Out Only"}
+                      </button>
                     )}
                   </div>
                   <div className="flex items-center gap-2">
@@ -1366,7 +1433,16 @@ export function BulkBuysPanel({
                           </td>
                         </tr>
                       ) : (
-                        filteredLotItems.map((it) => (
+                        filteredLotItems.map((it) => {
+                          const canOpenOrder = Boolean(
+                            it.latestSaleOrder && onSelectOrder
+                          );
+                          const canOpenActive = Boolean(
+                            it.activeRow && onSelectActiveItem
+                          );
+                          const isMultiPartial =
+                            it.status === "Active" && it.soldOrderCount > 0;
+                          return (
                           <tr
                             key={it.id}
                             className="hover:bg-[#F8FAF9] transition"
@@ -1387,14 +1463,30 @@ export function BulkBuysPanel({
                                 )}
                                 <button
                                   type="button"
-                                  disabled={!it.activeRow || !onSelectActiveItem}
-                                  onClick={() =>
-                                    it.activeRow &&
-                                    onSelectActiveItem?.(it.activeRow)
-                                  }
+                                  disabled={!canOpenOrder && !canOpenActive}
+                                  onClick={() => {
+                                    if (
+                                      (statusFilter === "Sold" ||
+                                        it.status === "Sold") &&
+                                      it.latestSaleOrder &&
+                                      onSelectOrder
+                                    ) {
+                                      onSelectOrder(it.latestSaleOrder);
+                                    } else if (
+                                      it.activeRow &&
+                                      onSelectActiveItem
+                                    ) {
+                                      onSelectActiveItem(it.activeRow);
+                                    } else if (
+                                      it.latestSaleOrder &&
+                                      onSelectOrder
+                                    ) {
+                                      onSelectOrder(it.latestSaleOrder);
+                                    }
+                                  }}
                                   className={`text-left font-medium text-[#14151A] line-clamp-2 ${
-                                    it.activeRow && onSelectActiveItem
-                                      ? "hover:text-[#0F766E] cursor-pointer"
+                                    canOpenOrder || canOpenActive
+                                      ? "hover:text-[#0F766E] hover:underline cursor-pointer"
                                       : ""
                                   }`}
                                 >
@@ -1407,14 +1499,22 @@ export function BulkBuysPanel({
                                 className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold ${
                                   it.status === "Sold"
                                     ? "bg-[#ECFDF5] text-[#047857]"
-                                    : it.status === "Active"
-                                      ? "bg-[#EFF6FF] text-[#1D4ED8]"
-                                      : it.status === "Draft"
-                                        ? "bg-[#FEF3C7] text-[#B45309]"
-                                        : "bg-[#F1F5F9] text-[#475569]"
+                                    : isMultiPartial
+                                      ? "bg-[#CCFBF1] text-[#0F766E]"
+                                      : it.status === "Active"
+                                        ? "bg-[#EFF6FF] text-[#1D4ED8]"
+                                        : it.status === "Draft"
+                                          ? "bg-[#FEF3C7] text-[#B45309]"
+                                          : "bg-[#F1F5F9] text-[#475569]"
                                 }`}
                               >
-                                {it.status}
+                                {it.status === "Sold"
+                                  ? it.soldOrderCount > 1
+                                    ? `Sold ×${it.soldOrderCount}`
+                                    : "Sold"
+                                  : isMultiPartial
+                                    ? `Sold ×${it.soldOrderCount} · Active`
+                                    : it.status}
                               </span>
                             </td>
                             <td className="py-2.5 px-2.5">
@@ -1518,7 +1618,8 @@ export function BulkBuysPanel({
                               </button>
                             </td>
                           </tr>
-                        ))
+                          );
+                        })
                       )}
                     </tbody>
                   </table>

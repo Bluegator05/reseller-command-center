@@ -1,14 +1,20 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import "leaflet/dist/leaflet.css";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Compass,
   Globe,
   Loader2,
   MapPin,
+  Minus,
+  Plus,
   RefreshCw,
   Truck,
   X,
+  ZoomIn,
 } from "lucide-react";
+import type L from "leaflet";
 import type { SalesOrderRecord } from "@/lib/types";
 
 interface BuyerMapPanelProps {
@@ -18,60 +24,62 @@ interface BuyerMapPanelProps {
   onSelectOrder?: (order: SalesOrderRecord) => void;
 }
 
-// Accurate US State centroids [lat, lon] + display names for Albers-like equirectangular US projection
-const US_STATES: Record<string, { name: string; lat: number; lon: number; region: string }> = {
-  AL: { name: "Alabama", lat: 32.8, lon: -86.8, region: "South" },
-  AK: { name: "Alaska", lat: 64.2, lon: -152.5, region: "Non-Contiguous" },
-  AZ: { name: "Arizona", lat: 34.3, lon: -111.7, region: "West" },
-  AR: { name: "Arkansas", lat: 34.9, lon: -92.4, region: "South" },
-  CA: { name: "California", lat: 36.8, lon: -119.4, region: "West" },
-  CO: { name: "Colorado", lat: 39.0, lon: -105.5, region: "Mountain" },
-  CT: { name: "Connecticut", lat: 41.6, lon: -72.7, region: "Northeast" },
-  DE: { name: "Delaware", lat: 39.0, lon: -75.5, region: "Northeast" },
-  DC: { name: "District of Columbia", lat: 38.9, lon: -77.0, region: "Northeast" },
-  FL: { name: "Florida", lat: 28.1, lon: -81.6, region: "South" },
-  GA: { name: "Georgia", lat: 32.6, lon: -83.4, region: "South" },
-  HI: { name: "Hawaii", lat: 20.8, lon: -156.3, region: "Non-Contiguous" },
-  ID: { name: "Idaho", lat: 44.1, lon: -114.7, region: "Mountain" },
-  IL: { name: "Illinois", lat: 40.0, lon: -89.2, region: "Midwest" },
-  IN: { name: "Indiana", lat: 39.9, lon: -86.3, region: "Midwest" },
-  IA: { name: "Iowa", lat: 42.0, lon: -93.5, region: "Midwest" },
-  KS: { name: "Kansas", lat: 38.5, lon: -98.3, region: "Midwest" },
-  KY: { name: "Kentucky", lat: 37.8, lon: -85.7, region: "South" },
-  LA: { name: "Louisiana", lat: 31.0, lon: -91.9, region: "South" },
-  ME: { name: "Maine", lat: 45.3, lon: -69.2, region: "Northeast" },
-  MD: { name: "Maryland", lat: 39.0, lon: -76.7, region: "Northeast" },
-  MA: { name: "Massachusetts", lat: 42.3, lon: -71.8, region: "Northeast" },
-  MI: { name: "Michigan", lat: 44.3, lon: -85.4, region: "Midwest" },
-  MN: { name: "Minnesota", lat: 46.3, lon: -94.3, region: "Midwest" },
-  MS: { name: "Mississippi", lat: 32.7, lon: -89.7, region: "South" },
-  MO: { name: "Missouri", lat: 38.4, lon: -92.5, region: "Midwest" },
-  MT: { name: "Montana", lat: 46.9, lon: -110.4, region: "Mountain" },
-  NE: { name: "Nebraska", lat: 41.5, lon: -99.8, region: "Midwest" },
-  NV: { name: "Nevada", lat: 39.3, lon: -116.6, region: "West" },
-  NH: { name: "New Hampshire", lat: 43.7, lon: -71.6, region: "Northeast" },
-  NJ: { name: "New Jersey", lat: 40.1, lon: -74.7, region: "Northeast" },
-  NM: { name: "New Mexico", lat: 34.4, lon: -106.1, region: "Mountain" },
-  NY: { name: "New York", lat: 42.9, lon: -75.5, region: "Northeast" },
-  NC: { name: "North Carolina", lat: 35.5, lon: -79.4, region: "South" },
-  ND: { name: "North Dakota", lat: 47.4, lon: -100.5, region: "Midwest" },
-  OH: { name: "Ohio", lat: 40.4, lon: -82.8, region: "Midwest" },
-  OK: { name: "Oklahoma", lat: 35.6, lon: -97.5, region: "South" },
-  OR: { name: "Oregon", lat: 44.0, lon: -120.5, region: "West" },
-  PA: { name: "Pennsylvania", lat: 40.9, lon: -77.8, region: "Northeast" },
-  PR: { name: "Puerto Rico", lat: 18.2, lon: -66.5, region: "Non-Contiguous" },
-  RI: { name: "Rhode Island", lat: 41.7, lon: -71.5, region: "Northeast" },
-  SC: { name: "South Carolina", lat: 33.9, lon: -80.9, region: "South" },
-  SD: { name: "South Dakota", lat: 44.4, lon: -100.2, region: "Midwest" },
-  TN: { name: "Tennessee", lat: 35.8, lon: -86.4, region: "South" },
-  TX: { name: "Texas", lat: 31.5, lon: -99.3, region: "South" },
-  UT: { name: "Utah", lat: 39.3, lon: -111.7, region: "Mountain" },
-  VT: { name: "Vermont", lat: 44.0, lon: -72.7, region: "Northeast" },
-  VA: { name: "Virginia", lat: 37.5, lon: -78.8, region: "South" },
-  WA: { name: "Washington", lat: 47.4, lon: -120.5, region: "West" },
-  WV: { name: "West Virginia", lat: 38.6, lon: -80.6, region: "South" },
-  WI: { name: "Wisconsin", lat: 44.6, lon: -89.8, region: "Midwest" },
-  WY: { name: "Wyoming", lat: 43.0, lon: -107.5, region: "Mountain" },
+const US_STATES: Record<
+  string,
+  { name: string; lat: number; lon: number; region: string; zoom: number }
+> = {
+  AL: { name: "Alabama", lat: 32.81, lon: -86.79, region: "South", zoom: 7 },
+  AK: { name: "Alaska", lat: 63.5, lon: -152.0, region: "Non-Contiguous", zoom: 4 },
+  AZ: { name: "Arizona", lat: 34.2, lon: -111.6, region: "West", zoom: 6 },
+  AR: { name: "Arkansas", lat: 34.97, lon: -92.37, region: "South", zoom: 7 },
+  CA: { name: "California", lat: 36.7, lon: -119.5, region: "West", zoom: 6 },
+  CO: { name: "Colorado", lat: 39.06, lon: -105.31, region: "Mountain", zoom: 7 },
+  CT: { name: "Connecticut", lat: 41.6, lon: -72.75, region: "Northeast", zoom: 8 },
+  DE: { name: "Delaware", lat: 39.15, lon: -75.51, region: "Northeast", zoom: 8 },
+  DC: { name: "District of Columbia", lat: 38.91, lon: -77.04, region: "Northeast", zoom: 11 },
+  FL: { name: "Florida", lat: 28.0, lon: -81.7, region: "South", zoom: 6 },
+  GA: { name: "Georgia", lat: 32.7, lon: -83.4, region: "South", zoom: 7 },
+  HI: { name: "Hawaii", lat: 20.8, lon: -156.5, region: "Non-Contiguous", zoom: 7 },
+  ID: { name: "Idaho", lat: 44.24, lon: -114.48, region: "Mountain", zoom: 6 },
+  IL: { name: "Illinois", lat: 40.35, lon: -88.99, region: "Midwest", zoom: 6 },
+  IN: { name: "Indiana", lat: 39.85, lon: -86.26, region: "Midwest", zoom: 7 },
+  IA: { name: "Iowa", lat: 42.01, lon: -93.21, region: "Midwest", zoom: 7 },
+  KS: { name: "Kansas", lat: 38.53, lon: -98.2, region: "Midwest", zoom: 7 },
+  KY: { name: "Kentucky", lat: 37.67, lon: -84.67, region: "South", zoom: 7 },
+  LA: { name: "Louisiana", lat: 31.17, lon: -91.87, region: "South", zoom: 7 },
+  ME: { name: "Maine", lat: 45.25, lon: -69.38, region: "Northeast", zoom: 7 },
+  MD: { name: "Maryland", lat: 39.06, lon: -76.8, region: "Northeast", zoom: 8 },
+  MA: { name: "Massachusetts", lat: 42.23, lon: -71.53, region: "Northeast", zoom: 8 },
+  MI: { name: "Michigan", lat: 44.3, lon: -85.4, region: "Midwest", zoom: 6 },
+  MN: { name: "Minnesota", lat: 46.2, lon: -94.3, region: "Midwest", zoom: 6 },
+  MS: { name: "Mississippi", lat: 32.74, lon: -89.68, region: "South", zoom: 7 },
+  MO: { name: "Missouri", lat: 38.46, lon: -92.29, region: "Midwest", zoom: 7 },
+  MT: { name: "Montana", lat: 46.92, lon: -110.45, region: "Mountain", zoom: 6 },
+  NE: { name: "Nebraska", lat: 41.5, lon: -99.8, region: "Midwest", zoom: 7 },
+  NV: { name: "Nevada", lat: 38.8, lon: -116.8, region: "West", zoom: 6 },
+  NH: { name: "New Hampshire", lat: 43.45, lon: -71.56, region: "Northeast", zoom: 8 },
+  NJ: { name: "New Jersey", lat: 40.2, lon: -74.52, region: "Northeast", zoom: 8 },
+  NM: { name: "New Mexico", lat: 34.5, lon: -106.1, region: "Mountain", zoom: 6 },
+  NY: { name: "New York", lat: 42.6, lon: -75.5, region: "Northeast", zoom: 6 },
+  NC: { name: "North Carolina", lat: 35.63, lon: -79.4, region: "South", zoom: 7 },
+  ND: { name: "North Dakota", lat: 47.53, lon: -100.3, region: "Midwest", zoom: 7 },
+  OH: { name: "Ohio", lat: 40.39, lon: -82.76, region: "Midwest", zoom: 7 },
+  OK: { name: "Oklahoma", lat: 35.57, lon: -97.5, region: "South", zoom: 7 },
+  OR: { name: "Oregon", lat: 44.0, lon: -120.5, region: "West", zoom: 7 },
+  PA: { name: "Pennsylvania", lat: 40.8, lon: -77.6, region: "Northeast", zoom: 7 },
+  PR: { name: "Puerto Rico", lat: 18.22, lon: -66.59, region: "Non-Contiguous", zoom: 8 },
+  RI: { name: "Rhode Island", lat: 41.68, lon: -71.51, region: "Northeast", zoom: 9 },
+  SC: { name: "South Carolina", lat: 33.86, lon: -80.95, region: "South", zoom: 7 },
+  SD: { name: "South Dakota", lat: 44.3, lon: -100.2, region: "Midwest", zoom: 7 },
+  TN: { name: "Tennessee", lat: 35.8, lon: -86.4, region: "South", zoom: 7 },
+  TX: { name: "Texas", lat: 31.3, lon: -99.1, region: "South", zoom: 6 },
+  UT: { name: "Utah", lat: 39.4, lon: -111.7, region: "Mountain", zoom: 7 },
+  VT: { name: "Vermont", lat: 44.05, lon: -72.71, region: "Northeast", zoom: 8 },
+  VA: { name: "Virginia", lat: 37.6, lon: -78.5, region: "South", zoom: 7 },
+  WA: { name: "Washington", lat: 47.4, lon: -120.5, region: "West", zoom: 7 },
+  WV: { name: "West Virginia", lat: 38.6, lon: -80.6, region: "South", zoom: 7 },
+  WI: { name: "Wisconsin", lat: 44.5, lon: -89.8, region: "Midwest", zoom: 7 },
+  WY: { name: "Wyoming", lat: 43.0, lon: -107.5, region: "Mountain", zoom: 6 },
 };
 
 const STATE_NAME_TO_CODE = new Map<string, string>(
@@ -83,35 +91,174 @@ function normalizeUsStateCode(raw?: string | null): string | null {
   const clean = raw.trim();
   const upper = clean.toUpperCase();
   if (US_STATES[upper]) return upper;
-  const byName = STATE_NAME_TO_CODE.get(clean.toLowerCase());
-  return byName ?? null;
+  return STATE_NAME_TO_CODE.get(clean.toLowerCase()) ?? null;
 }
 
-// Project US lat/lon into 800x440 SVG viewBox
-function projectUsCoord(
-  stateCode: string,
-  lat: number,
-  lon: number
-): { x: number; y: number } {
-  if (stateCode === "AK") return { x: 112, y: 378 };
-  if (stateCode === "HI") return { x: 222, y: 392 };
-  if (stateCode === "PR") return { x: 678, y: 402 };
-  // Contiguous US bounding box: lon -125..-66, lat 24.5..49.5
-  const x = 68 + ((lon + 125) / 59) * 676;
-  const y = 38 + ((49.5 - lat) / 25) * 324;
-  return {
-    x: Math.max(55, Math.min(760, x)),
-    y: Math.max(30, Math.min(395, y)),
-  };
+function titleCaseCity(raw?: string | null): string {
+  if (!raw) return "";
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function fmtMoney(n: number): string {
   return `$${n.toFixed(2)}`;
 }
 
-// Clean contiguous US silhouette path for crisp cartographic backdrop
-const US_OUTLINE_PATH =
-  "M 76 62 L 138 56 L 235 55 L 350 56 L 445 64 L 495 85 L 542 104 L 590 95 L 650 85 L 702 68 L 732 62 L 748 92 L 722 128 L 700 148 L 690 182 L 664 218 L 642 252 L 612 292 L 626 346 L 608 366 L 590 342 L 580 308 L 540 296 L 496 306 L 456 308 L 418 320 L 386 364 L 358 358 L 328 318 L 280 298 L 230 282 L 166 276 L 122 256 L 94 214 L 74 152 L 68 100 Z";
+interface GeocodedOrderPoint {
+  order: SalesOrderRecord;
+  lat: number;
+  lon: number;
+  cityLabel: string;
+  stateCode: string | null;
+  countryCode: string;
+}
+
+interface DynamicCluster {
+  id: string;
+  lat: number;
+  lon: number;
+  orders: SalesOrderRecord[];
+  cityNames: string[];
+  label: string;
+  isSingleCity: boolean;
+}
+
+/**
+ * Zoom-aware spatial clustering:
+ * - Zoomed out (z <= 4): regional clusters (~2.8° radius)
+ * - Regional zoom (z = 5–6): metro clusters (~0.85° radius)
+ * - City zoom (z >= 7): exact city pins!
+ */
+function buildDynamicClusters(
+  points: GeocodedOrderPoint[],
+  zoom: number
+): DynamicCluster[] {
+  if (points.length === 0) return [];
+
+  // Group by exact city+state+rounded coords first so identical cities stay merged
+  const cityBuckets = new Map<
+    string,
+    {
+      latSum: number;
+      lonSum: number;
+      cityLabel: string;
+      orders: SalesOrderRecord[];
+    }
+  >();
+
+  for (const p of points) {
+    const key = `${p.cityLabel.toLowerCase()}|${Math.round(p.lat * 20)}|${Math.round(p.lon * 20)}`;
+    const existing = cityBuckets.get(key);
+    if (existing) {
+      existing.latSum += p.lat;
+      existing.lonSum += p.lon;
+      existing.orders.push(p.order);
+    } else {
+      cityBuckets.set(key, {
+        latSum: p.lat,
+        lonSum: p.lon,
+        cityLabel: p.cityLabel,
+        orders: [p.order],
+      });
+    }
+  }
+
+  const cityNodes = [...cityBuckets.values()]
+    .map((b) => ({
+      lat: b.latSum / b.orders.length,
+      lon: b.lonSum / b.orders.length,
+      cityLabel: b.cityLabel,
+      orders: b.orders,
+    }))
+    .sort((a, b) => b.orders.length - a.orders.length);
+
+  // At zoom >= 8, show every individual city pin directly!
+  const radiusDeg =
+    zoom >= 8
+      ? 0.04
+      : zoom === 7
+        ? 0.25
+        : zoom === 6
+          ? 0.65
+          : zoom === 5
+            ? 1.4
+            : zoom === 4
+              ? 2.8
+              : 5.0;
+
+  const clusters: Array<{
+    latSum: number;
+    lonSum: number;
+    weight: number;
+    orders: SalesOrderRecord[];
+    cityCounts: Map<string, number>;
+  }> = [];
+
+  for (const node of cityNodes) {
+    let bestCluster: (typeof clusters)[number] | null = null;
+    let bestDist = Infinity;
+
+    for (const c of clusters) {
+      const cLat = c.latSum / c.weight;
+      const cLon = c.lonSum / c.weight;
+      const dLat = node.lat - cLat;
+      const dLon = (node.lon - cLon) * Math.cos((cLat * Math.PI) / 180);
+      const dist = Math.hypot(dLat, dLon);
+      if (dist <= radiusDeg && dist < bestDist) {
+        bestDist = dist;
+        bestCluster = c;
+      }
+    }
+
+    if (bestCluster) {
+      const w = node.orders.length;
+      bestCluster.latSum += node.lat * w;
+      bestCluster.lonSum += node.lon * w;
+      bestCluster.weight += w;
+      bestCluster.orders.push(...node.orders);
+      bestCluster.cityCounts.set(
+        node.cityLabel,
+        (bestCluster.cityCounts.get(node.cityLabel) || 0) + w
+      );
+    } else {
+      const w = node.orders.length;
+      const cc = new Map<string, number>();
+      cc.set(node.cityLabel, w);
+      clusters.push({
+        latSum: node.lat * w,
+        lonSum: node.lon * w,
+        weight: w,
+        orders: [...node.orders],
+        cityCounts: cc,
+      });
+    }
+  }
+
+  return clusters.map((c, idx) => {
+    const lat = c.latSum / c.weight;
+    const lon = c.lonSum / c.weight;
+    const sortedCities = [...c.cityCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([name]) => name);
+    const isSingleCity = sortedCities.length === 1;
+    const label = isSingleCity
+      ? sortedCities[0]
+      : `${sortedCities[0]} + ${sortedCities.length - 1} nearby cit${sortedCities.length - 1 === 1 ? "y" : "ies"}`;
+    return {
+      id: `cl-${idx}-${Math.round(lat * 100)}-${Math.round(lon * 100)}`,
+      lat,
+      lon,
+      orders: c.orders.sort(
+        (a, b) => Date.parse(b.sold_at || "") - Date.parse(a.sold_at || "")
+      ),
+      cityNames: sortedCities,
+      label,
+      isSingleCity,
+    };
+  });
+}
 
 export function BuyerMapPanel({
   salesOrders,
@@ -120,8 +267,16 @@ export function BuyerMapPanel({
   onSelectOrder,
 }: BuyerMapPanelProps) {
   const [rangeDays, setRangeDays] = useState<number>(365);
-  const [selectedPinKey, setSelectedPinKey] = useState<string | null>(null);
   const [mountNow] = useState(() => Date.now());
+  const [zoomLevel, setZoomLevel] = useState<number>(4);
+  const [selectedCluster, setSelectedCluster] = useState<DynamicCluster | null>(
+    null
+  );
+
+  const mapContainerRef = useRef<HTMLDivElement | null>(null);
+  const mapInstanceRef = useRef<L.Map | null>(null);
+  const leafletRef = useRef<typeof L | null>(null);
+  const markersLayerRef = useRef<L.LayerGroup | null>(null);
 
   const validOrders = useMemo(() => {
     const cutoff =
@@ -135,25 +290,27 @@ export function BuyerMapPanel({
   }, [salesOrders, rangeDays, mountNow]);
 
   const {
-    usClusters,
-    intlClusters,
+    geocodedPoints,
     stateStats,
+    intlClusters,
     locatedCount,
     unlocatedCount,
     uniqueStatesCount,
+    uniqueCitiesCount,
     uniqueCountries,
     avgShippingAll,
     highestCostStates,
   } = useMemo(() => {
-    const usMap = new Map<
+    const pts: GeocodedOrderPoint[] = [];
+    const usStateMap = new Map<
       string,
       {
-        key: string;
         stateCode: string;
         label: string;
         region: string;
-        x: number;
-        y: number;
+        lat: number;
+        lon: number;
+        zoom: number;
         orders: SalesOrderRecord[];
         totalRevenue: number;
         totalShipping: number;
@@ -169,40 +326,72 @@ export function BuyerMapPanel({
       }
     >();
     const countries = new Set<string>();
+    const citySet = new Set<string>();
     let located = 0;
     let unlocated = 0;
 
     for (const o of validOrders) {
       const country = (o.buyer_country || "").trim().toUpperCase();
       const stateCode = normalizeUsStateCode(o.buyer_state);
-      const isUs = !country || country === "US" || country === "USA";
+      const isUs = !country || country === "US" || country === "USA" || country === "PR";
+      const cleanCity = titleCaseCity(o.buyer_city);
+
+      let lat = typeof o.buyer_lat === "number" && Number.isFinite(o.buyer_lat) ? o.buyer_lat : null;
+      let lon = typeof o.buyer_lon === "number" && Number.isFinite(o.buyer_lon) ? o.buyer_lon : null;
+
+      if ((lat === null || lon === null) && isUs && stateCode && US_STATES[stateCode]) {
+        lat = US_STATES[stateCode].lat;
+        lon = US_STATES[stateCode].lon;
+      }
+
+      if (lat !== null && lon !== null) {
+        located += 1;
+        const countryCode = isUs ? "US" : country || "INTL";
+        countries.add(countryCode);
+        const stateFullName =
+          stateCode && US_STATES[stateCode] ? US_STATES[stateCode].name : o.buyer_state || "";
+        const cityLabel = cleanCity
+          ? stateFullName
+            ? `${cleanCity}, ${stateFullName}`
+            : countryCode !== "US"
+              ? `${cleanCity}, ${countryCode}`
+              : cleanCity
+          : stateFullName || countryCode;
+
+        if (cleanCity) citySet.add(cityLabel.toLowerCase());
+        pts.push({
+          order: o,
+          lat,
+          lon,
+          cityLabel,
+          stateCode,
+          countryCode,
+        });
+      } else {
+        unlocated += 1;
+      }
 
       if (isUs && stateCode && US_STATES[stateCode]) {
-        located += 1;
-        countries.add("US");
         const st = US_STATES[stateCode];
-        const coords = projectUsCoord(stateCode, st.lat, st.lon);
-        const existing = usMap.get(stateCode);
+        const existing = usStateMap.get(stateCode);
         if (existing) {
           existing.orders.push(o);
           existing.totalRevenue += o.gross_sale_price;
           existing.totalShipping += o.shipping_cost;
         } else {
-          usMap.set(stateCode, {
-            key: stateCode,
+          usStateMap.set(stateCode, {
             stateCode,
             label: st.name,
             region: st.region,
-            x: coords.x,
-            y: coords.y,
+            lat: st.lat,
+            lon: st.lon,
+            zoom: st.zoom,
             orders: [o],
             totalRevenue: o.gross_sale_price,
             totalShipping: o.shipping_cost,
           });
         }
       } else if (country && country !== "US" && country !== "USA") {
-        located += 1;
-        countries.add(country);
         const existing = intlMap.get(country);
         if (existing) {
           existing.orders.push(o);
@@ -216,23 +405,20 @@ export function BuyerMapPanel({
             totalShipping: o.shipping_cost,
           });
         }
-      } else {
-        unlocated += 1;
       }
     }
 
-    const clusters = [...usMap.values()].sort(
+    const sortedStates = [...usStateMap.values()].sort(
       (a, b) => b.orders.length - a.orders.length
     );
     const intl = [...intlMap.values()].sort(
       (a, b) => b.orders.length - a.orders.length
     );
-
-    const totalShip = clusters.reduce((s, c) => s + c.totalShipping, 0);
-    const totalUsOrders = clusters.reduce((s, c) => s + c.orders.length, 0);
+    const totalShip = sortedStates.reduce((s, c) => s + c.totalShipping, 0);
+    const totalUsOrders = sortedStates.reduce((s, c) => s + c.orders.length, 0);
     const avgShip = totalUsOrders > 0 ? totalShip / totalUsOrders : 0;
 
-    const highCost = [...clusters]
+    const highCost = [...sortedStates]
       .filter((c) => c.totalShipping > 0)
       .sort(
         (a, b) =>
@@ -241,22 +427,133 @@ export function BuyerMapPanel({
       .slice(0, 5);
 
     return {
-      usClusters: clusters,
+      geocodedPoints: pts,
+      stateStats: sortedStates,
       intlClusters: intl,
-      stateStats: clusters.slice(0, 12),
       locatedCount: located,
       unlocatedCount: unlocated,
-      uniqueStatesCount: clusters.length,
+      uniqueStatesCount: sortedStates.length,
+      uniqueCitiesCount: citySet.size,
       uniqueCountries: [...countries],
       avgShippingAll: avgShip,
       highestCostStates: highCost,
     };
   }, [validOrders]);
 
-  const selectedCluster = useMemo(
-    () => usClusters.find((c) => c.key === selectedPinKey) ?? null,
-    [usClusters, selectedPinKey]
+  const clusters = useMemo(
+    () => buildDynamicClusters(geocodedPoints, zoomLevel),
+    [geocodedPoints, zoomLevel]
   );
+
+  // Initialize Leaflet interactive map once on client mount
+  useEffect(() => {
+    let cancelled = false;
+    async function initMap() {
+      if (!mapContainerRef.current || mapInstanceRef.current) return;
+      const Lmod = (await import("leaflet")).default;
+      if (cancelled || !mapContainerRef.current) return;
+      leafletRef.current = Lmod;
+
+      const map = Lmod.map(mapContainerRef.current, {
+        center: [38.8, -96.5],
+        zoom: 4,
+        minZoom: 2,
+        maxZoom: 14,
+        zoomControl: false,
+        attributionControl: true,
+        scrollWheelZoom: true,
+      });
+
+      // CartoDB Voyager / Positron — clean Flipwise-style light-blue ocean + crisp state lines & city labels!
+      Lmod.tileLayer(
+        "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
+        {
+          subdomains: "abcd",
+          maxZoom: 19,
+          attribution: "&copy; OpenStreetMap &copy; CARTO",
+        }
+      ).addTo(map);
+
+      const layer = Lmod.layerGroup().addTo(map);
+      mapInstanceRef.current = map;
+      markersLayerRef.current = layer;
+
+      map.on("zoomend", () => {
+        setZoomLevel(map.getZoom());
+      });
+      map.on("click", () => {
+        setSelectedCluster(null);
+      });
+    }
+
+    initMap();
+    return () => {
+      cancelled = true;
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove();
+        mapInstanceRef.current = null;
+        markersLayerRef.current = null;
+      }
+    };
+  }, []);
+
+  // Re-render dynamic zoom-aware cluster pins whenever clusters or selection change
+  useEffect(() => {
+    const Lmod = leafletRef.current;
+    const layer = markersLayerRef.current;
+    const map = mapInstanceRef.current;
+    if (!Lmod || !layer || !map) return;
+
+    layer.clearLayers();
+
+    for (const c of clusters) {
+      const count = c.orders.length;
+      const size = Math.min(44, Math.max(24, Math.round(20 + Math.sqrt(count) * 4.2)));
+      const isSelected = selectedCluster?.id === c.id;
+      const bg = isSelected ? "#C2410C" : "#F07855";
+      const ring = isSelected ? "box-shadow:0 0 0 5px rgba(234,88,12,0.28),0 2px 6px rgba(0,0,0,0.25);" : "box-shadow:0 2px 6px rgba(0,0,0,0.22);";
+      const labelHtml =
+        count > 1
+          ? `<span>${count}</span>`
+          : `<span style="width:7px;height:7px;border-radius:9999px;background:#fff;display:block;"></span>`;
+
+      const icon = Lmod.divIcon({
+        className: "rcc-buyer-pin",
+        html: `<div style="width:${size}px;height:${size}px;border-radius:9999px;background:${bg};border:2.5px solid #ffffff;color:#ffffff;font-weight:800;font-size:${count >= 100 ? 11 : 12}px;display:flex;align-items:center;justify-content:center;cursor:pointer;${ring}transition:transform 0.15s ease;">${labelHtml}</div>`,
+        iconSize: [size, size],
+        iconAnchor: [size / 2, size / 2],
+      });
+
+      const marker = Lmod.marker([c.lat, c.lon], { icon });
+      marker.bindTooltip(
+        `<div style="font-size:11px;font-weight:700;color:#14151A;">${c.label}</div><div style="font-size:10px;color:#5C606B;">${count} order${count === 1 ? "" : "s"} · Click to inspect</div>`,
+        { direction: "top", offset: [0, -size / 2] }
+      );
+      marker.on("click", (e) => {
+        Lmod.DomEvent.stopPropagation(e);
+        setSelectedCluster(c);
+      });
+      marker.addTo(layer);
+    }
+  }, [clusters, selectedCluster]);
+
+  const handleZoomIn = useCallback(() => {
+    mapInstanceRef.current?.zoomIn();
+  }, []);
+
+  const handleZoomOut = useCallback(() => {
+    mapInstanceRef.current?.zoomOut();
+  }, []);
+
+  const handleResetUs = useCallback(() => {
+    setSelectedCluster(null);
+    mapInstanceRef.current?.flyTo([38.8, -96.5], 4, { duration: 0.6 });
+  }, []);
+
+  const flyToLocation = useCallback((lat: number, lon: number, zoom: number) => {
+    setSelectedCluster(null);
+    mapInstanceRef.current?.flyTo([lat, lon], zoom, { duration: 0.7 });
+  }, []);
 
   return (
     <div className="space-y-4">
@@ -268,20 +565,24 @@ export function BuyerMapPanel({
               <h3 className="text-sm font-bold text-[#14151A]">
                 Where Your Buyers Are
               </h3>
+              <span className="px-2 py-0.5 rounded-full bg-[#FFF7ED] border border-[#FED7AA] text-[10px] font-bold text-[#C2410C]">
+                Zoom in to see individual cities
+              </span>
             </div>
             <p className="text-xs text-[#5C606B] mt-0.5">
               {locatedCount > 0 ? (
                 <>
                   Mapped <strong>{locatedCount}</strong> orders across{" "}
+                  <strong>{uniqueCitiesCount}</strong> cities in{" "}
                   <strong>{uniqueStatesCount}</strong> US state
                   {uniqueStatesCount === 1 ? "" : "s"}
                   {intlClusters.length > 0
-                    ? ` and ${intlClusters.length} international destination${intlClusters.length === 1 ? "" : "s"}`
+                    ? ` + ${intlClusters.length} international destination${intlClusters.length === 1 ? "" : "s"}`
                     : ""}
-                  . Click any pin to inspect orders.
+                  . Scroll or tap <strong>+</strong> to zoom down to exact cities.
                 </>
               ) : (
-                "Click Sync Buyer Locations from eBay to pull buyer cities & states for your past orders."
+                "Click Sync Buyer Locations from eBay to pull buyer cities, ZIPs & states for your orders."
               )}
             </p>
           </div>
@@ -296,7 +597,10 @@ export function BuyerMapPanel({
                 <button
                   key={opt.days}
                   type="button"
-                  onClick={() => setRangeDays(opt.days)}
+                  onClick={() => {
+                    setRangeDays(opt.days);
+                    setSelectedCluster(null);
+                  }}
                   className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition cursor-pointer ${
                     rangeDays === opt.days
                       ? "bg-white text-[#14151A] shadow-xs"
@@ -323,179 +627,103 @@ export function BuyerMapPanel({
           </div>
         </div>
 
-        {/* Interactive Vector US Pin Map */}
-        <div className="relative rounded-xl border border-[#DCE6EC] bg-[#DCEEF5] overflow-hidden">
-          <svg
-            viewBox="0 0 820 430"
-            className="w-full h-[290px] sm:h-[360px] select-none"
-          >
-            {/* Subtle ocean grid */}
-            <defs>
-              <pattern
-                id="mapGrid"
-                width="40"
-                height="40"
-                patternUnits="userSpaceOnUse"
-              >
-                <path
-                  d="M 40 0 L 0 0 0 40"
-                  fill="none"
-                  stroke="#CDE3EE"
-                  strokeWidth="0.6"
-                />
-              </pattern>
-            </defs>
-            <rect width="820" height="430" fill="url(#mapGrid)" />
+        {/* Real Interactive Leaflet Map */}
+        <div className="relative rounded-xl border border-[#DCE6EC] overflow-hidden bg-[#D5E8F0]">
+          <div
+            ref={mapContainerRef}
+            className="w-full h-[360px] sm:h-[460px] z-0"
+          />
 
-            {/* US Contiguous landmass silhouette */}
-            <path
-              d={US_OUTLINE_PATH}
-              fill="#F7F8F6"
-              stroke="#CBD5E1"
-              strokeWidth="2"
-              strokeLinejoin="round"
-            />
-            {/* Alaska / Hawaii / PR inset boxes */}
-            <g>
-              <rect
-                x="62"
-                y="346"
-                width="102"
-                height="64"
-                rx="8"
-                fill="#F7F8F6"
-                stroke="#CBD5E1"
-                strokeWidth="1.2"
-              />
-              <text
-                x="72"
-                y="362"
-                fontSize="9"
-                fill="#94A3B8"
-                fontWeight="700"
+          {/* Custom Crisp Zoom & Reset Controls (Flipwise-style top-right) */}
+          <div className="absolute top-3 right-3 z-[400] flex flex-col gap-1.5">
+            <div className="bg-white border border-[#DCE1DE] rounded-lg shadow-md overflow-hidden flex flex-col">
+              <button
+                type="button"
+                onClick={handleZoomIn}
+                title="Zoom in to see individual cities"
+                className="p-2 hover:bg-[#F3F5F4] text-[#14151A] border-b border-[#ECEFE9] cursor-pointer"
               >
-                AK
-              </text>
-              <rect
-                x="176"
-                y="362"
-                width="90"
-                height="48"
-                rx="8"
-                fill="#F7F8F6"
-                stroke="#CBD5E1"
-                strokeWidth="1.2"
-              />
-              <text
-                x="186"
-                y="378"
-                fontSize="9"
-                fill="#94A3B8"
-                fontWeight="700"
+                <Plus className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={handleZoomOut}
+                title="Zoom out"
+                className="p-2 hover:bg-[#F3F5F4] text-[#14151A] cursor-pointer"
               >
-                HI
-              </text>
-              <rect
-                x="640"
-                y="374"
-                width="76"
-                height="40"
-                rx="8"
-                fill="#F7F8F6"
-                stroke="#CBD5E1"
-                strokeWidth="1.2"
-              />
-              <text
-                x="650"
-                y="390"
-                fontSize="9"
-                fill="#94A3B8"
-                fontWeight="700"
-              >
-                PR
-              </text>
-            </g>
+                <Minus className="w-4 h-4" />
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={handleResetUs}
+              title="Reset to full US view"
+              className="p-2 bg-white border border-[#DCE1DE] rounded-lg shadow-md hover:bg-[#F3F5F4] text-[#14151A] cursor-pointer"
+            >
+              <Compass className="w-4 h-4" />
+            </button>
+          </div>
 
-            {/* Subtle faint state labels for geographic orientation */}
-            {Object.entries(US_STATES).map(([code, st]) => {
-              if (code === "DC" || code === "RI" || code === "DE") return null;
-              const { x, y } = projectUsCoord(code, st.lat, st.lon);
-              return (
-                <text
-                  key={code}
-                  x={x}
-                  y={y + 3}
-                  textAnchor="middle"
-                  fontSize="9"
-                  fill="#94A3B8"
-                  fontWeight="600"
-                >
-                  {code}
-                </text>
-              );
-            })}
+          {/* Zoom Level Indicator Pill */}
+          <div className="absolute bottom-3 left-3 z-[400] bg-white/90 backdrop-blur-xs border border-[#DCE1DE] rounded-full px-2.5 py-1 text-[10px] font-semibold text-[#334155] shadow-xs pointer-events-none">
+            {zoomLevel >= 8
+              ? `City View (Zoom ${zoomLevel}) · Showing ${clusters.length} cities`
+              : zoomLevel >= 6
+                ? `Metro View (Zoom ${zoomLevel}) · Zoom in for exact cities`
+                : `Regional View (Zoom ${zoomLevel}) · Click any pin or scroll to zoom`}
+          </div>
 
-            {/* Buyer cluster pins (Flipwise coral/orange circles!) */}
-            {usClusters.map((c) => {
-              const count = c.orders.length;
-              const r = Math.min(22, Math.max(10, 8 + Math.sqrt(count) * 4));
-              const isSelected = selectedPinKey === c.key;
-              return (
-                <g
-                  key={c.key}
-                  transform={`translate(${c.x}, ${c.y})`}
-                  onClick={() =>
-                    setSelectedPinKey(isSelected ? null : c.key)
-                  }
-                  className="cursor-pointer"
-                >
-                  {isSelected && (
-                    <circle
-                      r={r + 6}
-                      fill="#EA580C"
-                      fillOpacity="0.22"
-                    />
-                  )}
-                  <circle
-                    r={r}
-                    fill={isSelected ? "#C2410C" : "#F07855"}
-                    stroke="#FFFFFF"
-                    strokeWidth="2"
-                  />
-                  <text
-                    y={3.5}
-                    textAnchor="middle"
-                    fill="#FFFFFF"
-                    fontSize={count >= 10 ? "10" : "11"}
-                    fontWeight="800"
-                  >
-                    {count}
-                  </text>
-                </g>
-              );
-            })}
-          </svg>
-
-          {/* Clickable Pin Order Popup Card */}
+          {/* Flipwise-Style Clicked City / Cluster Popup Card */}
           {selectedCluster && (
-            <div className="absolute top-3 right-3 w-72 sm:w-80 bg-white border border-[#E2E5E8] rounded-xl shadow-lg overflow-hidden z-10">
-              <div className="px-3.5 py-2.5 bg-[#FFF7ED] border-b border-[#FED7AA] flex items-center justify-between">
-                <div className="flex items-center gap-1.5">
-                  <MapPin className="w-3.5 h-3.5 text-[#EA580C]" />
-                  <span className="text-xs font-bold text-[#9A3412]">
-                    {selectedCluster.label} ({selectedCluster.orders.length})
-                  </span>
+            <div className="absolute top-3 left-3 z-[450] w-72 sm:w-84 bg-white border border-[#E2E5E8] rounded-xl shadow-xl overflow-hidden">
+              <div className="px-3.5 py-2.5 bg-[#FFF7ED] border-b border-[#FED7AA] flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <MapPin className="w-3.5 h-3.5 text-[#EA580C] shrink-0" />
+                    <span className="text-xs font-bold text-[#9A3412] truncate">
+                      {selectedCluster.label}
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-[#C2410C] mt-0.5">
+                    {selectedCluster.orders.length} order
+                    {selectedCluster.orders.length === 1 ? "" : "s"} ·{" "}
+                    {fmtMoney(
+                      selectedCluster.orders.reduce(
+                        (s, o) => s + o.gross_sale_price,
+                        0
+                      )
+                    )}{" "}
+                    gross
+                  </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setSelectedPinKey(null)}
-                  className="text-[#9A3412] hover:text-[#14151A] cursor-pointer"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
+                <div className="flex items-center gap-1 shrink-0">
+                  {!selectedCluster.isSingleCity && zoomLevel < 10 && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        flyToLocation(
+                          selectedCluster.lat,
+                          selectedCluster.lon,
+                          Math.min(11, zoomLevel + 3)
+                        )
+                      }
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-[#EA580C] hover:bg-[#C2410C] text-white text-[10px] font-bold cursor-pointer"
+                    >
+                      <ZoomIn className="w-3 h-3" />
+                      Zoom In
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setSelectedCluster(null)}
+                    className="p-1 text-[#9A3412] hover:text-[#14151A] cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
-              <div className="max-h-56 overflow-y-auto divide-y divide-[#F1F5F9]">
-                {selectedCluster.orders.slice(0, 12).map((o) => (
+              <div className="max-h-64 overflow-y-auto divide-y divide-[#F1F5F9]">
+                {selectedCluster.orders.slice(0, 20).map((o) => (
                   <button
                     key={o.id}
                     type="button"
@@ -507,37 +735,47 @@ export function BuyerMapPanel({
                       <img
                         src={o.image_url}
                         alt={o.title}
-                        className="w-8 h-8 rounded object-cover border border-[#E2E5E8] shrink-0"
+                        className="w-9 h-9 rounded-md object-cover border border-[#E2E5E8] shrink-0"
                       />
                     ) : (
-                      <div className="w-8 h-8 rounded bg-[#F1F5F9] shrink-0" />
+                      <div className="w-9 h-9 rounded-md bg-[#F1F5F9] shrink-0" />
                     )}
                     <div className="min-w-0 flex-1">
                       <div className="text-xs font-semibold text-[#14151A] truncate">
                         {o.title}
                       </div>
-                      <div className="text-[10px] text-[#5C606B] flex items-center gap-1.5">
+                      <div className="text-[10px] text-[#5C606B] flex items-center gap-1.5 flex-wrap">
                         <span className="font-mono font-bold text-[#0B8A5F]">
                           {fmtMoney(o.gross_sale_price)}
                         </span>
-                        <span>· {o.buyer_city || selectedCluster.stateCode}</span>
                         <span>· {o.sold_at.slice(0, 10)}</span>
+                        {o.buyer_city && (
+                          <span className="text-[#475569]">
+                            · {titleCaseCity(o.buyer_city)}
+                            {o.buyer_state ? `, ${o.buyer_state}` : ""}
+                          </span>
+                        )}
                       </div>
                     </div>
                   </button>
                 ))}
+                {selectedCluster.orders.length > 20 && (
+                  <div className="px-3.5 py-2 text-[10px] text-center text-[#64748B] bg-[#F8FAF9]">
+                    Showing latest 20 of {selectedCluster.orders.length} orders — zoom in to inspect specific cities.
+                  </div>
+                )}
               </div>
             </div>
           )}
 
           {locatedCount === 0 && (
-            <div className="absolute inset-0 bg-white/75 backdrop-blur-[1px] flex flex-col items-center justify-center p-6 text-center">
+            <div className="absolute inset-0 z-[420] bg-white/80 backdrop-blur-[1px] flex flex-col items-center justify-center p-6 text-center">
               <Globe className="w-8 h-8 text-[#0F766E] mb-2" />
               <div className="text-sm font-bold text-[#14151A]">
                 No Buyer Cities Synced Yet
               </div>
               <p className="text-xs text-[#475569] max-w-sm mt-1">
-                Click <strong>Sync Buyer Locations from eBay</strong> above to pull real buyer cities &amp; states for all your past eBay orders.
+                Click <strong>Sync Buyer Locations from eBay</strong> above to pull real buyer cities, ZIP codes, and states for all your past eBay orders.
               </p>
             </div>
           )}
@@ -564,21 +802,27 @@ export function BuyerMapPanel({
           {unlocatedCount > 0 && (
             <span className="text-[11px] text-[#64748B]">
               {unlocatedCount} order{unlocatedCount === 1 ? "" : "s"} without
-              saved state (sync eBay or non-eBay orders)
+              saved city/state (non-eBay or unshipped)
             </span>
           )}
         </div>
       </div>
 
-      {/* Shipping Zone & Top Buyer States Breakdown */}
+      {/* Top Buyer States (Click to Fly & Zoom Into State!) + Shipping Zone Alert */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="bg-white border border-[#E2E5E8] rounded-xl p-4">
           <div className="flex items-center justify-between mb-3">
-            <h4 className="text-xs font-bold uppercase tracking-wider text-[#14151A]">
-              Top Buyer States
-            </h4>
+            <div>
+              <h4 className="text-xs font-bold uppercase tracking-wider text-[#14151A]">
+                Top Buyer States
+              </h4>
+              <p className="text-[10px] text-[#64748B]">
+                Click any state to zoom straight into its cities on the map
+              </p>
+            </div>
             <span className="text-[11px] text-[#5C606B]">
-              Avg label/shipping: <strong className="font-mono">{fmtMoney(avgShippingAll)}</strong>
+              Avg label/shipping:{" "}
+              <strong className="font-mono">{fmtMoney(avgShippingAll)}</strong>
             </span>
           </div>
           {stateStats.length === 0 ? (
@@ -587,14 +831,14 @@ export function BuyerMapPanel({
             </p>
           ) : (
             <div className="space-y-2">
-              {stateStats.slice(0, 8).map((st) => {
+              {stateStats.slice(0, 10).map((st) => {
                 const maxOrders = stateStats[0]?.orders.length || 1;
                 const pct = Math.max(8, (st.orders.length / maxOrders) * 100);
                 return (
                   <button
-                    key={st.key}
+                    key={st.stateCode}
                     type="button"
-                    onClick={() => setSelectedPinKey(st.key)}
+                    onClick={() => flyToLocation(st.lat, st.lon, st.zoom)}
                     className="w-full text-left group cursor-pointer"
                   >
                     <div className="flex items-center justify-between text-xs mb-0.5">
@@ -611,7 +855,7 @@ export function BuyerMapPanel({
                     </div>
                     <div className="h-2 rounded-full bg-[#F1F5F9] overflow-hidden">
                       <div
-                        className="h-full bg-[#F07855] rounded-full"
+                        className="h-full bg-[#F07855] rounded-full group-hover:bg-[#EA580C] transition"
                         style={{ width: `${pct}%` }}
                       />
                     </div>
@@ -641,16 +885,19 @@ export function BuyerMapPanel({
               {highestCostStates.map((st) => {
                 const avg = st.totalShipping / Math.max(1, st.orders.length);
                 return (
-                  <div
-                    key={st.key}
-                    className="py-2 flex items-center justify-between text-xs"
+                  <button
+                    key={st.stateCode}
+                    type="button"
+                    onClick={() => flyToLocation(st.lat, st.lon, st.zoom)}
+                    className="w-full py-2 flex items-center justify-between text-xs hover:bg-[#F8FAF9] px-1 rounded cursor-pointer"
                   >
                     <div>
                       <span className="font-semibold text-[#14151A]">
                         {st.label}
                       </span>
                       <span className="text-[11px] text-[#64748B] ml-1.5">
-                        ({st.orders.length} order{st.orders.length === 1 ? "" : "s"})
+                        ({st.orders.length} order
+                        {st.orders.length === 1 ? "" : "s"})
                       </span>
                     </div>
                     <div className="font-mono text-right">
@@ -661,7 +908,7 @@ export function BuyerMapPanel({
                         ({fmtMoney(st.totalShipping)} total)
                       </span>
                     </div>
-                  </div>
+                  </button>
                 );
               })}
             </div>

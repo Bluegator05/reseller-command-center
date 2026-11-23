@@ -1500,6 +1500,7 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
             onRefresh={refreshInventory}
             onToast={(msg) => pushToast("info", "Bulk Buys", msg)}
             onSelectActiveItem={(row) => setDetailModalItemId(row.item_id)}
+            onSelectOrder={(order) => setSelectedOrderIdForDetail(order.id)}
           />
         ) : activeTab === "sales" ? (
           <SalesLedgerPanel

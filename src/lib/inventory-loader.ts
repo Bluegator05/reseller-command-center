@@ -1,4 +1,5 @@
 import { getDemoStore } from "./demo-store";
+import { resolveBuyerCoords } from "./geo-lookup";
 import { DEFAULT_EBAY_FEE_PCT, enrichStaleRadarRow, roundCurrency } from "./stale-engine";
 import { getEnvReadiness, getSupabaseServerClient } from "./supabase";
 import type {
@@ -364,6 +365,25 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
         const orderLoc =
           (rec.external_order_id && orderLocMap?.[rec.external_order_id]) || null;
 
+        const resolvedCity =
+          orderLoc?.city ??
+          (typeof sp.buyer_city === "string" ? sp.buyer_city : null);
+        const resolvedState =
+          orderLoc?.state ??
+          (typeof sp.buyer_state === "string" ? sp.buyer_state : null);
+        const resolvedPostal =
+          orderLoc?.postal ??
+          (typeof sp.buyer_postal === "string" ? sp.buyer_postal : null);
+        const resolvedCountry =
+          orderLoc?.country ??
+          (typeof sp.buyer_country === "string" ? sp.buyer_country : null);
+        const resolvedCoords = resolveBuyerCoords({
+          city: resolvedCity,
+          state: resolvedState,
+          postal: resolvedPostal,
+          country: resolvedCountry,
+        });
+
         return {
           id: rec.id,
           item_id: rec.item_id,
@@ -404,18 +424,12 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
           shipped_at: rec.shipped_at ?? null,
           return_reason: rec.return_reason ?? null,
           restocked: Boolean(rec.restocked),
-          buyer_city:
-            orderLoc?.city ??
-            (typeof sp.buyer_city === "string" ? sp.buyer_city : null),
-          buyer_state:
-            orderLoc?.state ??
-            (typeof sp.buyer_state === "string" ? sp.buyer_state : null),
-          buyer_postal:
-            orderLoc?.postal ??
-            (typeof sp.buyer_postal === "string" ? sp.buyer_postal : null),
-          buyer_country:
-            orderLoc?.country ??
-            (typeof sp.buyer_country === "string" ? sp.buyer_country : null),
+          buyer_city: resolvedCity,
+          buyer_state: resolvedState,
+          buyer_postal: resolvedPostal,
+          buyer_country: resolvedCountry,
+          buyer_lat: resolvedCoords?.lat ?? null,
+          buyer_lon: resolvedCoords?.lon ?? null,
           activity_log: Array.isArray(sp.activity_log)
             ? (sp.activity_log as ItemActivityEvent[])
             : [],

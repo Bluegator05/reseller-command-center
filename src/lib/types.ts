@@ -376,6 +376,8 @@ export interface SalesOrderRecord {
   buyer_state?: string | null;
   buyer_postal?: string | null;
   buyer_country?: string | null;
+  buyer_lat?: number | null;
+  buyer_lon?: number | null;
   activity_log?: ItemActivityEvent[];
   net_profit: number;
   true_net_after_cogs: number;
