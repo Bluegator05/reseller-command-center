@@ -796,7 +796,15 @@ interface BestOfferPlan {
   note: string | null;
 }
 
+function isBestOfferUnavailableError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err || "");
+  return /best\s*offer[^.\n]*(unavailable|disabled|not\s*(available|supported|allowed|applicable)|cannot\s*be\s*(enabled|used))|21915292|219026/i.test(
+    msg
+  );
+}
+
 function isBestOfferThresholdError(err: unknown): boolean {
+  if (isBestOfferUnavailableError(err)) return false;
   const msg = err instanceof Error ? err.message : String(err || "");
   return /best\s*offer|auto[- ]?accept|minimum.*offer|auto[- ]?decline|2191660[3456]/i.test(
     msg
@@ -1117,6 +1125,32 @@ export async function updateEbayOfferPrice(params: {
     currency,
   });
 
+  const revisePriceWithoutBestOffer = async (): Promise<void> => {
+    try {
+      await ebayTradingRequest(
+        "ReviseFixedPriceItem",
+        `<Item>
+        <ItemID>${rawId}</ItemID>
+        <StartPrice currencyID="${currency}">${formattedPrice}</StartPrice>
+        <BestOfferDetails>
+          <BestOfferEnabled>false</BestOfferEnabled>
+        </BestOfferDetails>
+      </Item>`
+      );
+    } catch (errA) {
+      if (!isBestOfferUnavailableError(errA) && !isBestOfferThresholdError(errA)) {
+        throw errA;
+      }
+      await ebayTradingRequest(
+        "ReviseFixedPriceItem",
+        `<Item>
+        <ItemID>${rawId}</ItemID>
+        <StartPrice currencyID="${currency}">${formattedPrice}</StartPrice>
+      </Item>`
+      );
+    }
+  };
+
   try {
     await ebayTradingRequest(
       "ReviseFixedPriceItem",
@@ -1128,16 +1162,26 @@ export async function updateEbayOfferPrice(params: {
     ${bestOfferPlan.deletedFieldsXml}`
     );
   } catch (err) {
-    if (isBestOfferThresholdError(err)) {
-      await ebayTradingRequest(
-        "ReviseFixedPriceItem",
-        `<Item>
-        <ItemID>${rawId}</ItemID>
-        <StartPrice currencyID="${currency}">${formattedPrice}</StartPrice>
-      </Item>
-      <DeletedField>Item.ListingDetails.BestOfferAutoAcceptPrice</DeletedField>
-      <DeletedField>Item.ListingDetails.MinimumBestOfferPrice</DeletedField>`
-      );
+    if (isBestOfferUnavailableError(err)) {
+      await revisePriceWithoutBestOffer();
+    } else if (isBestOfferThresholdError(err)) {
+      try {
+        await ebayTradingRequest(
+          "ReviseFixedPriceItem",
+          `<Item>
+          <ItemID>${rawId}</ItemID>
+          <StartPrice currencyID="${currency}">${formattedPrice}</StartPrice>
+        </Item>
+        <DeletedField>Item.ListingDetails.BestOfferAutoAcceptPrice</DeletedField>
+        <DeletedField>Item.ListingDetails.MinimumBestOfferPrice</DeletedField>`
+        );
+      } catch (retryErr) {
+        if (isBestOfferUnavailableError(retryErr)) {
+          await revisePriceWithoutBestOffer();
+        } else {
+          throw retryErr;
+        }
+      }
     } else {
       throw err;
     }
@@ -1495,7 +1539,11 @@ export async function endAndSellSimilarEbayOffer(params: {
     );
   } catch (endErr) {
     const endMsg = endErr instanceof Error ? endErr.message : String(endErr || "");
-    if (!/already\s*(been\s*)?ended|has\s*ended|closed|1047/i.test(endMsg)) {
+    if (
+      !/already\s*(been\s*)?(ended|closed)|has\s*(already\s*)?ended|listing\s*is\s*closed|cannot\s*be\s*ended|closed|1047/i.test(
+        endMsg
+      )
+    ) {
       throw endErr;
     }
     console.warn(`[ebay] EndFixedPriceItem(${rawId}) already ended — continuing to Relist:`, endMsg);
@@ -1509,44 +1557,105 @@ export async function endAndSellSimilarEbayOffer(params: {
       ? `<StartPrice currencyID="USD">${roundCurrency(newPrice).toFixed(2)}</StartPrice>`
       : "";
 
+  const baseRelistFieldsXml = `
+      <ItemID>${rawId}</ItemID>
+      ${titleOverrideXml}
+      ${priceOverrideXml}
+      ${mergedSpecsXml}
+      ${pkgOverrideXml}`;
+
+  // Fallback ladder when eBay says Best Offer is unavailable/disabled for the category or listing type:
+  // A) Explicitly set BestOfferEnabled=false (overrides inherited BestOfferEnabled=true)
+  // B) Set BestOfferEnabled=false AND delete inherited auto-accept / min-offer thresholds
+  // C) Bare relist omitting all BestOfferDetails, ListingDetails, and DeletedField tags
+  const relistWithoutBestOffer = async (): Promise<string> => {
+    try {
+      return await ebayTradingRequest(
+        "RelistFixedPriceItem",
+        `<Item>${baseRelistFieldsXml}
+      <BestOfferDetails>
+        <BestOfferEnabled>false</BestOfferEnabled>
+      </BestOfferDetails>
+    </Item>`
+      );
+    } catch (errA) {
+      if (!isBestOfferUnavailableError(errA) && !isBestOfferThresholdError(errA)) {
+        throw errA;
+      }
+      try {
+        return await ebayTradingRequest(
+          "RelistFixedPriceItem",
+          `<Item>${baseRelistFieldsXml}
+      <BestOfferDetails>
+        <BestOfferEnabled>false</BestOfferEnabled>
+      </BestOfferDetails>
+    </Item>
+    <DeletedField>Item.ListingDetails.BestOfferAutoAcceptPrice</DeletedField>
+    <DeletedField>Item.ListingDetails.MinimumBestOfferPrice</DeletedField>`
+        );
+      } catch (errB) {
+        if (!isBestOfferUnavailableError(errB) && !isBestOfferThresholdError(errB)) {
+          throw errB;
+        }
+        return await ebayTradingRequest(
+          "RelistFixedPriceItem",
+          `<Item>${baseRelistFieldsXml}
+    </Item>`
+        );
+      }
+    }
+  };
+
   let relistXml: string;
   let finalBestOfferNote = bestOfferPlan.note;
 
   try {
     relistXml = await ebayTradingRequest(
       "RelistFixedPriceItem",
-      `<Item>
-      <ItemID>${rawId}</ItemID>
-      ${titleOverrideXml}
-      ${priceOverrideXml}
-      ${mergedSpecsXml}
-      ${pkgOverrideXml}
+      `<Item>${baseRelistFieldsXml}
       ${bestOfferPlan.listingDetailsXml}
     </Item>
     ${bestOfferPlan.deletedFieldsXml}`
     );
   } catch (relistErr) {
-    // Last-resort failsafe: if eBay still rejects due to Best Offer thresholds,
-    // immediately clear BestOfferAutoAcceptPrice & MinimumBestOfferPrice and retry
-    // so the ended listing is NEVER left stranded unpublished!
-    if (isBestOfferThresholdError(relistErr)) {
+    if (isBestOfferUnavailableError(relistErr)) {
+      console.warn(
+        `[ebay] RelistFixedPriceItem(${rawId}) hit Best Offer unavailable for category/listing type — retrying with Best Offer disabled:`,
+        relistErr
+      );
+      relistXml = await relistWithoutBestOffer();
+      finalBestOfferNote =
+        "Best Offer disabled (not supported by this eBay category/listing type)";
+    } else if (isBestOfferThresholdError(relistErr)) {
+      // Last-resort failsafe: if eBay still rejects due to Best Offer thresholds,
+      // immediately clear BestOfferAutoAcceptPrice & MinimumBestOfferPrice and retry
+      // so the ended listing is NEVER left stranded unpublished!
       console.warn(
         `[ebay] RelistFixedPriceItem(${rawId}) hit Best Offer threshold conflict — retrying with cleared Best Offer auto-rules:`,
         relistErr
       );
-      relistXml = await ebayTradingRequest(
-        "RelistFixedPriceItem",
-        `<Item>
-        <ItemID>${rawId}</ItemID>
-        ${titleOverrideXml}
-        ${priceOverrideXml}
-        ${mergedSpecsXml}
-        ${pkgOverrideXml}
+      try {
+        relistXml = await ebayTradingRequest(
+          "RelistFixedPriceItem",
+          `<Item>${baseRelistFieldsXml}
       </Item>
       <DeletedField>Item.ListingDetails.BestOfferAutoAcceptPrice</DeletedField>
       <DeletedField>Item.ListingDetails.MinimumBestOfferPrice</DeletedField>`
-      );
-      finalBestOfferNote = "Best Offer auto-rules cleared to allow lower price";
+        );
+        finalBestOfferNote = "Best Offer auto-rules cleared to allow lower price";
+      } catch (retryErr) {
+        if (isBestOfferUnavailableError(retryErr)) {
+          console.warn(
+            `[ebay] RelistFixedPriceItem(${rawId}) retry hit Best Offer unavailable — retrying with Best Offer disabled:`,
+            retryErr
+          );
+          relistXml = await relistWithoutBestOffer();
+          finalBestOfferNote =
+            "Best Offer disabled (not supported by this eBay category/listing type)";
+        } else {
+          throw retryErr;
+        }
+      }
     } else {
       throw relistErr;
     }
@@ -2766,7 +2875,23 @@ ${picXml}
     ${policyOrShippingXml}
   </Item>`;
 
-  const resXml = await ebayTradingRequest("AddFixedPriceItem", innerXml);
+  let resXml: string;
+  try {
+    resXml = await ebayTradingRequest("AddFixedPriceItem", innerXml);
+  } catch (addErr) {
+    if (isBestOfferUnavailableError(addErr) && bestOfferXml) {
+      console.warn(
+        `[ebay] AddFixedPriceItem(${cleanSku}) hit Best Offer unavailable for category ${params.categoryId} — retrying without Best Offer:`,
+        addErr
+      );
+      resXml = await ebayTradingRequest(
+        "AddFixedPriceItem",
+        innerXml.replace(bestOfferXml, "")
+      );
+    } else {
+      throw addErr;
+    }
+  }
   const newItemId = extractXmlTag(resXml, "ItemID");
   if (!newItemId) {
     throw new Error("eBay AddFixedPriceItem succeeded but did not return an ItemID.");
