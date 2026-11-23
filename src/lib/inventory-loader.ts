@@ -6,6 +6,7 @@ import type {
   ChannelJob,
   CommandCenterPayload,
   CrossChannelListingSummary,
+  InventoryAuditRecord,
   InventoryItem,
   MarketplaceAccount,
   MarketplaceListing,
@@ -73,6 +74,7 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
         ordersRes,
         draftsRes,
         expensesRes,
+        auditLogRes,
       ] = await Promise.all([
         fetchAllActiveListings(),
         supabase.from("marketplace_accounts").select("*"),
@@ -92,7 +94,21 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
           .select("*")
           .order("expense_date", { ascending: false })
           .limit(500),
+        supabase
+          .from("inventory_items")
+          .select("item_specifics")
+          .eq("sku", "__RCC_AUDIT_LOG__")
+          .maybeSingle(),
       ]);
+
+      const rawAuditHistory = (
+        auditLogRes.data?.item_specifics as
+          | { audit_history?: unknown }
+          | undefined
+      )?.audit_history;
+      const auditHistory: InventoryAuditRecord[] = Array.isArray(rawAuditHistory)
+        ? (rawAuditHistory as InventoryAuditRecord[])
+        : [];
 
       const accounts = (accountsRes.data ?? []) as MarketplaceAccount[];
       const ebayFeePct =
@@ -313,6 +329,7 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
         etsyActiveCount: etsyListings.length,
         etsyLastSyncedAt,
         channelCounts,
+        auditHistory,
       };
     } catch (error) {
       console.error(

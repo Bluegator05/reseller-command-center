@@ -4,12 +4,14 @@ import { useMemo, useState } from "react";
 import {
   AlertTriangle,
   Archive,
+  CalendarCheck,
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
   ChevronsDownUp,
   ChevronsUpDown,
+  History,
   MapPin,
   Printer,
   RotateCcw,
@@ -21,7 +23,11 @@ import {
   printThermalSkuLabels,
   type ThermalLabelItem,
 } from "@/lib/thermal-label";
-import type { InventoryItem, StaleRadarRow } from "@/lib/types";
+import type {
+  InventoryAuditRecord,
+  InventoryItem,
+  StaleRadarRow,
+} from "@/lib/types";
 
 type AuditStatus = "verified" | "missing" | null;
 type AuditFilterMode = "all" | "unverified" | "verified" | "missing";
@@ -29,8 +35,15 @@ type AuditFilterMode = "all" | "unverified" | "verified" | "missing";
 interface BinAuditPanelProps {
   activeItems: StaleRadarRow[];
   draftItems: InventoryItem[];
+  auditHistory?: InventoryAuditRecord[];
   onOpenItemDetail: (row: StaleRadarRow) => void;
   onSetBinAudit?: (itemIds: string[], auditStatus: AuditStatus) => Promise<void>;
+  onCompleteInventoryAudit?: (summary: {
+    totalItems: number;
+    verifiedCount: number;
+    missingCount: number;
+    notes?: string | null;
+  }) => Promise<void>;
 }
 
 interface ParsedSkuMeta {
@@ -251,13 +264,18 @@ function getBinSortRank(bin: string): number {
 export function BinAuditPanel({
   activeItems,
   draftItems,
+  auditHistory = [],
   onOpenItemDetail,
   onSetBinAudit,
+  onCompleteInventoryAudit,
 }: BinAuditPanelProps) {
   const [search, setSearch] = useState("");
   const [selectedBinFilter, setSelectedBinFilter] = useState<string>("ALL");
   const [auditFilter, setAuditFilter] = useState<AuditFilterMode>("all");
   const [expandedBins, setExpandedBins] = useState<Set<string>>(new Set());
+  const [isCompletingAudit, setIsCompletingAudit] = useState(false);
+  const [showAuditHistory, setShowAuditHistory] = useState(false);
+  const [mountNowMs] = useState(() => Date.now());
 
   const allBins = useMemo<BinEntry[]>(() => {
     const map = new Map<string, BinEntry>();
@@ -457,6 +475,19 @@ export function BinAuditPanel({
     (b) => b.bin !== "Unassigned"
   ).length;
 
+  const lastCompletedAudit = auditHistory[0] ?? null;
+  const daysSinceLastAudit = lastCompletedAudit
+    ? Math.max(
+        0,
+        Math.floor(
+          (mountNowMs - new Date(lastCompletedAudit.completedAt).getTime()) /
+            86_400_000
+        )
+      )
+    : null;
+  const isQuarterlyDue =
+    daysSinceLastAudit !== null && daysSinceLastAudit >= 90;
+
   return (
     <div className="space-y-4">
       <section className="bg-white border border-[#E4E4DD] rounded-xl p-4 sm:p-5 space-y-3.5">
@@ -489,12 +520,144 @@ export function BinAuditPanel({
         </div>
 
         {/* Live Physical Inventory Audit Progress Strip */}
-        <div className="p-3 rounded-xl bg-[#FAFBF9] border border-[#E5E8E6] space-y-2">
+        <div className="p-3 rounded-xl bg-[#FAFBF9] border border-[#E5E8E6] space-y-2.5">
+          {/* Last Completed Inventory Date Banner */}
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-[#ECEFE9]">
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border font-semibold ${
+                  !lastCompletedAudit
+                    ? "bg-white border-[#DDE2DF] text-[#5C606B]"
+                    : isQuarterlyDue
+                      ? "bg-[#FFFBEB] border-[#FDE68A] text-[#92400E]"
+                      : "bg-[#ECFDF5] border-[#A7F3D0] text-[#065F46]"
+                }`}
+              >
+                <CalendarCheck className="w-3.5 h-3.5 shrink-0" />
+                {lastCompletedAudit ? (
+                  <span>
+                    Last Completed Inventory:{" "}
+                    <strong>
+                      {new Date(
+                        lastCompletedAudit.completedAt
+                      ).toLocaleDateString("en-US", {
+                        month: "short",
+                        day: "numeric",
+                        year: "numeric",
+                      })}
+                    </strong>{" "}
+                    (
+                    {daysSinceLastAudit === 0
+                      ? "Today"
+                      : `${daysSinceLastAudit}d ago`}
+                    {isQuarterlyDue ? " · Quarterly Audit Due" : ""}
+                    )
+                  </span>
+                ) : (
+                  <span>
+                    Last Completed Inventory: <strong>Not logged yet</strong>
+                  </span>
+                )}
+              </span>
+
+              {auditHistory.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowAuditHistory((v) => !v)}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-[#DDE2DF] bg-white text-[11px] font-semibold text-[#444B52] hover:border-[#0F766E] hover:text-[#0F766E] cursor-pointer"
+                >
+                  <History className="w-3 h-3" />
+                  <span>
+                    {showAuditHistory ? "Hide" : "History"} ({auditHistory.length})
+                  </span>
+                </button>
+              )}
+            </div>
+
+            {onCompleteInventoryAudit && (
+              <button
+                type="button"
+                disabled={isCompletingAudit}
+                onClick={async () => {
+                  const defaultNote =
+                    auditStats.missing > 0
+                      ? `${auditStats.verified}/${auditStats.total} verified, ${auditStats.missing} missing`
+                      : `${auditStats.verified}/${auditStats.total} verified`;
+                  const noteInput = window.prompt(
+                    `Mark this inventory audit as COMPLETED today?\n\nProgress: ${defaultNote}\n\nOptional note (e.g. "Q4 full audit"):`,
+                    ""
+                  );
+                  if (noteInput === null) return;
+                  setIsCompletingAudit(true);
+                  try {
+                    await onCompleteInventoryAudit({
+                      totalItems: auditStats.total,
+                      verifiedCount: auditStats.verified,
+                      missingCount: auditStats.missing,
+                      notes: noteInput.trim() || null,
+                    });
+                  } finally {
+                    setIsCompletingAudit(false);
+                  }
+                }}
+                className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-[11px] font-bold transition cursor-pointer disabled:opacity-50 ${
+                  auditStats.pct >= 90
+                    ? "bg-[#0F766E] text-white hover:bg-[#0B5B55] shadow-xs"
+                    : "bg-white border border-[#0F766E] text-[#0F766E] hover:bg-[#ECFDF5]"
+                }`}
+              >
+                <CalendarCheck className="w-3.5 h-3.5" />
+                <span>
+                  {isCompletingAudit
+                    ? "Saving…"
+                    : "Mark Inventory Completed"}
+                </span>
+              </button>
+            )}
+          </div>
+
+          {showAuditHistory && auditHistory.length > 0 && (
+            <div className="p-2.5 rounded-lg bg-white border border-[#E4E4DD] space-y-1.5">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-[#5C606B]">
+                Completed Inventory Log
+              </div>
+              {auditHistory.map((rec) => (
+                <div
+                  key={rec.id}
+                  className="flex flex-wrap items-center justify-between gap-2 text-[11px] py-1 border-b border-[#F1F1EC] last:border-b-0"
+                >
+                  <span className="font-semibold text-[#14151A]">
+                    {new Date(rec.completedAt).toLocaleDateString("en-US", {
+                      month: "short",
+                      day: "numeric",
+                      year: "numeric",
+                    })}
+                    {rec.notes ? (
+                      <span className="font-normal text-[#5C606B]">
+                        {" "}
+                        — {rec.notes}
+                      </span>
+                    ) : null}
+                  </span>
+                  <span className="font-mono text-[10px] text-[#0F766E] font-semibold">
+                    {rec.verifiedCount}/{rec.totalItems} verified
+                    {rec.missingCount > 0 ? (
+                      <span className="text-[#B91C1C]">
+                        {" "}
+                        · {rec.missingCount} missing
+                      </span>
+                    ) : null}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-bold text-[#14151A] inline-flex items-center gap-1.5">
                 <CheckCircle2 className="w-4 h-4 text-[#0F766E]" />
-                Inventory Audit: {auditStats.verified} / {auditStats.total}{" "}
+                Current Count: {auditStats.verified} / {auditStats.total}{" "}
                 Verified ({auditStats.pct}%)
               </span>
               {auditStats.missing > 0 && (
@@ -515,7 +678,7 @@ export function BinAuditPanel({
                 onClick={() => {
                   if (
                     window.confirm(
-                      `Reset audit checkmarks for all ${auditStats.auditedIds.length} checked items to start a fresh inventory count?`
+                      `Reset audit checkmarks for all ${auditStats.auditedIds.length} checked items to start a fresh inventory count?\n\n(Your Last Completed Inventory history will be preserved.)`
                     )
                   ) {
                     void onSetBinAudit(auditStats.auditedIds, null);

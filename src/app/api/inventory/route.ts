@@ -53,10 +53,89 @@ export async function POST(request: Request) {
           itemId?: string;
           itemIds?: string[];
           auditStatus: "verified" | "missing" | null;
+        }
+      | {
+          action: "complete_inventory_audit";
+          totalItems: number;
+          verifiedCount: number;
+          missingCount: number;
+          notes?: string | null;
         };
 
     const envReadiness = getEnvReadiness();
     const supabase = getSupabaseServerClient();
+
+    if (body.action === "complete_inventory_audit") {
+      const nowIso = new Date().toISOString();
+      const newRecord = {
+        id: `audit-${Date.now()}`,
+        completedAt: nowIso,
+        totalItems: Math.max(0, Math.floor(Number(body.totalItems) || 0)),
+        verifiedCount: Math.max(0, Math.floor(Number(body.verifiedCount) || 0)),
+        missingCount: Math.max(0, Math.floor(Number(body.missingCount) || 0)),
+        notes: body.notes?.trim() ? body.notes.trim().slice(0, 160) : null,
+      };
+
+      if (supabase && envReadiness.isSupabaseReady) {
+        const { data: existingLog } = await supabase
+          .from("inventory_items")
+          .select("id, item_specifics")
+          .eq("sku", "__RCC_AUDIT_LOG__")
+          .maybeSingle();
+
+        const prevSpecs = (existingLog?.item_specifics || {}) as Record<
+          string,
+          unknown
+        >;
+        const prevHistory = Array.isArray(prevSpecs.audit_history)
+          ? prevSpecs.audit_history
+          : [];
+        const nextHistory = [newRecord, ...prevHistory].slice(0, 25);
+
+        if (existingLog?.id) {
+          const { error: updErr } = await supabase
+            .from("inventory_items")
+            .update({
+              item_specifics: { ...prevSpecs, audit_history: nextHistory },
+              updated_at: nowIso,
+            })
+            .eq("id", existingLog.id);
+          if (updErr) {
+            return NextResponse.json({ error: updErr.message }, { status: 400 });
+          }
+        } else {
+          const { error: insErr } = await supabase
+            .from("inventory_items")
+            .insert({
+              sku: "__RCC_AUDIT_LOG__",
+              title: "System Inventory Audit History",
+              condition: "System",
+              cogs: 0,
+              prep_cost: 0,
+              target_price: 0,
+              floor_price: 0,
+              status: "archived",
+              item_specifics: { audit_history: nextHistory },
+              updated_at: nowIso,
+            });
+          if (insErr) {
+            return NextResponse.json({ error: insErr.message }, { status: 400 });
+          }
+        }
+
+        return NextResponse.json({
+          mode: "live",
+          record: newRecord,
+          auditHistory: nextHistory,
+        });
+      }
+
+      return NextResponse.json({
+        mode: "demo",
+        record: newRecord,
+        auditHistory: [newRecord],
+      });
+    }
 
     if (body.action === "set_bin_audit") {
       const targetIds = Array.from(

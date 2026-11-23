@@ -367,6 +367,15 @@ export interface ParsedOrderEmail {
   confidence: "high" | "medium" | "low";
 }
 
+export interface InventoryAuditRecord {
+  id: string;
+  completedAt: string;
+  totalItems: number;
+  verifiedCount: number;
+  missingCount: number;
+  notes?: string | null;
+}
+
 export interface CommandCenterPayload {
   mode: "live" | "demo";
   envReadiness: EnvReadiness;
@@ -381,6 +390,7 @@ export interface CommandCenterPayload {
   etsyActiveCount: number;
   etsyLastSyncedAt: string | null;
   channelCounts: Record<MarketplaceType, number>;
+  auditHistory?: InventoryAuditRecord[];
 }
 
 export interface EbayActionRequest {

@@ -998,7 +998,36 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
           <BinAuditPanel
             activeItems={data.items}
             draftItems={data.draftItems}
+            auditHistory={data.auditHistory ?? []}
             onOpenItemDetail={(row) => setDetailModalItemId(row.item_id)}
+            onCompleteInventoryAudit={async (summary) => {
+              const res = await fetch("/api/inventory", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  action: "complete_inventory_audit",
+                  ...summary,
+                }),
+              });
+              const payload = (await res.json()) as {
+                auditHistory?: typeof data.auditHistory;
+                error?: string;
+              };
+              if (!res.ok) {
+                throw new Error(
+                  payload.error || "Could not record completed inventory"
+                );
+              }
+              setData((prev) => ({
+                ...prev,
+                auditHistory: payload.auditHistory ?? prev.auditHistory,
+              }));
+              pushToast(
+                "success",
+                "Inventory Audit Completed",
+                `Logged ${summary.verifiedCount}/${summary.totalItems} verified on ${new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}.`
+              );
+            }}
             onSetBinAudit={async (itemIds, auditStatus) => {
               const idSet = new Set(itemIds);
               const nowIso = auditStatus ? new Date().toISOString() : null;
