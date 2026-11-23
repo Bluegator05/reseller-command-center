@@ -55,16 +55,16 @@ export async function POST() {
     ]);
     const syncedAt = new Date().toISOString();
 
-    // 1. Fetch existing inventory item IDs by SKU in chunks of 200
+    // 1. Fetch existing inventory item IDs + item_specifics by SKU in chunks of 200
     const skuToExisting = new Map<
       string,
-      { id: string; imageCount: number }
+      { id: string; imageCount: number; itemSpecifics: Record<string, unknown> }
     >();
     const allSkus = offers.map((o) => o.sku);
     for (const skuChunk of chunkArray(allSkus, 200)) {
       const { data: existingRows, error: lookupError } = await supabase!
         .from("inventory_items")
-        .select("id, sku, image_urls")
+        .select("id, sku, image_urls, item_specifics")
         .in("sku", skuChunk);
       if (lookupError) throw lookupError;
       for (const row of existingRows ?? []) {
@@ -72,6 +72,8 @@ export async function POST() {
         skuToExisting.set(row.sku as string, {
           id: row.id as string,
           imageCount: imgs.length,
+          itemSpecifics:
+            (row.item_specifics as Record<string, unknown> | null) ?? {},
         });
       }
     }
@@ -85,6 +87,7 @@ export async function POST() {
     const existingOffers: Array<{
       id: string;
       existingImageCount: number;
+      existingSpecs: Record<string, unknown>;
       offer: NormalizedEbayOffer;
     }> = [];
 
@@ -94,6 +97,7 @@ export async function POST() {
         existingOffers.push({
           id: existing.id,
           existingImageCount: existing.imageCount,
+          existingSpecs: existing.itemSpecifics,
           offer,
         });
       } else {
@@ -115,7 +119,10 @@ export async function POST() {
         target_price: offer.listedPrice,
         floor_price: roundCurrency(offer.listedPrice * 0.7),
         weight_oz: offer.weightOz,
-        item_specifics: offer.itemSpecifics,
+        item_specifics: {
+          ...offer.itemSpecifics,
+          quantity_available: String(Math.max(1, offer.quantityAvailable || 1)),
+        },
         image_urls: offer.imageUrls,
         status: "active",
         acquired_at: offer.listedAt,
@@ -132,10 +139,10 @@ export async function POST() {
       }
     }
 
-    // 3. Update existing SKUs in parallel chunks of 20 (preserving user COGS/bins/notes/floor & enriched full photo galleries)
+    // 3. Update existing SKUs in parallel chunks of 20 (preserving user COGS/bins/notes/floor/audit flags & enriched full photo galleries)
     for (const batch of chunkArray(existingOffers, 20)) {
       await Promise.all(
-        batch.map(async ({ id, existingImageCount, offer }) => {
+        batch.map(async ({ id, existingImageCount, existingSpecs, offer }) => {
           const patch: Record<string, unknown> = {
             title: offer.title,
             condition: offer.condition,
@@ -150,8 +157,15 @@ export async function POST() {
           if (offer.descriptionPlain) patch.description_plain = offer.descriptionPlain;
           if (offer.brand) patch.brand = offer.brand;
           if (offer.weightOz !== null) patch.weight_oz = offer.weightOz;
-          if (Object.keys(offer.itemSpecifics).length > 0) {
-            patch.item_specifics = offer.itemSpecifics;
+
+          const qtyStr = String(Math.max(1, offer.quantityAvailable || 1));
+          const hasIncomingSpecs = Object.keys(offer.itemSpecifics).length > 0;
+          if (hasIncomingSpecs || existingSpecs.quantity_available !== qtyStr) {
+            patch.item_specifics = {
+              ...existingSpecs,
+              ...offer.itemSpecifics,
+              quantity_available: qtyStr,
+            };
           }
 
           const { error: updErr } = await supabase!

@@ -65,11 +65,13 @@ interface BinEntry {
       parsedItemNumber?: string | null;
       auditStatus: AuditStatus;
       auditVerifiedAt: string | null;
+      quantity: number;
       radarRow?: StaleRadarRow;
     }
   >;
   totalBasis: number;
   totalRetail: number;
+  totalUnits: number;
   verifiedCount: number;
   missingCount: number;
 }
@@ -292,14 +294,17 @@ export function BinAuditPanel({
           items: [],
           totalBasis: 0,
           totalRetail: 0,
+          totalUnits: 0,
           verifiedCount: 0,
           missingCount: 0,
         };
         map.set(binKey, bucket);
       }
       bucket.items.push(entry);
-      bucket.totalBasis += basis;
-      bucket.totalRetail += retail;
+      const qty = Math.max(1, entry.quantity || 1);
+      bucket.totalBasis += basis * qty;
+      bucket.totalRetail += retail * qty;
+      bucket.totalUnits += qty;
       if (entry.auditStatus === "verified") bucket.verifiedCount += 1;
       if (entry.auditStatus === "missing") bucket.missingCount += 1;
     };
@@ -311,6 +316,7 @@ export function BinAuditPanel({
         r.title,
         r.category_hint
       );
+      const qty = Math.max(1, Math.floor(r.quantity_available ?? 1));
       add(
         parsed.bin,
         {
@@ -328,6 +334,7 @@ export function BinAuditPanel({
           parsedItemNumber: parsed.itemNumber,
           auditStatus: r.audit_status ?? null,
           auditVerifiedAt: r.audit_verified_at ?? null,
+          quantity: qty,
           radarRow: r,
         },
         r.total_cost_basis,
@@ -352,6 +359,11 @@ export function BinAuditPanel({
         typeof dSpecs.audit_verified_at === "string"
           ? dSpecs.audit_verified_at
           : null;
+      const dQty =
+        Number.isFinite(Number(dSpecs.quantity_available)) &&
+        Number(dSpecs.quantity_available) >= 1
+          ? Math.floor(Number(dSpecs.quantity_available))
+          : 1;
       add(
         parsed.bin,
         {
@@ -369,6 +381,7 @@ export function BinAuditPanel({
           parsedItemNumber: parsed.itemNumber,
           auditStatus: dAuditStatus,
           auditVerifiedAt: dAuditAt,
+          quantity: dQty,
         },
         basis,
         Number(d.target_price || 0)
@@ -384,12 +397,14 @@ export function BinAuditPanel({
 
   const auditStats = useMemo(() => {
     let total = 0;
+    let totalUnits = 0;
     let verified = 0;
     let missing = 0;
     const auditedIds: string[] = [];
     for (const b of allBins) {
       for (const it of b.items) {
         total += 1;
+        totalUnits += Math.max(1, it.quantity || 1);
         if (it.auditStatus === "verified") {
           verified += 1;
           auditedIds.push(it.id);
@@ -401,7 +416,7 @@ export function BinAuditPanel({
     }
     const unverified = total - verified - missing;
     const pct = total > 0 ? Math.round((verified / total) * 100) : 0;
-    return { total, verified, missing, unverified, pct, auditedIds };
+    return { total, totalUnits, verified, missing, unverified, pct, auditedIds };
   }, [allBins]);
 
   const visibleBins = useMemo<BinEntry[]>(() => {
@@ -430,8 +445,18 @@ export function BinAuditPanel({
         return {
           ...b,
           items: filteredItems,
-          totalBasis: filteredItems.reduce((s, x) => s + (x.cogs || 0), 0),
-          totalRetail: filteredItems.reduce((s, x) => s + (x.price || 0), 0),
+          totalBasis: filteredItems.reduce(
+            (s, x) => s + (x.cogs || 0) * Math.max(1, x.quantity || 1),
+            0
+          ),
+          totalRetail: filteredItems.reduce(
+            (s, x) => s + (x.price || 0) * Math.max(1, x.quantity || 1),
+            0
+          ),
+          totalUnits: filteredItems.reduce(
+            (s, x) => s + Math.max(1, x.quantity || 1),
+            0
+          ),
         };
       })
       .filter((b) => b.items.length > 0);
@@ -499,7 +524,11 @@ export function BinAuditPanel({
             <div>
               <h2 className="text-sm font-bold text-[#14151A]">
                 Bins &amp; Storage Locations ({assignedBinCount} Locations ·{" "}
-                {activeItems.length + draftItems.length} SKUs)
+                {activeItems.length + draftItems.length} SKUs
+                {auditStats.totalUnits > auditStats.total
+                  ? ` · ${auditStats.totalUnits} Total Units`
+                  : ""}
+                )
               </h2>
               <p className="text-xs text-[#5C606B] mt-0.5">
                 Tap <strong>Verify</strong> as you physically confirm each item
@@ -869,6 +898,9 @@ export function BinAuditPanel({
                     )}
                     <span className="text-xs font-mono font-semibold text-[#14151A]">
                       {b.items.length} item{b.items.length === 1 ? "" : "s"}
+                      {b.totalUnits > b.items.length
+                        ? ` (${b.totalUnits} units)`
+                        : ""}
                     </span>
                     <span
                       className={`px-2 py-0.5 rounded-full font-mono text-[10px] font-bold ${
@@ -973,6 +1005,18 @@ export function BinAuditPanel({
                                 <span className="font-mono font-bold text-[#14151A]">
                                   {it.sku}
                                 </span>
+                                {it.quantity > 1 ? (
+                                  <span
+                                    title={`eBay quantity available: ${it.quantity} — verify all ${it.quantity} units are on hand!`}
+                                    className="px-2 py-0.5 rounded-md bg-[#FEF3C7] border border-[#F59E0B] text-[#92400E] font-mono text-[10px] font-extrabold tracking-tight"
+                                  >
+                                    QTY ×{it.quantity}
+                                  </span>
+                                ) : (
+                                  <span className="px-1.5 py-0.5 rounded bg-[#F1F5F9] text-[#64748B] font-mono text-[9px] font-semibold">
+                                    Qty 1
+                                  </span>
+                                )}
                                 <span
                                   className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${
                                     it.status === "draft"

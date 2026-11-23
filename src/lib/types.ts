@@ -207,6 +207,7 @@ export interface StaleRadarRow {
   stale_radar_exempt?: boolean;
   audit_status?: "verified" | "missing" | null;
   audit_verified_at?: string | null;
+  quantity_available?: number;
   relist_count: number;
   last_relisted_at: string | null;
   days_since_relist: number | null;

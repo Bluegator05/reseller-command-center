@@ -48,6 +48,7 @@ export interface NormalizedEbayOffer {
   impressionsCount: number;
   promotedAdRatePct?: number;
   weightOz: number | null;
+  quantityAvailable: number;
 }
 
 export function isEbayConfigured(): boolean {
@@ -493,6 +494,7 @@ interface EbayOfferRecord {
   sku: string;
   status?: string;
   categoryId?: string;
+  availableQuantity?: number;
   listingDescription?: string;
   pricingSummary?: {
     price?: { value?: string; currency?: string };
@@ -507,7 +509,7 @@ interface EbayOfferRecord {
 
 /**
  * Pulls active Seller Hub / Mobile App / Legacy listings via eBay Trading API
- * `GetMyeBaySelling`, capturing real WatchCount, HitCount, and exact StartTime.
+ * `GetMyeBaySelling`, capturing real WatchCount, HitCount, QuantityAvailable, and StartTime.
  */
 async function fetchActiveTradingListings(
   limit = 2000
@@ -566,6 +568,15 @@ async function fetchActiveTradingListings(
       const watchCount = Number(extractXmlTag(block, "WatchCount") || 0) || 0;
       const hitCount = Number(extractXmlTag(block, "HitCount") || 0) || 0;
 
+      const rawQtyAvail = extractXmlTag(block, "QuantityAvailable");
+      const rawQtyTotal = Number(extractXmlTag(block, "Quantity") || 1) || 1;
+      const rawQtySold =
+        Number(extractXmlTag(sellingStatusBlock, "QuantitySold") || 0) || 0;
+      const quantityAvailable =
+        rawQtyAvail !== null && rawQtyAvail !== "" && Number.isFinite(Number(rawQtyAvail))
+          ? Math.max(1, Math.floor(Number(rawQtyAvail)))
+          : Math.max(1, Math.floor(rawQtyTotal - rawQtySold));
+
       const picBlock = extractXmlTag(block, "PictureDetails") || "";
       const picUrls = extractAllXmlTags(picBlock, "PictureURL")
         .map((u) => decodeXmlEntities(u))
@@ -600,6 +611,7 @@ async function fetchActiveTradingListings(
         watchersCount: watchCount,
         impressionsCount: hitCount,
         weightOz: null,
+        quantityAvailable,
       });
     }
 
@@ -675,6 +687,10 @@ export async function fetchActiveEbayOffers(
                 ? roundCurrency(weightVal * 16)
                 : weightVal
               : null;
+          const offerQty =
+            typeof offer.availableQuantity === "number" && offer.availableQuantity >= 1
+              ? Math.floor(offer.availableQuantity)
+              : 1;
 
           const existing =
             (listingId && byListingId.get(listingId)) || bySku.get(inv.sku);
@@ -689,6 +705,7 @@ export async function fetchActiveEbayOffers(
             if (inv.product?.brand) existing.brand = inv.product.brand;
             if (weightOz !== null) existing.weightOz = weightOz;
             if (inv.product?.aspects) existing.itemSpecifics = inv.product.aspects;
+            if (offerQty > 1) existing.quantityAvailable = offerQty;
             if (
               existing.imageUrls.length === 0 &&
               inv.product?.imageUrls?.length
@@ -716,6 +733,7 @@ export async function fetchActiveEbayOffers(
               watchersCount: 0,
               impressionsCount: 0,
               weightOz,
+              quantityAvailable: offerQty,
             };
             if (record.externalListingId) {
               byListingId.set(record.externalListingId, record);

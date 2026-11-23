@@ -246,6 +246,11 @@ export function enrichStaleRadarRow(
       typeof specs.audit_verified_at === "string"
         ? specs.audit_verified_at
         : null,
+    quantity_available:
+      Number.isFinite(Number(specs.quantity_available)) &&
+      Number(specs.quantity_available) >= 1
+        ? Math.floor(Number(specs.quantity_available))
+        : 1,
     relist_count: relistCount,
     last_relisted_at: lastRelistedAt,
     days_since_relist: daysSinceRelist,
