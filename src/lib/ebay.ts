@@ -881,9 +881,29 @@ function isBestOfferThresholdError(err: unknown): boolean {
   );
 }
 
+function parseIncompatibleAspectPairError(err: unknown): {
+  badValue: string;
+  targetAspect: string;
+  driverAspect: string;
+  driverValue: string;
+} | null {
+  const msg = err instanceof Error ? err.message : String(err || "");
+  const m = msg.match(
+    /"([^"]+)"\s+is\s+not\s+a\s+valid\s+(?:value\s+for\s+)?(.+?)\s+for\s+(?:the\s+)?(.+?)\s+"([^"]+)"\./i
+  );
+  if (!m) return null;
+  return {
+    badValue: m[1].trim(),
+    targetAspect: m[2].trim(),
+    driverAspect: m[3].trim(),
+    driverValue: m[4].trim(),
+  };
+}
+
 function parseInvalidItemSpecificError(
   err: unknown
 ): { badValue: string; aspectName: string } | null {
+  if (parseIncompatibleAspectPairError(err)) return null;
   const msg = err instanceof Error ? err.message : String(err || "");
   const m = msg.match(
     /"([^"]+)"\s+is\s+not\s+a\s+valid\s+value\s+for\s+([^.]+?)\./i
@@ -914,47 +934,177 @@ function buildItemSpecificsXml(
   return nvlXml ? `<ItemSpecifics>\n${nvlXml}\n    </ItemSpecifics>` : "";
 }
 
+interface EbayTaxonomyAspect {
+  localizedAspectName?: string;
+  aspectConstraint?: {
+    aspectRequired?: boolean;
+    aspectMode?: string;
+  };
+  aspectValues?: Array<{
+    localizedValue?: string;
+    valueConstraints?: Array<{
+      applicableForLocalizedAspectName?: string;
+      applicableForLocalizedAspectValues?: string[];
+    }>;
+  }>;
+}
+
+async function fetchEbayCategoryAspects(
+  categoryId: string,
+  siteId = "0"
+): Promise<EbayTaxonomyAspect[]> {
+  if (!categoryId || !/^\d+$/.test(categoryId)) return [];
+  const treeId = siteId === "100" ? "100" : "0";
+  try {
+    const data = await ebayRequest<{ aspects?: EbayTaxonomyAspect[] }>(
+      `/commerce/taxonomy/v1/category_tree/${treeId}/get_item_aspects_for_category?category_id=${encodeURIComponent(
+        categoryId
+      )}`
+    );
+    return data.aspects || [];
+  } catch (err) {
+    console.warn(
+      `[ebay] Taxonomy get_item_aspects_for_category(${categoryId}) warning:`,
+      err
+    );
+    return [];
+  }
+}
+
 async function fetchEbayCategoryAspectOptions(
   categoryId: string,
   aspectName: string,
   siteId = "0"
 ): Promise<{ required: boolean; values: string[] } | null> {
-  if (!categoryId || !/^\d+$/.test(categoryId)) return null;
-  const treeId = siteId === "100" ? "100" : "0";
-  try {
-    const data = await ebayRequest<{
-      aspects?: Array<{
-        localizedAspectName?: string;
-        aspectConstraint?: {
-          aspectRequired?: boolean;
-          aspectMode?: string;
-        };
-        aspectValues?: Array<{ localizedValue?: string }>;
-      }>;
-    }>(
-      `/commerce/taxonomy/v1/category_tree/${treeId}/get_item_aspects_for_category?category_id=${encodeURIComponent(
-        categoryId
-      )}`
+  const aspects = await fetchEbayCategoryAspects(categoryId, siteId);
+  const target = aspectName.trim().toLowerCase();
+  const matched = aspects.find(
+    (a) => a.localizedAspectName?.trim().toLowerCase() === target
+  );
+  if (!matched) return null;
+  const values = (matched.aspectValues || [])
+    .map((v) => v.localizedValue?.trim() || "")
+    .filter(Boolean);
+  return {
+    required: Boolean(matched.aspectConstraint?.aspectRequired),
+    values,
+  };
+}
+
+async function resolveCompatibleEbayDependentAspect(params: {
+  categoryId: string | null | undefined;
+  targetAspect: string;
+  badValue: string;
+  driverAspect: string;
+  driverValue: string;
+  siteId?: string;
+}): Promise<
+  | { action: "replace"; value: string; sampleOptions: string[] }
+  | { action: "remove"; sampleOptions: string[] }
+  | { action: "unmatched"; sampleOptions: string[] }
+> {
+  const {
+    categoryId,
+    targetAspect,
+    badValue,
+    driverAspect,
+    driverValue,
+    siteId = "0",
+  } = params;
+
+  const targetLower = targetAspect.trim().toLowerCase();
+  const driverLower = driverAspect.trim().toLowerCase();
+  const driverValLower = driverValue.trim().toLowerCase();
+  const badLower = badValue.trim().toLowerCase();
+
+  const aspects = categoryId
+    ? await fetchEbayCategoryAspects(categoryId, siteId)
+    : [];
+  const targetMeta = aspects.find(
+    (a) => a.localizedAspectName?.trim().toLowerCase() === targetLower
+  );
+  const driverMeta = aspects.find(
+    (a) => a.localizedAspectName?.trim().toLowerCase() === driverLower
+  );
+
+  const compatible: string[] = [];
+
+  // 1. Forward constraint lookup: driverAspect (e.g. Size = "5") -> applicable targetAspect (e.g. Size Type = ["Juniors"])
+  if (driverMeta?.aspectValues) {
+    const driverValEntry = driverMeta.aspectValues.find(
+      (v) => v.localizedValue?.trim().toLowerCase() === driverValLower
     );
-    const target = aspectName.trim().toLowerCase();
-    const matched = (data.aspects || []).find(
-      (a) => a.localizedAspectName?.trim().toLowerCase() === target
-    );
-    if (!matched) return null;
-    const values = (matched.aspectValues || [])
-      .map((v) => v.localizedValue?.trim() || "")
-      .filter(Boolean);
-    return {
-      required: Boolean(matched.aspectConstraint?.aspectRequired),
-      values,
-    };
-  } catch (err) {
-    console.warn(
-      `[ebay] Taxonomy get_item_aspects_for_category(${categoryId}, ${aspectName}) warning:`,
-      err
-    );
-    return null;
+    for (const vc of driverValEntry?.valueConstraints || []) {
+      if (
+        vc.applicableForLocalizedAspectName?.trim().toLowerCase() === targetLower
+      ) {
+        for (const allowed of vc.applicableForLocalizedAspectValues || []) {
+          const clean = allowed.trim();
+          if (clean && !compatible.includes(clean)) compatible.push(clean);
+        }
+      }
+    }
   }
+
+  // 2. Reverse constraint lookup: targetAspect values whose valueConstraints list driverValue
+  if (compatible.length === 0 && targetMeta?.aspectValues) {
+    for (const tv of targetMeta.aspectValues) {
+      const valName = tv.localizedValue?.trim();
+      if (!valName) continue;
+      const matchesDriver = (tv.valueConstraints || []).some(
+        (vc) =>
+          vc.applicableForLocalizedAspectName?.trim().toLowerCase() ===
+            driverLower &&
+          (vc.applicableForLocalizedAspectValues || []).some(
+            (dv) => dv.trim().toLowerCase() === driverValLower
+          )
+      );
+      if (matchesDriver && !compatible.includes(valName)) {
+        compatible.push(valName);
+      }
+    }
+  }
+
+  const usable = compatible.filter((v) => v.toLowerCase() !== badLower);
+  if (usable.length > 0) {
+    return { action: "replace", value: usable[0], sampleOptions: usable.slice(0, 12) };
+  }
+
+  // 3. Deterministic eBay clothing Size -> Size Type fallback
+  if (targetLower === "size type" && driverLower === "size") {
+    const cleanDriver = driverValue.trim().toUpperCase();
+    let inferred: string | null = null;
+    if (/^\d+$/.test(cleanDriver)) {
+      const n = Number(cleanDriver);
+      if (n % 2 === 1 && n >= 1 && n <= 21) {
+        inferred = "Juniors";
+      } else if (n % 2 === 0 && n >= 14 && n <= 32) {
+        inferred = badLower === "regular" ? "Plus" : "Regular";
+      } else if (n % 2 === 0 && n >= 0 && n <= 14) {
+        inferred = "Regular";
+      }
+    } else if (/^(\d+P|X{0,2}[SML]P)$/i.test(cleanDriver)) {
+      inferred = "Petite";
+    } else if (/^([1-6]X|\d+W)$/i.test(cleanDriver)) {
+      inferred = "Plus";
+    } else if (/^(X{0,3}[ML]T|\d+T)$/i.test(cleanDriver) && !/^[2-5]T$/i.test(cleanDriver)) {
+      inferred = "Tall";
+    }
+    if (inferred && inferred.toLowerCase() !== badLower) {
+      return { action: "replace", value: inferred, sampleOptions: [inferred] };
+    }
+  }
+
+  const targetOptions = (targetMeta?.aspectValues || [])
+    .map((v) => v.localizedValue?.trim() || "")
+    .filter(Boolean)
+    .slice(0, 12);
+
+  if (targetMeta && !targetMeta.aspectConstraint?.aspectRequired) {
+    return { action: "remove", sampleOptions: targetOptions };
+  }
+
+  return { action: "unmatched", sampleOptions: targetOptions };
 }
 
 function pickBestEbayAspectValue(
@@ -1978,8 +2128,8 @@ export async function endAndSellSimilarEbayOffer(params: {
     }
   };
 
-  // Auto-repair up to 3 invalid Item Specific values (e.g. `"2M" is not a valid value for Size`)
-  // using eBay's official Taxonomy API allowed values for this exact category.
+  // Auto-repair up to 3 invalid or incompatible Item Specifics (e.g. `"2M" is not a valid value for Size`,
+  // or `"Regular" is not a valid Size Type for the Size "5"`) using eBay's Taxonomy API.
   let relistXml = "";
   let currentSpecsXml = mergedSpecsXml;
   let workingSpecsMap: Map<string, { name: string; values: string[] }> | null = null;
@@ -1991,24 +2141,39 @@ export async function endAndSellSimilarEbayOffer(params: {
       relistXml = await attemptRelistWithSpecs(currentSpecsXml);
       break;
     } catch (passErr) {
-      const invalidSpec = parseInvalidItemSpecificError(passErr);
-      const aspectKey = invalidSpec?.aspectName.toLowerCase() || "";
-      if (!invalidSpec || pass >= 3 || repairedAspects.has(aspectKey)) {
+      const pairErr = parseIncompatibleAspectPairError(passErr);
+      const singleErr = pairErr ? null : parseInvalidItemSpecificError(passErr);
+      const targetAspectName = pairErr
+        ? pairErr.targetAspect
+        : singleErr?.aspectName || "";
+      const badValue = pairErr ? pairErr.badValue : singleErr?.badValue || "";
+      const aspectKey = targetAspectName.toLowerCase();
+
+      if ((!pairErr && !singleErr) || pass >= 3 || repairedAspects.has(aspectKey)) {
         throw passErr;
       }
       repairedAspects.add(aspectKey);
 
-      const resolution = await resolveValidEbayAspectReplacement({
-        categoryId: existingDetails?.categoryId,
-        aspectName: invalidSpec.aspectName,
-        badValue: invalidSpec.badValue,
-        siteId: listingSiteId,
-      });
+      const resolution = pairErr
+        ? await resolveCompatibleEbayDependentAspect({
+            categoryId: existingDetails?.categoryId,
+            targetAspect: pairErr.targetAspect,
+            badValue: pairErr.badValue,
+            driverAspect: pairErr.driverAspect,
+            driverValue: pairErr.driverValue,
+            siteId: listingSiteId,
+          })
+        : await resolveValidEbayAspectReplacement({
+            categoryId: existingDetails?.categoryId,
+            aspectName: singleErr!.aspectName,
+            badValue: singleErr!.badValue,
+            siteId: listingSiteId,
+          });
 
       if (resolution.action === "unmatched") {
         if (resolution.sampleOptions.length > 0) {
           throw new Error(
-            `${passErr instanceof Error ? passErr.message : String(passErr)} Valid eBay options for ${invalidSpec.aspectName}: ${resolution.sampleOptions.join(", ")}`
+            `${passErr instanceof Error ? passErr.message : String(passErr)} Valid eBay options for ${targetAspectName}: ${resolution.sampleOptions.join(", ")}`
           );
         }
         throw passErr;
@@ -2037,22 +2202,22 @@ export async function endAndSellSimilarEbayOffer(params: {
       const existingEntry = workingSpecsMap.get(aspectKey);
       if (resolution.action === "replace") {
         workingSpecsMap.set(aspectKey, {
-          name: existingEntry?.name || invalidSpec.aspectName,
+          name: existingEntry?.name || targetAspectName,
           values: [resolution.value],
         });
         specAdjustmentNotes.push(
-          `${invalidSpec.aspectName} "${invalidSpec.badValue}" → "${resolution.value}"`
+          `${targetAspectName} "${badValue}" → "${resolution.value}"`
         );
         console.warn(
-          `[ebay] RelistFixedPriceItem(${rawId}) auto-adjusted ${invalidSpec.aspectName}: "${invalidSpec.badValue}" -> "${resolution.value}"`
+          `[ebay] RelistFixedPriceItem(${rawId}) auto-adjusted ${targetAspectName}: "${badValue}" -> "${resolution.value}"`
         );
       } else {
         workingSpecsMap.delete(aspectKey);
         specAdjustmentNotes.push(
-          `Removed invalid optional ${invalidSpec.aspectName} ("${invalidSpec.badValue}")`
+          `Removed incompatible optional ${targetAspectName} ("${badValue}")`
         );
         console.warn(
-          `[ebay] RelistFixedPriceItem(${rawId}) removed invalid optional ${invalidSpec.aspectName}: "${invalidSpec.badValue}"`
+          `[ebay] RelistFixedPriceItem(${rawId}) removed incompatible optional ${targetAspectName}: "${badValue}"`
         );
       }
 
