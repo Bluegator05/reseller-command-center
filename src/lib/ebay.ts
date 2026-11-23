@@ -332,6 +332,7 @@ export interface EbayFullItemDetails {
   descriptionPlain: string;
   brand: string | null;
   condition: string | null;
+  categoryId: string | null;
   categoryHint: string | null;
   itemSpecifics: Record<string, string[]>;
   weightOz: number | null;
@@ -417,6 +418,7 @@ export async function fetchEbayItemDetails(
       null;
     const condition = extractXmlTag(itemBlock, "ConditionDisplayName");
     const categoryBlock = extractXmlTag(itemBlock, "PrimaryCategory") || "";
+    const categoryId = extractXmlTag(categoryBlock, "CategoryID");
     const categoryHint = extractXmlTag(categoryBlock, "CategoryName");
 
     // Extract live package weight & dimensions from ShippingPackageDetails / CalculatedShippingRate
@@ -491,6 +493,7 @@ export async function fetchEbayItemDetails(
       descriptionPlain,
       brand,
       condition,
+      categoryId,
       categoryHint,
       itemSpecifics,
       weightOz,
@@ -876,6 +879,236 @@ function isBestOfferThresholdError(err: unknown): boolean {
   return /best\s*offer|auto[- ]?accept|minimum.*offer|auto[- ]?decline|2191660[3456]/i.test(
     msg
   );
+}
+
+function parseInvalidItemSpecificError(
+  err: unknown
+): { badValue: string; aspectName: string } | null {
+  const msg = err instanceof Error ? err.message : String(err || "");
+  const m = msg.match(
+    /"([^"]+)"\s+is\s+not\s+a\s+valid\s+value\s+for\s+([^.]+?)\./i
+  );
+  if (!m) return null;
+  return {
+    badValue: m[1].trim(),
+    aspectName: m[2].trim(),
+  };
+}
+
+function buildItemSpecificsXml(
+  specsMap: Map<string, { name: string; values: string[] }>
+): string {
+  const nvlXml = [...specsMap.values()]
+    .filter((entry) => entry.name.trim() && entry.values.length > 0)
+    .slice(0, 35)
+    .map(
+      (entry) => `      <NameValueList>
+        <Name>${escapeXml(entry.name.trim().slice(0, 40))}</Name>
+        ${entry.values
+          .slice(0, 5)
+          .map((v) => `<Value>${escapeXml(v.trim().slice(0, 65))}</Value>`)
+          .join("\n        ")}
+      </NameValueList>`
+    )
+    .join("\n");
+  return nvlXml ? `<ItemSpecifics>\n${nvlXml}\n    </ItemSpecifics>` : "";
+}
+
+async function fetchEbayCategoryAspectOptions(
+  categoryId: string,
+  aspectName: string,
+  siteId = "0"
+): Promise<{ required: boolean; values: string[] } | null> {
+  if (!categoryId || !/^\d+$/.test(categoryId)) return null;
+  const treeId = siteId === "100" ? "100" : "0";
+  try {
+    const data = await ebayRequest<{
+      aspects?: Array<{
+        localizedAspectName?: string;
+        aspectConstraint?: {
+          aspectRequired?: boolean;
+          aspectMode?: string;
+        };
+        aspectValues?: Array<{ localizedValue?: string }>;
+      }>;
+    }>(
+      `/commerce/taxonomy/v1/category_tree/${treeId}/get_item_aspects_for_category?category_id=${encodeURIComponent(
+        categoryId
+      )}`
+    );
+    const target = aspectName.trim().toLowerCase();
+    const matched = (data.aspects || []).find(
+      (a) => a.localizedAspectName?.trim().toLowerCase() === target
+    );
+    if (!matched) return null;
+    const values = (matched.aspectValues || [])
+      .map((v) => v.localizedValue?.trim() || "")
+      .filter(Boolean);
+    return {
+      required: Boolean(matched.aspectConstraint?.aspectRequired),
+      values,
+    };
+  } catch (err) {
+    console.warn(
+      `[ebay] Taxonomy get_item_aspects_for_category(${categoryId}, ${aspectName}) warning:`,
+      err
+    );
+    return null;
+  }
+}
+
+function pickBestEbayAspectValue(
+  badValue: string,
+  allowedValues: string[]
+): string | null {
+  if (allowedValues.length === 0) return null;
+  const clean = badValue.trim();
+  const lower = clean.toLowerCase();
+  const compact = (s: string) => s.toLowerCase().replace(/[^a-z0-9.]/g, "");
+
+  const byLower = new Map<string, string>();
+  const byCompact = new Map<string, string>();
+  for (const val of allowedValues) {
+    const l = val.toLowerCase();
+    if (!byLower.has(l)) byLower.set(l, val);
+    const c = compact(val);
+    if (c && !byCompact.has(c)) byCompact.set(c, val);
+  }
+
+  // 1. Exact case-insensitive or compact alphanumeric match
+  if (byLower.has(lower)) return byLower.get(lower)!;
+  if (byCompact.has(compact(clean))) return byCompact.get(compact(clean))!;
+
+  // 2. Common size / abbreviation aliases
+  const aliasGroups: string[][] = [
+    ["xxs", "2xs", "xx-small", "extra extra small"],
+    ["xs", "x-small", "extra small"],
+    ["s", "sm", "small"],
+    ["m", "med", "medium", "regular"],
+    ["l", "lg", "lrg", "large"],
+    ["xl", "x-large", "extra large"],
+    ["2xl", "xxl", "2x", "xx-large", "extra extra large"],
+    ["3xl", "xxxl", "3x", "xxx-large"],
+    ["4xl", "xxxxl", "4x"],
+    ["os", "osfa", "one size", "one size fits all", "one size fits most"],
+    ["nb", "newborn"],
+  ];
+  for (const group of aliasGroups) {
+    if (group.includes(lower) || group.includes(compact(clean))) {
+      for (const cand of group) {
+        if (byLower.has(cand)) return byLower.get(cand)!;
+        if (byCompact.has(compact(cand))) return byCompact.get(compact(cand))!;
+      }
+    }
+  }
+
+  // 3. Baby / infant month sizing (e.g. "2M" -> "2 Months" or "0-3 Months" when category uses month buckets)
+  const monthMatch = clean.match(/^(\d+(?:\.\d+)?)\s*m(?:o|os|onths?)?$/i);
+  if (monthMatch) {
+    const n = Number(monthMatch[1]);
+    for (const cand of [
+      `${monthMatch[1]} months`,
+      `${monthMatch[1]} month`,
+      `${monthMatch[1]} mo`,
+      `${monthMatch[1]}m`,
+    ]) {
+      if (byLower.has(cand)) return byLower.get(cand)!;
+      if (byCompact.has(compact(cand))) return byCompact.get(compact(cand))!;
+    }
+    // Narrowest matching month range (e.g. "0-3 Months" for 2M)
+    let bestRange: { val: string; span: number } | null = null;
+    for (const val of allowedValues) {
+      const rm = val.match(/^(\d+)\s*[-–to]+\s*(\d+)\s*months?$/i);
+      if (!rm) continue;
+      const lo = Number(rm[1]);
+      const hi = Number(rm[2]);
+      if (n >= lo && n <= hi) {
+        const span = hi - lo;
+        if (!bestRange || span < bestRange.span) {
+          bestRange = { val, span };
+        }
+      }
+    }
+    if (bestRange) return bestRange.val;
+  }
+
+  // 4. Numeric + fit/width/length suffix (e.g. "2M" -> "2 Medium", "2 Regular", "2"; "8.5W" -> "8.5"; "10P" -> "10P" / "10")
+  const numSuffix = clean.match(/^(\d+(?:\.\d+)?)\s*([a-z]+)$/i);
+  if (numSuffix) {
+    const num = numSuffix[1];
+    const suf = numSuffix[2].toLowerCase();
+    const suffixExpansions: Record<string, string[]> = {
+      m: ["medium", "regular", "med", "m"],
+      r: ["regular", "reg", "r"],
+      p: ["petite", "p"],
+      t: ["tall", "t"],
+      w: ["wide", "women's", "w"],
+      l: ["long", "l"],
+      s: ["short", "s"],
+      d: ["medium", "d"],
+      b: ["medium", "b"],
+      n: ["narrow", "n"],
+    };
+    const expanded = suffixExpansions[suf] || [suf];
+    for (const exp of expanded) {
+      for (const cand of [`${num} ${exp}`, `${num}${exp}`, `size ${num} ${exp}`]) {
+        if (byLower.has(cand)) return byLower.get(cand)!;
+        if (byCompact.has(compact(cand))) return byCompact.get(compact(cand))!;
+      }
+    }
+    for (const cand of [num, `size ${num}`, `us ${num}`, `${num} us`]) {
+      if (byLower.has(cand)) return byLower.get(cand)!;
+      if (byCompact.has(compact(cand))) return byCompact.get(compact(cand))!;
+    }
+  }
+
+  // 5. Prefix-stripped sizes (e.g. "US 8" -> "8", "Size 2" -> "2")
+  const prefixStrip = clean.match(/^(?:us|size|sz|eu|uk)\s*[:#-]?\s*([a-z0-9.]+)$/i);
+  if (prefixStrip) {
+    const bare = prefixStrip[1].toLowerCase();
+    if (byLower.has(bare)) return byLower.get(bare)!;
+    if (byCompact.has(compact(bare))) return byCompact.get(compact(bare))!;
+  }
+
+  return null;
+}
+
+async function resolveValidEbayAspectReplacement(params: {
+  categoryId: string | null | undefined;
+  aspectName: string;
+  badValue: string;
+  siteId?: string;
+}): Promise<
+  | { action: "replace"; value: string; sampleOptions: string[] }
+  | { action: "remove"; sampleOptions: string[] }
+  | { action: "unmatched"; sampleOptions: string[] }
+> {
+  const { categoryId, aspectName, badValue, siteId = "0" } = params;
+  const aspectInfo = categoryId
+    ? await fetchEbayCategoryAspectOptions(categoryId, aspectName, siteId)
+    : null;
+  const allowedValues = aspectInfo?.values || [];
+  const sampleOptions = allowedValues.slice(0, 12);
+
+  if (allowedValues.length > 0) {
+    const matched = pickBestEbayAspectValue(badValue, allowedValues);
+    if (matched && matched.toLowerCase() !== badValue.trim().toLowerCase()) {
+      return { action: "replace", value: matched, sampleOptions };
+    }
+    if (aspectInfo && !aspectInfo.required) {
+      return { action: "remove", sampleOptions };
+    }
+    return { action: "unmatched", sampleOptions };
+  }
+
+  // Fallback when Taxonomy API didn't return options for this category:
+  // strip single trailing width/fit letter from numeric size (e.g. "2M" -> "2", "8.5W" -> "8.5")
+  const numFit = badValue.trim().match(/^(\d+(?:\.\d+)?)\s*[mwrdbnlps]$/i);
+  if (numFit) {
+    return { action: "replace", value: numFit[1], sampleOptions: [] };
+  }
+
+  return { action: "unmatched", sampleOptions: [] };
 }
 
 /**
@@ -1632,113 +1865,205 @@ export async function endAndSellSimilarEbayOffer(params: {
       ? `<StartPrice currencyID="USD">${roundCurrency(newPrice).toFixed(2)}</StartPrice>`
       : "";
 
-  const baseRelistFieldsXml = `
+  const buildBaseRelistXml = (specsXml: string) => `
       <ItemID>${rawId}</ItemID>
       ${titleOverrideXml}
       ${priceOverrideXml}
-      ${mergedSpecsXml}
+      ${specsXml}
       ${pkgOverrideXml}`;
 
-  // Fallback ladder when eBay says Best Offer is unavailable/disabled for the category or listing type:
-  // A) Explicitly set BestOfferEnabled=false (overrides inherited BestOfferEnabled=true)
-  // B) Set BestOfferEnabled=false AND delete inherited auto-accept / min-offer thresholds
-  // C) Bare relist omitting all BestOfferDetails, ListingDetails, and DeletedField tags
-  const relistWithoutBestOffer = async (): Promise<string> => {
-    try {
-      return await ebayTradingRequest(
-        "RelistFixedPriceItem",
-        `<Item>${baseRelistFieldsXml}
+  let finalBestOfferNote = bestOfferPlan.note;
+
+  // Executes RelistFixedPriceItem with full Best Offer fallback ladder for a given ItemSpecifics XML
+  const attemptRelistWithSpecs = async (specsXml: string): Promise<string> => {
+    const baseFieldsXml = buildBaseRelistXml(specsXml);
+
+    // Fallback ladder when eBay says Best Offer is unavailable/disabled for the category or listing type:
+    // A) Explicitly set BestOfferEnabled=false (overrides inherited BestOfferEnabled=true)
+    // B) Set BestOfferEnabled=false AND delete inherited auto-accept / min-offer thresholds
+    // C) Bare relist omitting all BestOfferDetails, ListingDetails, and DeletedField tags
+    const relistWithoutBestOffer = async (): Promise<string> => {
+      try {
+        return await ebayTradingRequest(
+          "RelistFixedPriceItem",
+          `<Item>${baseFieldsXml}
       <BestOfferDetails>
         <BestOfferEnabled>false</BestOfferEnabled>
       </BestOfferDetails>
     </Item>`,
-        listingSiteId
-      );
-    } catch (errA) {
-      if (!isBestOfferUnavailableError(errA) && !isBestOfferThresholdError(errA)) {
-        throw errA;
-      }
-      try {
-        return await ebayTradingRequest(
-          "RelistFixedPriceItem",
-          `<Item>${baseRelistFieldsXml}
+          listingSiteId
+        );
+      } catch (errA) {
+        if (!isBestOfferUnavailableError(errA) && !isBestOfferThresholdError(errA)) {
+          throw errA;
+        }
+        try {
+          return await ebayTradingRequest(
+            "RelistFixedPriceItem",
+            `<Item>${baseFieldsXml}
       <BestOfferDetails>
         <BestOfferEnabled>false</BestOfferEnabled>
       </BestOfferDetails>
     </Item>
     <DeletedField>Item.ListingDetails.BestOfferAutoAcceptPrice</DeletedField>
     <DeletedField>Item.ListingDetails.MinimumBestOfferPrice</DeletedField>`,
-          listingSiteId
-        );
-      } catch (errB) {
-        if (!isBestOfferUnavailableError(errB) && !isBestOfferThresholdError(errB)) {
-          throw errB;
-        }
-        return await ebayTradingRequest(
-          "RelistFixedPriceItem",
-          `<Item>${baseRelistFieldsXml}
+            listingSiteId
+          );
+        } catch (errB) {
+          if (!isBestOfferUnavailableError(errB) && !isBestOfferThresholdError(errB)) {
+            throw errB;
+          }
+          return await ebayTradingRequest(
+            "RelistFixedPriceItem",
+            `<Item>${baseFieldsXml}
     </Item>`,
-          listingSiteId
-        );
+            listingSiteId
+          );
+        }
       }
-    }
-  };
+    };
 
-  let relistXml: string;
-  let finalBestOfferNote = bestOfferPlan.note;
-
-  try {
-    relistXml = await ebayTradingRequest(
-      "RelistFixedPriceItem",
-      `<Item>${baseRelistFieldsXml}
+    try {
+      return await ebayTradingRequest(
+        "RelistFixedPriceItem",
+        `<Item>${baseFieldsXml}
       ${bestOfferPlan.listingDetailsXml}
     </Item>
     ${bestOfferPlan.deletedFieldsXml}`,
-      listingSiteId
-    );
-  } catch (relistErr) {
-    if (isBestOfferUnavailableError(relistErr)) {
-      console.warn(
-        `[ebay] RelistFixedPriceItem(${rawId}) hit Best Offer unavailable for category/listing type — retrying with Best Offer disabled:`,
-        relistErr
+        listingSiteId
       );
-      relistXml = await relistWithoutBestOffer();
-      finalBestOfferNote =
-        "Best Offer disabled (not supported by this eBay category/listing type)";
-    } else if (isBestOfferThresholdError(relistErr)) {
-      // Last-resort failsafe: if eBay still rejects due to Best Offer thresholds,
-      // immediately clear BestOfferAutoAcceptPrice & MinimumBestOfferPrice and retry
-      // so the ended listing is NEVER left stranded unpublished!
-      console.warn(
-        `[ebay] RelistFixedPriceItem(${rawId}) hit Best Offer threshold conflict — retrying with cleared Best Offer auto-rules:`,
-        relistErr
-      );
-      try {
-        relistXml = await ebayTradingRequest(
-          "RelistFixedPriceItem",
-          `<Item>${baseRelistFieldsXml}
+    } catch (relistErr) {
+      if (isBestOfferUnavailableError(relistErr)) {
+        console.warn(
+          `[ebay] RelistFixedPriceItem(${rawId}) hit Best Offer unavailable for category/listing type — retrying with Best Offer disabled:`,
+          relistErr
+        );
+        finalBestOfferNote =
+          "Best Offer disabled (not supported by this eBay category/listing type)";
+        return await relistWithoutBestOffer();
+      }
+      if (isBestOfferThresholdError(relistErr)) {
+        // Last-resort failsafe: if eBay still rejects due to Best Offer thresholds,
+        // immediately clear BestOfferAutoAcceptPrice & MinimumBestOfferPrice and retry
+        // so the ended listing is NEVER left stranded unpublished!
+        console.warn(
+          `[ebay] RelistFixedPriceItem(${rawId}) hit Best Offer threshold conflict — retrying with cleared Best Offer auto-rules:`,
+          relistErr
+        );
+        try {
+          const xml = await ebayTradingRequest(
+            "RelistFixedPriceItem",
+            `<Item>${baseFieldsXml}
       </Item>
       <DeletedField>Item.ListingDetails.BestOfferAutoAcceptPrice</DeletedField>
       <DeletedField>Item.ListingDetails.MinimumBestOfferPrice</DeletedField>`,
-          listingSiteId
-        );
-        finalBestOfferNote = "Best Offer auto-rules cleared to allow lower price";
-      } catch (retryErr) {
-        if (isBestOfferUnavailableError(retryErr)) {
-          console.warn(
-            `[ebay] RelistFixedPriceItem(${rawId}) retry hit Best Offer unavailable — retrying with Best Offer disabled:`,
-            retryErr
+            listingSiteId
           );
-          relistXml = await relistWithoutBestOffer();
-          finalBestOfferNote =
-            "Best Offer disabled (not supported by this eBay category/listing type)";
-        } else {
+          finalBestOfferNote = "Best Offer auto-rules cleared to allow lower price";
+          return xml;
+        } catch (retryErr) {
+          if (isBestOfferUnavailableError(retryErr)) {
+            console.warn(
+              `[ebay] RelistFixedPriceItem(${rawId}) retry hit Best Offer unavailable — retrying with Best Offer disabled:`,
+              retryErr
+            );
+            finalBestOfferNote =
+              "Best Offer disabled (not supported by this eBay category/listing type)";
+            return await relistWithoutBestOffer();
+          }
           throw retryErr;
         }
       }
-    } else {
       throw relistErr;
     }
+  };
+
+  // Auto-repair up to 3 invalid Item Specific values (e.g. `"2M" is not a valid value for Size`)
+  // using eBay's official Taxonomy API allowed values for this exact category.
+  let relistXml = "";
+  let currentSpecsXml = mergedSpecsXml;
+  let workingSpecsMap: Map<string, { name: string; values: string[] }> | null = null;
+  const repairedAspects = new Set<string>();
+  const specAdjustmentNotes: string[] = [];
+
+  for (let pass = 0; pass < 4; pass++) {
+    try {
+      relistXml = await attemptRelistWithSpecs(currentSpecsXml);
+      break;
+    } catch (passErr) {
+      const invalidSpec = parseInvalidItemSpecificError(passErr);
+      const aspectKey = invalidSpec?.aspectName.toLowerCase() || "";
+      if (!invalidSpec || pass >= 3 || repairedAspects.has(aspectKey)) {
+        throw passErr;
+      }
+      repairedAspects.add(aspectKey);
+
+      const resolution = await resolveValidEbayAspectReplacement({
+        categoryId: existingDetails?.categoryId,
+        aspectName: invalidSpec.aspectName,
+        badValue: invalidSpec.badValue,
+        siteId: listingSiteId,
+      });
+
+      if (resolution.action === "unmatched") {
+        if (resolution.sampleOptions.length > 0) {
+          throw new Error(
+            `${passErr instanceof Error ? passErr.message : String(passErr)} Valid eBay options for ${invalidSpec.aspectName}: ${resolution.sampleOptions.join(", ")}`
+          );
+        }
+        throw passErr;
+      }
+
+      if (!workingSpecsMap) {
+        workingSpecsMap = new Map<string, { name: string; values: string[] }>();
+        for (const [k, vals] of Object.entries(
+          existingDetails?.itemSpecifics || {}
+        )) {
+          if (k.trim() && Array.isArray(vals) && vals.length > 0) {
+            workingSpecsMap.set(k.trim().toLowerCase(), {
+              name: k.trim(),
+              values: [...vals],
+            });
+          }
+        }
+        for (const s of cleanAddSpecs) {
+          workingSpecsMap.set(s.name.trim().toLowerCase(), {
+            name: s.name.trim().slice(0, 40),
+            values: [s.value.trim().slice(0, 65)],
+          });
+        }
+      }
+
+      const existingEntry = workingSpecsMap.get(aspectKey);
+      if (resolution.action === "replace") {
+        workingSpecsMap.set(aspectKey, {
+          name: existingEntry?.name || invalidSpec.aspectName,
+          values: [resolution.value],
+        });
+        specAdjustmentNotes.push(
+          `${invalidSpec.aspectName} "${invalidSpec.badValue}" → "${resolution.value}"`
+        );
+        console.warn(
+          `[ebay] RelistFixedPriceItem(${rawId}) auto-adjusted ${invalidSpec.aspectName}: "${invalidSpec.badValue}" -> "${resolution.value}"`
+        );
+      } else {
+        workingSpecsMap.delete(aspectKey);
+        specAdjustmentNotes.push(
+          `Removed invalid optional ${invalidSpec.aspectName} ("${invalidSpec.badValue}")`
+        );
+        console.warn(
+          `[ebay] RelistFixedPriceItem(${rawId}) removed invalid optional ${invalidSpec.aspectName}: "${invalidSpec.badValue}"`
+        );
+      }
+
+      currentSpecsXml = buildItemSpecificsXml(workingSpecsMap);
+    }
+  }
+
+  if (specAdjustmentNotes.length > 0) {
+    finalBestOfferNote = [finalBestOfferNote, ...specAdjustmentNotes]
+      .filter(Boolean)
+      .join(" · ");
   }
 
   const newListingId = extractXmlTag(relistXml, "ItemID") || rawId;
