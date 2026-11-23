@@ -263,6 +263,44 @@ function getBinSortRank(bin: string): number {
   return 4;
 }
 
+/**
+ * Extracts the physical rack/shelf/bin item number from a custom SKU so items
+ * inside Clothes (and every shelf/garage bin) sort in clean numerical order
+ * (e.g. 1, 2, 3, ..., 42, 108, 2044) — ignoring dates, source codes like SA730,
+ * storage count notes like "/7 STORAGE", and 12-digit EBAY- IDs.
+ */
+function extractItemSortNumber(skuRaw: string): number | null {
+  const sku = (skuRaw || "").trim();
+  if (!sku || /^ebay-\d+$/i.test(sku)) return null;
+
+  // Strip parenthetical garage/storage count notes, "/16 storage", dates, and Shelf labels
+  const cleaned = sku
+    .replace(/\([^)]*(?:garage|storage)[^)]*\)/gi, " ")
+    .replace(/\/\s*\d+\s*storage\b/gi, " ")
+    .replace(/\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/g, " ")
+    .replace(/\bshelf\s*[-#:]?\s*[A-Za-z0-9]+\b/gi, " ");
+
+  // Look for standalone integer tokens (1–6 digits, NOT glued to letters like SA730)
+  const standaloneMatches = cleaned.match(/(?:^|[^A-Za-z0-9])(\d{1,6})(?=$|[^A-Za-z0-9])/g);
+  if (standaloneMatches && standaloneMatches.length > 0) {
+    const nums = standaloneMatches
+      .map((m) => Number(m.replace(/\D+/g, "")))
+      .filter((n) => Number.isFinite(n));
+    if (nums.length > 0) {
+      return nums[nums.length - 1];
+    }
+  }
+
+  // Handle concatenated garage codes like G4001 -> 1, G4016 -> 16
+  const garageSeq = cleaned.match(/(?:^|[^A-Za-z0-9])G[1-9](\d{2,4})(?=$|[^A-Za-z0-9])/i);
+  if (garageSeq?.[1]) {
+    const n = Number(garageSeq[1]);
+    if (Number.isFinite(n)) return n;
+  }
+
+  return null;
+}
+
 export function BinAuditPanel({
   activeItems,
   draftItems,
@@ -386,6 +424,19 @@ export function BinAuditPanel({
         basis,
         Number(d.target_price || 0)
       );
+    }
+
+    for (const bucket of map.values()) {
+      bucket.items.sort((a, b) => {
+        const numA = extractItemSortNumber(a.sku);
+        const numB = extractItemSortNumber(b.sku);
+        if (numA !== null && numB !== null && numA !== numB) {
+          return numA - numB;
+        }
+        if (numA !== null && numB === null) return -1;
+        if (numA === null && numB !== null) return 1;
+        return a.sku.localeCompare(b.sku, undefined, { numeric: true });
+      });
     }
 
     return [...map.values()].sort((a, b) => {
