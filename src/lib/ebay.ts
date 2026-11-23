@@ -170,9 +170,50 @@ async function ebayRequest<T>(
  * eBay Seller Hub and the eBay mobile app (including real WatchCount, HitCount,
  * and exact StartTime).
  */
+const EBAY_SITE_NAME_TO_ID: Record<string, string> = {
+  us: "0",
+  canada: "2",
+  uk: "3",
+  australia: "15",
+  austria: "16",
+  belgium_french: "23",
+  france: "71",
+  germany: "77",
+  ebaymotors: "100",
+  motors: "100",
+  italy: "101",
+  belgium_dutch: "123",
+  netherlands: "146",
+  spain: "186",
+  switzerland: "193",
+  hongkong: "201",
+  india: "203",
+  ireland: "205",
+  malaysia: "207",
+  canadafrench: "210",
+  philippines: "211",
+  poland: "212",
+  singapore: "216",
+};
+
+function resolveEbaySiteId(siteName?: string | null): string {
+  if (!siteName) return "0";
+  const key = siteName.trim().toLowerCase();
+  if (/^\d+$/.test(key)) return key;
+  return EBAY_SITE_NAME_TO_ID[key] || "0";
+}
+
+function isWrongEbaySiteError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err || "");
+  return /not\s+created\s+on\s+this\s+eBay\s+site|different\s+eBay\s+site|created\s+on\s+a\s+different\s+site|site\s*id\s*(mismatch|invalid)|21916519|21916518/i.test(
+    msg
+  );
+}
+
 async function ebayTradingRequest(
   callName: string,
-  innerXml: string
+  innerXml: string,
+  siteId = "0"
 ): Promise<string> {
   const token = await getEbayAccessToken();
   const { apiBase } = getEbayBaseUrls();
@@ -183,36 +224,51 @@ async function ebayTradingRequest(
   ${innerXml}
 </${callName}Request>`;
 
-  const response = await fetch(`${apiBase}/ws/api.dll`, {
-    method: "POST",
-    headers: {
-      "X-EBAY-API-SITEID": "0",
-      "X-EBAY-API-COMPATIBILITY-LEVEL": "1355",
-      "X-EBAY-API-CALL-NAME": callName,
-      "X-EBAY-API-IAF-TOKEN": token,
-      "Content-Type": "text/xml; charset=utf-8",
-    },
-    body: xmlPayload,
-    cache: "no-store",
-  });
+  const sendOnce = async (targetSiteId: string): Promise<string> => {
+    const response = await fetch(`${apiBase}/ws/api.dll`, {
+      method: "POST",
+      headers: {
+        "X-EBAY-API-SITEID": targetSiteId,
+        "X-EBAY-API-COMPATIBILITY-LEVEL": "1355",
+        "X-EBAY-API-CALL-NAME": callName,
+        "X-EBAY-API-IAF-TOKEN": token,
+        "Content-Type": "text/xml; charset=utf-8",
+      },
+      body: xmlPayload,
+      cache: "no-store",
+    });
 
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(
-      `eBay Trading API ${callName} failed (${response.status}): ${text.slice(0, 240)}`
-    );
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(
+        `eBay Trading API ${callName} failed (${response.status}): ${text.slice(0, 240)}`
+      );
+    }
+
+    const ack = extractXmlTag(text, "Ack");
+    if (ack && ack !== "Success" && ack !== "Warning") {
+      const longMsg =
+        extractXmlTag(text, "LongMessage") ||
+        extractXmlTag(text, "ShortMessage") ||
+        "Trading API returned Failure";
+      throw new Error(`eBay ${callName} error: ${decodeXmlEntities(longMsg)}`);
+    }
+
+    return text;
+  };
+
+  try {
+    return await sendOnce(siteId);
+  } catch (err) {
+    // Listings created on eBay Motors use SiteID 100 instead of US SiteID 0
+    if (siteId === "0" && isWrongEbaySiteError(err)) {
+      console.warn(
+        `[ebay] ${callName} hit wrong eBay site on SiteID 0 — retrying on eBay Motors (SiteID 100)`
+      );
+      return await sendOnce("100");
+    }
+    throw err;
   }
-
-  const ack = extractXmlTag(text, "Ack");
-  if (ack && ack !== "Success" && ack !== "Warning") {
-    const longMsg =
-      extractXmlTag(text, "LongMessage") ||
-      extractXmlTag(text, "ShortMessage") ||
-      "Trading API returned Failure";
-    throw new Error(`eBay ${callName} error: ${decodeXmlEntities(longMsg)}`);
-  }
-
-  return text;
 }
 
 function decodeXmlEntities(input: string): string {
@@ -288,6 +344,8 @@ export interface EbayFullItemDetails {
   bestOfferEnabled: boolean;
   bestOfferAutoAcceptPrice: number | null;
   minimumBestOfferPrice: number | null;
+  site: string;
+  siteId: string;
 }
 
 /**
@@ -419,6 +477,13 @@ export async function fetchEbayItemDetails(
         ? roundCurrency(rawMinOffer)
         : null;
 
+    // Extract listing-level <Site> (strip <Seller> first because Seller.Site is always US even for eBayMotors listings)
+    const itemWithoutSeller = itemBlock
+      .replace(/<Seller\b[^>]*>[\s\S]*?<\/Seller>/gi, "")
+      .replace(/<Buyer\b[^>]*>[\s\S]*?<\/Buyer>/gi, "");
+    const site = extractXmlTag(itemWithoutSeller, "Site") || "US";
+    const siteId = resolveEbaySiteId(site);
+
     return {
       itemId: cleanId,
       imageUrls,
@@ -438,6 +503,8 @@ export async function fetchEbayItemDetails(
       bestOfferEnabled,
       bestOfferAutoAcceptPrice,
       minimumBestOfferPrice,
+      site,
+      siteId,
     };
   } catch (err) {
     console.warn(`[ebay] GetItem(${cleanId}) warning:`, err);
@@ -1117,6 +1184,7 @@ export async function updateEbayOfferPrice(params: {
 
   // Fallback for Seller Hub / Trading API listings (12-digit ItemID)
   const existingDetails = await fetchEbayItemDetails(rawId);
+  const listingSiteId = existingDetails?.siteId || "0";
   const bestOfferPlan = resolveBestOfferPlan({
     targetPrice: Number(formattedPrice),
     previousPrice: existingDetails?.currentPrice ?? null,
@@ -1135,7 +1203,8 @@ export async function updateEbayOfferPrice(params: {
         <BestOfferDetails>
           <BestOfferEnabled>false</BestOfferEnabled>
         </BestOfferDetails>
-      </Item>`
+      </Item>`,
+        listingSiteId
       );
     } catch (errA) {
       if (!isBestOfferUnavailableError(errA) && !isBestOfferThresholdError(errA)) {
@@ -1146,7 +1215,8 @@ export async function updateEbayOfferPrice(params: {
         `<Item>
         <ItemID>${rawId}</ItemID>
         <StartPrice currencyID="${currency}">${formattedPrice}</StartPrice>
-      </Item>`
+      </Item>`,
+        listingSiteId
       );
     }
   };
@@ -1159,7 +1229,8 @@ export async function updateEbayOfferPrice(params: {
       <StartPrice currencyID="${currency}">${formattedPrice}</StartPrice>
       ${bestOfferPlan.listingDetailsXml}
     </Item>
-    ${bestOfferPlan.deletedFieldsXml}`
+    ${bestOfferPlan.deletedFieldsXml}`,
+      listingSiteId
     );
   } catch (err) {
     if (isBestOfferUnavailableError(err)) {
@@ -1173,7 +1244,8 @@ export async function updateEbayOfferPrice(params: {
           <StartPrice currencyID="${currency}">${formattedPrice}</StartPrice>
         </Item>
         <DeletedField>Item.ListingDetails.BestOfferAutoAcceptPrice</DeletedField>
-        <DeletedField>Item.ListingDetails.MinimumBestOfferPrice</DeletedField>`
+        <DeletedField>Item.ListingDetails.MinimumBestOfferPrice</DeletedField>`,
+          listingSiteId
         );
       } catch (retryErr) {
         if (isBestOfferUnavailableError(retryErr)) {
@@ -1529,13 +1601,16 @@ export async function endAndSellSimilarEbayOffer(params: {
           note: null,
         };
 
+  const listingSiteId = existingDetails?.siteId || "0";
+
   // EndFixedPriceItem -> RelistFixedPriceItem (fresh 12-digit ItemID)
   // Tolerate "already ended" so a previously interrupted relist can recover cleanly!
   try {
     await ebayTradingRequest(
       "EndFixedPriceItem",
       `<ItemID>${rawId}</ItemID>
-       <EndingReason>NotAvailable</EndingReason>`
+       <EndingReason>NotAvailable</EndingReason>`,
+      listingSiteId
     );
   } catch (endErr) {
     const endMsg = endErr instanceof Error ? endErr.message : String(endErr || "");
@@ -1576,7 +1651,8 @@ export async function endAndSellSimilarEbayOffer(params: {
       <BestOfferDetails>
         <BestOfferEnabled>false</BestOfferEnabled>
       </BestOfferDetails>
-    </Item>`
+    </Item>`,
+        listingSiteId
       );
     } catch (errA) {
       if (!isBestOfferUnavailableError(errA) && !isBestOfferThresholdError(errA)) {
@@ -1591,7 +1667,8 @@ export async function endAndSellSimilarEbayOffer(params: {
       </BestOfferDetails>
     </Item>
     <DeletedField>Item.ListingDetails.BestOfferAutoAcceptPrice</DeletedField>
-    <DeletedField>Item.ListingDetails.MinimumBestOfferPrice</DeletedField>`
+    <DeletedField>Item.ListingDetails.MinimumBestOfferPrice</DeletedField>`,
+          listingSiteId
         );
       } catch (errB) {
         if (!isBestOfferUnavailableError(errB) && !isBestOfferThresholdError(errB)) {
@@ -1600,7 +1677,8 @@ export async function endAndSellSimilarEbayOffer(params: {
         return await ebayTradingRequest(
           "RelistFixedPriceItem",
           `<Item>${baseRelistFieldsXml}
-    </Item>`
+    </Item>`,
+          listingSiteId
         );
       }
     }
@@ -1615,7 +1693,8 @@ export async function endAndSellSimilarEbayOffer(params: {
       `<Item>${baseRelistFieldsXml}
       ${bestOfferPlan.listingDetailsXml}
     </Item>
-    ${bestOfferPlan.deletedFieldsXml}`
+    ${bestOfferPlan.deletedFieldsXml}`,
+      listingSiteId
     );
   } catch (relistErr) {
     if (isBestOfferUnavailableError(relistErr)) {
@@ -1640,7 +1719,8 @@ export async function endAndSellSimilarEbayOffer(params: {
           `<Item>${baseRelistFieldsXml}
       </Item>
       <DeletedField>Item.ListingDetails.BestOfferAutoAcceptPrice</DeletedField>
-      <DeletedField>Item.ListingDetails.MinimumBestOfferPrice</DeletedField>`
+      <DeletedField>Item.ListingDetails.MinimumBestOfferPrice</DeletedField>`,
+          listingSiteId
         );
         finalBestOfferNote = "Best Offer auto-rules cleared to allow lower price";
       } catch (retryErr) {
