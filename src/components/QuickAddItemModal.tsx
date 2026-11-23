@@ -19,6 +19,8 @@ interface QuickAddItemModalProps {
 }
 
 const SOURCE_TYPE_OPTIONS = [
+  { value: "storage_auction", label: "Storage Auction (Bulk Buy)" },
+  { value: "pallet_liquidation", label: "Pallet Liquidation (Bulk Buy)" },
   { value: "thrift", label: "Thrift Store (Goodwill / Savers)" },
   { value: "bins", label: "Goodwill Outlet (Bins)" },
   { value: "estate_sale", label: "Estate Sale" },

@@ -60,6 +60,10 @@ export async function POST(request: Request) {
           verifiedCount: number;
           missingCount: number;
           notes?: string | null;
+        }
+      | {
+          action: "restore_disposed";
+          itemId: string;
         };
 
     const envReadiness = getEnvReadiness();
@@ -361,6 +365,9 @@ export async function POST(request: Request) {
           string,
           unknown
         >;
+        const prevLog = Array.isArray(existingSpecs.activity_log)
+          ? existingSpecs.activity_log
+          : [];
         const tag = `[${disposition.toUpperCase()} ${dateTag}]${body.note?.trim() ? ` ${body.note.trim()}` : ""}`;
         const nextNotes = item.notes ? `${item.notes} · ${tag}` : tag;
 
@@ -373,6 +380,22 @@ export async function POST(request: Request) {
               ...existingSpecs,
               disposition,
               disposition_at: nowIso,
+              disposal_status: disposition,
+              disposal_date: nowIso,
+              disposal_notes: body.note?.trim() || null,
+              activity_log: [
+                {
+                  id: `evt-${Date.now()}`,
+                  type: disposition,
+                  timestamp: nowIso,
+                  title:
+                    disposition === "donated"
+                      ? "Marked as Donated"
+                      : "Marked as Discarded",
+                  detail: body.note?.trim() || "Removed from active inventory",
+                },
+                ...prevLog.slice(0, 49),
+              ],
             },
             updated_at: nowIso,
           })
@@ -402,6 +425,63 @@ export async function POST(request: Request) {
         queuedDelists: [],
         message: `Marked item ${disposition} in demo store.`,
       });
+    }
+
+    if (body.action === "restore_disposed") {
+      if (!body.itemId) {
+        return NextResponse.json({ error: "Missing itemId" }, { status: 400 });
+      }
+      if (supabase && envReadiness.isSupabaseReady) {
+        const nowIso = new Date().toISOString();
+        const { data: item, error: itemErr } = await supabase
+          .from("inventory_items")
+          .select("id, sku, item_specifics")
+          .eq("id", body.itemId)
+          .single();
+        if (itemErr || !item) {
+          return NextResponse.json({ error: "Item not found" }, { status: 404 });
+        }
+        const existingSpecs = (item.item_specifics || {}) as Record<
+          string,
+          unknown
+        >;
+        const nextSpecs: Record<string, unknown> = { ...existingSpecs };
+        delete nextSpecs.disposition;
+        delete nextSpecs.disposition_at;
+        delete nextSpecs.disposal_status;
+        delete nextSpecs.disposal_date;
+        delete nextSpecs.disposal_notes;
+        const prevLog = Array.isArray(existingSpecs.activity_log)
+          ? existingSpecs.activity_log
+          : [];
+        nextSpecs.activity_log = [
+          {
+            id: `evt-${Date.now()}`,
+            type: "restored",
+            timestamp: nowIso,
+            title: "Restored to Draft Inventory",
+            detail: "Removed donated/discarded status",
+          },
+          ...prevLog.slice(0, 49),
+        ];
+
+        const { error: updErr } = await supabase
+          .from("inventory_items")
+          .update({
+            status: "draft",
+            item_specifics: nextSpecs,
+            updated_at: nowIso,
+          })
+          .eq("id", item.id);
+        if (updErr) {
+          return NextResponse.json({ error: updErr.message }, { status: 400 });
+        }
+        return NextResponse.json({
+          mode: "live",
+          message: `Restored ${item.sku} back to Draft Inventory.`,
+        });
+      }
+      return NextResponse.json({ mode: "demo", message: "Restored in demo mode." });
     }
 
     if (body.action === "promote_draft") {

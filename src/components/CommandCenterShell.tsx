@@ -7,6 +7,7 @@ import {
   AlertCircle,
   Archive,
   BarChart3,
+  Boxes,
   CheckCircle2,
   CircleDollarSign,
   ClipboardList,
@@ -24,6 +25,7 @@ import {
 import { AnalyticsTaxPanel } from "./AnalyticsTaxPanel";
 import { BinAuditPanel } from "./BinAuditPanel";
 import { BuildRoadmapPanel } from "./BuildRoadmapPanel";
+import { BulkBuysPanel } from "./BulkBuysPanel";
 import { ChannelStatusStrip } from "./ChannelStatusStrip";
 import { CrossListDrawer } from "./CrossListDrawer";
 import { ExtensionQueuePanel } from "./ExtensionQueuePanel";
@@ -31,6 +33,7 @@ import { ItemDetailModal } from "./ItemDetailModal";
 import { ListingStudioPanel } from "./ListingStudioPanel";
 import { QuickAddItemModal } from "./QuickAddItemModal";
 import { SalesLedgerPanel } from "./SalesLedgerPanel";
+import { SalesOrderDetailModal } from "./SalesOrderDetailModal";
 import { SourcingCompsPanel } from "./SourcingCompsPanel";
 import { StaleRadarTable } from "./StaleRadarTable";
 import { WatcherOffersPanel } from "./WatcherOffersPanel";
@@ -71,11 +74,15 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
     | "offers"
     | "sourcing"
     | "bins"
+    | "bulk_buys"
     | "extension"
     | "sales"
     | "analytics"
     | "roadmap"
   >("radar");
+  const [selectedOrderIdForDetail, setSelectedOrderIdForDetail] = useState<
+    string | null
+  >(null);
   const [lockEnabled, setLockEnabled] = useState(false);
   const [mountNow] = useState(() => Date.now());
   const [sentOfferIds, setSentOfferIds] = useState<Set<string>>(new Set());
@@ -805,6 +812,25 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
           </button>
 
           <button
+            id="tab-bulk-buys"
+            type="button"
+            onClick={() => setActiveTab("bulk_buys")}
+            className={`relative w-full py-2 px-1 rounded-xl flex flex-col items-center gap-1 text-[10px] font-semibold transition cursor-pointer ${
+              activeTab === "bulk_buys"
+                ? "bg-[#ECFDF5] text-[#0F766E]"
+                : "text-[#5C606B] hover:bg-[#F2F6F4] hover:text-[#14151A]"
+            }`}
+          >
+            <Boxes className="w-4 h-4" />
+            <span>Bulk Buys</span>
+            {(data.bulkBuys?.length ?? 0) > 0 && (
+              <span className="absolute top-1 right-1 px-1 rounded-full bg-[#0F766E] text-white font-mono text-[9px] leading-tight">
+                {data.bulkBuys!.length}
+              </span>
+            )}
+          </button>
+
+          <button
             id="tab-analytics-tax"
             type="button"
             onClick={() => setActiveTab("analytics")}
@@ -1464,6 +1490,17 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
               );
             }}
           />
+        ) : activeTab === "bulk_buys" ? (
+          <BulkBuysPanel
+            bulkBuys={data.bulkBuys ?? []}
+            activeItems={data.items}
+            draftItems={data.draftItems}
+            salesOrders={data.salesOrders}
+            disposedItems={data.disposedItems ?? []}
+            onRefresh={refreshInventory}
+            onToast={(msg) => pushToast("info", "Bulk Buys", msg)}
+            onSelectActiveItem={(row) => setDetailModalItemId(row.item_id)}
+          />
         ) : activeTab === "sales" ? (
           <SalesLedgerPanel
             activeItems={data.items}
@@ -1474,6 +1511,7 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
             onSyncEbaySales={handleSyncEbaySales}
             onTriggerWebhookSale={handleTriggerWebhookSale}
             onTriggerInboundEmail={handleTriggerInboundEmail}
+            onSelectOrder={(order) => setSelectedOrderIdForDetail(order.id)}
             onUpdateSalesOrder={async (req: SalesOrderUpdateRequest) => {
               const res = await fetch("/api/sales", {
                 method: "PATCH",
@@ -1512,9 +1550,38 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
           <AnalyticsTaxPanel
             activeItems={data.items}
             draftItems={data.draftItems}
+            disposedItems={data.disposedItems ?? []}
             salesOrders={data.salesOrders}
             expenses={data.expenses}
             onOpenItemDetail={(row) => setDetailModalItemId(row.item_id)}
+            onSelectOrder={(order) => setSelectedOrderIdForDetail(order.id)}
+            onSyncEbayLocations={() => handleSyncEbaySales(365)}
+            isSyncingLocations={isSyncingEbaySales}
+            onRestoreDisposed={async (itemId: string) => {
+              const res = await fetch("/api/inventory", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "restore_disposed", itemId }),
+              });
+              const payload = (await res.json()) as {
+                message?: string;
+                error?: string;
+              };
+              if (!res.ok) {
+                pushToast(
+                  "error",
+                  "Restore Failed",
+                  payload.error || "Could not restore item."
+                );
+                return;
+              }
+              await refreshInventory();
+              pushToast(
+                "success",
+                "Restored to Draft Inventory",
+                payload.message || "Item moved back to Drafts."
+              );
+            }}
             onAddExpense={async (input: {
               expense_date: string;
               category: ExpenseCategoryType;
@@ -1585,7 +1652,34 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
             ? (data.items.find((i) => i.item_id === detailModalItemId) ?? null)
             : null
         }
+        bulkBuys={data.bulkBuys ?? []}
+        jobs={data.recentJobs}
         onClose={() => setDetailModalItemId(null)}
+        onDispose={async (itemId, disposition) => {
+          const res = await fetch("/api/inventory", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "dispose", itemId, disposition }),
+          });
+          const payload = (await res.json()) as {
+            message?: string;
+            error?: string;
+          };
+          if (!res.ok) {
+            pushToast(
+              "error",
+              "Disposal Failed",
+              payload.error || "Could not update item."
+            );
+            return;
+          }
+          await refreshInventory();
+          pushToast(
+            "success",
+            disposition === "donated" ? "Item Marked Donated" : "Item Marked Discarded",
+            payload.message || "Moved to Donated & Discarded Write-Off Ledger."
+          );
+        }}
         onSave={async (updates: ItemDetailUpdateRequest) => {
           const res = await fetch("/api/inventory", {
             method: "PATCH",
@@ -1606,6 +1700,40 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
             "success",
             `Updated ${updates.sku || "Item"}`,
             "Sourcing, COGS, SKU, and tax details saved & profit recalculated."
+          );
+        }}
+      />
+
+      <SalesOrderDetailModal
+        order={
+          selectedOrderIdForDetail
+            ? (data.salesOrders.find((o) => o.id === selectedOrderIdForDetail) ??
+              null)
+            : null
+        }
+        bulkBuys={data.bulkBuys ?? []}
+        jobs={data.recentJobs}
+        onClose={() => setSelectedOrderIdForDetail(null)}
+        onSaveCosts={async ({ orderId, cogs, shipping_cost }) => {
+          const res = await fetch("/api/sales", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ orderId, cogs, shipping_cost }),
+          });
+          const payload = (await res.json()) as { error?: string };
+          if (!res.ok) {
+            pushToast(
+              "error",
+              "Failed to Update Order Costs",
+              payload.error || "Unknown error"
+            );
+            return;
+          }
+          await refreshInventory();
+          pushToast(
+            "success",
+            "Order Costs Updated",
+            "COGS, shipping cost, and net profit recalculated."
           );
         }}
       />

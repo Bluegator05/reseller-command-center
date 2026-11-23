@@ -25,6 +25,8 @@ export type JobStatusType =
   | "failed";
 
 export type SourcingChannelType =
+  | "storage_auction"
+  | "pallet_liquidation"
   | "thrift"
   | "bins"
   | "estate_sale"
@@ -34,6 +36,65 @@ export type SourcingChannelType =
   | "wholesale"
   | "consignment"
   | "personal";
+
+export type DisposalStatus = "donated" | "discarded";
+
+export interface ItemActivityEvent {
+  id: string;
+  type:
+    | "acquired"
+    | "listed"
+    | "relisted"
+    | "price_changed"
+    | "promoted"
+    | "bulk_buy_added"
+    | "bulk_buy_cost_locked"
+    | "sold"
+    | "shipped"
+    | "returned"
+    | "donated"
+    | "discarded"
+    | "restored"
+    | "audit_verified"
+    | "note";
+  timestamp: string;
+  title: string;
+  detail?: string;
+  meta?: Record<string, string | number | boolean | null>;
+}
+
+export interface BulkBuyRecord {
+  id: string;
+  name: string;
+  lot_code?: string | null;
+  purchase_date: string;
+  source_location: string;
+  source_type: SourcingChannelType | string;
+  storage_location?: string | null;
+  total_spent: number;
+  split_mode: "even" | "by_unit";
+  notes?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DisposedInventoryRecord {
+  id: string;
+  sku: string;
+  title: string;
+  image_url: string | null;
+  cogs: number;
+  prep_cost: number;
+  bin_location: string | null;
+  source_location: string | null;
+  source_type: string | null;
+  acquired_at: string | null;
+  disposal_status: DisposalStatus;
+  disposal_date: string;
+  disposal_notes: string | null;
+  bulk_buy_id: string | null;
+  bulk_buy_locked: boolean;
+}
 
 export type TaxCategoryType =
   | "inventory_cogs"
@@ -208,6 +269,12 @@ export interface StaleRadarRow {
   audit_status?: "verified" | "missing" | null;
   audit_verified_at?: string | null;
   quantity_available?: number;
+  quantity_purchased?: number;
+  bulk_buy_id?: string | null;
+  bulk_buy_locked?: boolean;
+  disposal_status?: DisposalStatus | null;
+  disposal_date?: string | null;
+  activity_log?: ItemActivityEvent[];
   relist_count: number;
   last_relisted_at: string | null;
   days_since_relist: number | null;
@@ -286,6 +353,7 @@ export interface SalesOrderRecord {
   external_order_id: string | null;
   gross_sale_price: number;
   marketplace_fees: number;
+  ad_fee?: number;
   shipping_cost: number;
   refund_amount?: number;
   cogs: number;
@@ -293,7 +361,10 @@ export interface SalesOrderRecord {
   source_location?: string | null;
   source_type?: string | null;
   acquired_at?: string | null;
+  listed_at?: string | null;
   bin_location?: string | null;
+  bulk_buy_id?: string | null;
+  bulk_buy_locked?: boolean;
   weight_oz?: number | null;
   pkg_dimensions?: string | null;
   fulfillment_status?: OrderFulfillmentStatus;
@@ -301,6 +372,11 @@ export interface SalesOrderRecord {
   shipped_at?: string | null;
   return_reason?: string | null;
   restocked?: boolean;
+  buyer_city?: string | null;
+  buyer_state?: string | null;
+  buyer_postal?: string | null;
+  buyer_country?: string | null;
+  activity_log?: ItemActivityEvent[];
   net_profit: number;
   true_net_after_cogs: number;
   sold_at: string;
@@ -341,6 +417,8 @@ export interface SalesOrderUpdateRequest {
   refund_amount?: number;
   return_reason?: string | null;
   restockAndRelist?: boolean;
+  shipping_cost?: number;
+  cogs?: number;
 }
 
 export interface AutoDelistCascadeItem {
@@ -382,6 +460,8 @@ export interface CommandCenterPayload {
   envReadiness: EnvReadiness;
   items: StaleRadarRow[];
   draftItems: InventoryItem[];
+  disposedItems?: DisposedInventoryRecord[];
+  bulkBuys?: BulkBuyRecord[];
   accounts: MarketplaceAccount[];
   recentJobs: ChannelJob[];
   extensionJobs: ChannelJob[];

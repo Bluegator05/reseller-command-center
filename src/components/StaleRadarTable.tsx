@@ -95,6 +95,7 @@ type FilterKey =
   | "missing_poshmark"
   | "missing_mercari"
   | "missing_facebook"
+  | "missing_data"
   | "at_floor";
 
 type SortKey =
@@ -369,6 +370,12 @@ export function StaleRadarTable({
           i.relist_count > 0 &&
           (i.days_since_relist ?? i.days_listed) >= donateDaysThreshold
       ).length,
+      missingDataCount: items.filter(
+        (i) =>
+          Number(i.cogs || 0) <= 0 ||
+          !i.bin_location?.trim() ||
+          !i.source_location?.trim()
+      ).length,
     };
   }, [items, starredSet, donateDaysThreshold]);
 
@@ -393,6 +400,16 @@ export function StaleRadarTable({
       }
       if (activeFilter === "priority" && !starredSet.has(row.sku)) return false;
       if (activeFilter === "at_floor" && !row.is_at_floor) return false;
+      if (
+        activeFilter === "missing_data" &&
+        !(
+          Number(row.cogs || 0) <= 0 ||
+          !row.bin_location?.trim() ||
+          !row.source_location?.trim()
+        )
+      ) {
+        return false;
+      }
       if (
         activeFilter === "unpromoted_30d" &&
         !(row.days_listed >= 30 && row.promoted_ad_rate_pct < 4)
@@ -742,6 +759,31 @@ export function StaleRadarTable({
                 <option value={90}>90d+</option>
               </select>
             </div>
+            <button
+              type="button"
+              onClick={() =>
+                setActiveFilter((prev) =>
+                  prev === "missing_data" ? "all" : "missing_data"
+                )
+              }
+              title="Items missing COGS ($0), bin location, or purchase source"
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer border ${
+                activeFilter === "missing_data"
+                  ? "bg-[#D97706] text-white border-[#D97706]"
+                  : "bg-[#FFFBEB] text-[#B45309] border-[#FDE68A] hover:bg-[#FEF3C7]"
+              }`}
+            >
+              <span>Missing Data</span>
+              <span
+                className={`font-mono tabular-nums text-[11px] px-1.5 rounded ${
+                  activeFilter === "missing_data"
+                    ? "bg-white/20 text-white"
+                    : "bg-white text-[#B45309]"
+                }`}
+              >
+                {metrics.missingDataCount}
+              </span>
+            </button>
             <button
               type="button"
               onClick={() => setShowDeathPile((v) => !v)}

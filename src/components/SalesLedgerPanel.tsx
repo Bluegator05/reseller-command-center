@@ -52,6 +52,7 @@ interface SalesLedgerPanelProps {
     text: string;
   }) => Promise<AutoDelistCascadeResult | null>;
   onUpdateSalesOrder: (req: SalesOrderUpdateRequest) => Promise<void>;
+  onSelectOrder?: (order: SalesOrderRecord) => void;
 }
 
 const SAMPLE_EMAILS = [
@@ -108,6 +109,7 @@ export function SalesLedgerPanel({
   onTriggerWebhookSale,
   onTriggerInboundEmail,
   onUpdateSalesOrder,
+  onSelectOrder,
 }: SalesLedgerPanelProps) {
   const [subView, setSubView] = useState<"ledger" | "picklist">("ledger");
   const [ingestMode, setIngestMode] = useState<"webhook" | "email">("email");
@@ -123,6 +125,7 @@ export function SalesLedgerPanel({
   const [channelFilter, setChannelFilter] = useState<"all" | MarketplaceType>(
     "all"
   );
+  const [missingDataOnly, setMissingDataOnly] = useState(false);
 
   const delistJobs = useMemo(
     () => recentJobs.filter((j) => j.action === "delist"),
@@ -231,6 +234,15 @@ export function SalesLedgerPanel({
 
   const selectedItem = activeItems.find((i) => i.item_id === effectiveItemId);
 
+  const isOrderMissingData = (o: SalesOrderRecord) =>
+    o.fulfillment_status !== "unpaid" &&
+    (Number(o.cogs || 0) <= 0 || Number(o.shipping_cost || 0) <= 0);
+
+  const missingDataCount = useMemo(
+    () => salesOrders.filter(isOrderMissingData).length,
+    [salesOrders]
+  );
+
   const filteredOrders = useMemo(() => {
     const dayMs = 24 * 60 * 60 * 1000;
     const startMs =
@@ -254,6 +266,9 @@ export function SalesLedgerPanel({
       if (channelFilter !== "all" && o.marketplace !== channelFilter) {
         return false;
       }
+      if (missingDataOnly && !isOrderMissingData(o)) {
+        return false;
+      }
       const soldMs = Date.parse(o.sold_at);
       if (Number.isNaN(soldMs)) return true;
       if (startMs !== null && !Number.isNaN(startMs) && soldMs < startMs) {
@@ -264,7 +279,15 @@ export function SalesLedgerPanel({
       }
       return true;
     });
-  }, [salesOrders, timeRange, customStart, customEnd, channelFilter, mountNow]);
+  }, [
+    salesOrders,
+    timeRange,
+    customStart,
+    customEnd,
+    channelFilter,
+    missingDataOnly,
+    mountNow,
+  ]);
 
   const metrics = useMemo(() => {
     const gross = filteredOrders.reduce((s, o) => s + o.gross_sale_price, 0);
@@ -739,7 +762,7 @@ export function SalesLedgerPanel({
               Marketplace:
             </span>
             {(
-              ["all", "ebay", "etsy", "poshmark", "mercari", "facebook"] as const
+              ["all", "ebay", "poshmark", "mercari", "etsy", "facebook"] as const
             ).map((ch) => (
               <button
                 key={ch}
@@ -754,6 +777,18 @@ export function SalesLedgerPanel({
                 {ch === "all" ? "All Channels" : ch === "ebay" ? "eBay" : ch}
               </button>
             ))}
+            <button
+              type="button"
+              onClick={() => setMissingDataOnly((v) => !v)}
+              title="Show sold orders missing COGS ($0) or shipping cost ($0)"
+              className={`ml-1 px-2.5 py-1 rounded-md text-[11px] font-semibold transition cursor-pointer border ${
+                missingDataOnly
+                  ? "bg-[#B45309] text-white border-[#B45309]"
+                  : "bg-[#FFFBEB] text-[#B45309] border-[#FDE68A] hover:bg-[#FEF3C7]"
+              }`}
+            >
+              Missing Data ({missingDataCount})
+            </button>
           </div>
 
           {timeRange === "custom" && (
@@ -1211,10 +1246,29 @@ export function SalesLedgerPanel({
 
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="font-medium text-[#14151A] line-clamp-1">
-                              {order.title}
-                            </span>
+                            {onSelectOrder ? (
+                              <button
+                                type="button"
+                                onClick={() => onSelectOrder(order)}
+                                className="text-left font-medium text-[#14151A] hover:text-[#0F766E] hover:underline line-clamp-1 cursor-pointer"
+                              >
+                                {order.title}
+                              </button>
+                            ) : (
+                              <span className="font-medium text-[#14151A] line-clamp-1">
+                                {order.title}
+                              </span>
+                            )}
                             {statusBadge(order.fulfillment_status)}
+                            {onSelectOrder && (
+                              <button
+                                type="button"
+                                onClick={() => onSelectOrder(order)}
+                                className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[#F0FDF9] text-[#0F766E] border border-[#CCFBF1] hover:bg-[#CCFBF1] transition cursor-pointer"
+                              >
+                                P&amp;L · Timeline
+                              </button>
+                            )}
                             {order.restocked && (
                               <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[#ECFDF5] text-[#0F766E]">
                                 Restocked ↻

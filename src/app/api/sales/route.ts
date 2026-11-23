@@ -36,19 +36,59 @@ export async function PATCH(request: Request) {
       if (body.restockAndRelist) {
         updates.restocked = true;
       }
+      if (
+        typeof body.shipping_cost === "number" &&
+        Number.isFinite(body.shipping_cost) &&
+        body.shipping_cost >= 0
+      ) {
+        updates.shipping_cost = Math.round(body.shipping_cost * 100) / 100;
+      }
 
-      const { data: order, error } = await supabase
+      // Fetch current order if we need item_id or net_profit recalculation
+      const { data: currentOrder, error: fetchErr } = await supabase
         .from("sales_orders")
-        .update(updates)
-        .eq("id", body.orderId)
         .select("*")
+        .eq("id", body.orderId)
         .single();
 
-      if (error || !order) {
+      if (fetchErr || !currentOrder) {
         return NextResponse.json(
-          { error: error?.message || "Order not found" },
-          { status: 400 }
+          { error: fetchErr?.message || "Order not found" },
+          { status: 404 }
         );
+      }
+
+      let order = currentOrder;
+      if (Object.keys(updates).length > 0) {
+        const { data: updatedOrder, error } = await supabase
+          .from("sales_orders")
+          .update(updates)
+          .eq("id", body.orderId)
+          .select("*")
+          .single();
+
+        if (error || !updatedOrder) {
+          return NextResponse.json(
+            { error: error?.message || "Order update failed" },
+            { status: 400 }
+          );
+        }
+        order = updatedOrder;
+      }
+
+      if (
+        typeof body.cogs === "number" &&
+        Number.isFinite(body.cogs) &&
+        body.cogs >= 0 &&
+        order.item_id
+      ) {
+        await supabase
+          .from("inventory_items")
+          .update({
+            cogs: Math.round(body.cogs * 100) / 100,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", order.item_id);
       }
 
       if (body.restockAndRelist && order.item_id) {

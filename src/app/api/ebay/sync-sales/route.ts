@@ -148,10 +148,48 @@ export async function POST(request: Request) {
 
     // Collect (itemId -> legacyItemId) pairs missing a thumbnail so we can backfill them
     const missingPhotos = new Map<string, string>();
+    // Collect buyer shipping locations per itemId + externalOrderId for Buyer Map & Shipping Zone analytics
+    const buyerLocationsByItem = new Map<
+      string,
+      Array<{
+        orderId: string;
+        city: string | null;
+        state: string | null;
+        postal: string | null;
+        country: string | null;
+      }>
+    >();
+    const recordBuyerLoc = (
+      invId: string | null | undefined,
+      orderId: string,
+      city?: string | null,
+      state?: string | null,
+      postal?: string | null,
+      country?: string | null
+    ) => {
+      if (!invId || (!city && !state && !country)) return;
+      const list = buyerLocationsByItem.get(invId) ?? [];
+      list.push({
+        orderId,
+        city: city ?? null,
+        state: state ?? null,
+        postal: postal ?? null,
+        country: country ?? null,
+      });
+      buyerLocationsByItem.set(invId, list);
+    };
 
     for (const line of orders) {
       const existing = existingOrders.get(line.externalOrderId);
       if (existing) {
+        recordBuyerLoc(
+          existing.item_id,
+          line.externalOrderId,
+          line.buyerCity,
+          line.buyerState,
+          line.buyerPostal,
+          line.buyerCountry
+        );
         if (
           line.legacyItemId &&
           existing.item_id &&
@@ -247,6 +285,15 @@ export async function POST(request: Request) {
 
       if (!itemId) continue;
 
+      recordBuyerLoc(
+        itemId,
+        line.externalOrderId,
+        line.buyerCity,
+        line.buyerState,
+        line.buyerPostal,
+        line.buyerCountry
+      );
+
       if (
         line.legacyItemId &&
         !itemsWithImages.has(itemId) &&
@@ -318,6 +365,103 @@ export async function POST(request: Request) {
       }
     }
 
+    // 4c. Backfill buyer city/state/postal/country into inventory_items.item_specifics
+    let buyerLocationsSaved = 0;
+    if (buyerLocationsByItem.size > 0) {
+      const itemIds = [...buyerLocationsByItem.keys()];
+      for (let i = 0; i < itemIds.length; i += 100) {
+        const chunkIds = itemIds.slice(i, i + 100);
+        const { data: invRows } = await supabase
+          .from("inventory_items")
+          .select("id, item_specifics")
+          .in("id", chunkIds);
+
+        const toUpdate: Array<{
+          id: string;
+          specs: Record<string, unknown>;
+        }> = [];
+
+        for (const r of invRows ?? []) {
+          const id = String(r.id);
+          const locs = buyerLocationsByItem.get(id);
+          if (!locs || locs.length === 0) continue;
+          const existingSpecs = (r.item_specifics || {}) as Record<
+            string,
+            unknown
+          >;
+          const existingOrderLocs =
+            existingSpecs.order_locations &&
+            typeof existingSpecs.order_locations === "object"
+              ? {
+                  ...(existingSpecs.order_locations as Record<
+                    string,
+                    {
+                      city?: string | null;
+                      state?: string | null;
+                      postal?: string | null;
+                      country?: string | null;
+                    }
+                  >),
+                }
+              : {};
+
+          let changed = false;
+          for (const loc of locs) {
+            const prev = existingOrderLocs[loc.orderId];
+            if (
+              !prev ||
+              prev.city !== loc.city ||
+              prev.state !== loc.state ||
+              prev.country !== loc.country
+            ) {
+              existingOrderLocs[loc.orderId] = {
+                city: loc.city,
+                state: loc.state,
+                postal: loc.postal,
+                country: loc.country,
+              };
+              changed = true;
+            }
+          }
+          const latest = locs[0];
+          if (
+            existingSpecs.buyer_city !== latest.city ||
+            existingSpecs.buyer_state !== latest.state ||
+            existingSpecs.buyer_country !== latest.country
+          ) {
+            changed = true;
+          }
+
+          if (changed) {
+            toUpdate.push({
+              id,
+              specs: {
+                ...existingSpecs,
+                buyer_city: latest.city,
+                buyer_state: latest.state,
+                buyer_postal: latest.postal,
+                buyer_country: latest.country,
+                order_locations: existingOrderLocs,
+              },
+            });
+          }
+        }
+
+        for (let j = 0; j < toUpdate.length; j += 10) {
+          const batch = toUpdate.slice(j, j + 10);
+          await Promise.all(
+            batch.map(async (u) => {
+              const { error: locErr } = await supabase
+                .from("inventory_items")
+                .update({ item_specifics: u.specs })
+                .eq("id", u.id);
+              if (!locErr) buyerLocationsSaved += 1;
+            })
+          );
+        }
+      }
+    }
+
     // 5. Anti-Double-Sell Cascade (ONLY when explicitly enabled for live sale watch,
     //    and strictly limited to brand-new paid sales from the past 7 days!)
     const delistedCount = { total: 0 };
@@ -349,6 +493,10 @@ export async function POST(request: Request) {
       photosBackfilled > 0
         ? ` · Added ${photosBackfilled} item photo${photosBackfilled === 1 ? "" : "s"}`
         : "";
+    const locNote =
+      buyerLocationsSaved > 0
+        ? ` · Synced ${buyerLocationsSaved} buyer map location${buyerLocationsSaved === 1 ? "" : "s"}`
+        : "";
 
     return NextResponse.json({
       mode: "live",
@@ -356,17 +504,18 @@ export async function POST(request: Request) {
       updatedCount,
       skippedCount,
       photosBackfilled,
+      buyerLocationsSaved,
       delistedCount: delistedCount.total,
       totalFetched: orders.length,
       sourceApi,
       daysBack: effectiveDays,
       message:
         importedCount > 0
-          ? `Imported ${importedCount} eBay sale${importedCount === 1 ? "" : "s"}${delistedCount.total > 0 ? ` & queued ${delistedCount.total} auto-delist${delistedCount.total === 1 ? "" : "s"}` : ""}${updatedCount > 0 ? ` (${updatedCount} updated)` : ""}${photoNote}.`
+          ? `Imported ${importedCount} eBay sale${importedCount === 1 ? "" : "s"}${delistedCount.total > 0 ? ` & queued ${delistedCount.total} auto-delist${delistedCount.total === 1 ? "" : "s"}` : ""}${updatedCount > 0 ? ` (${updatedCount} updated)` : ""}${photoNote}${locNote}.`
           : updatedCount > 0
-            ? `Updated ${updatedCount} existing eBay order${updatedCount === 1 ? "" : "s"}${photoNote}.`
-            : photosBackfilled > 0
-              ? `All ${orders.length} eBay orders are up to date — backfilled ${photosBackfilled} item thumbnail${photosBackfilled === 1 ? "" : "s"}!`
+            ? `Updated ${updatedCount} existing eBay order${updatedCount === 1 ? "" : "s"}${photoNote}${locNote}.`
+            : photosBackfilled > 0 || buyerLocationsSaved > 0
+              ? `Synced eBay orders${photoNote}${locNote}!`
               : `All ${orders.length} eBay orders from the past ${effectiveDays} days are already up to date.`,
     });
   } catch (error) {

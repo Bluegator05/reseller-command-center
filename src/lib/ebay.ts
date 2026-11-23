@@ -2616,6 +2616,10 @@ export interface NormalizedEbaySaleLine {
   shippedAt: string | null;
   returnReason: string | null;
   soldAt: string;
+  buyerCity?: string | null;
+  buyerState?: string | null;
+  buyerPostal?: string | null;
+  buyerCountry?: string | null;
 }
 
 interface EbayFulfillmentOrder {
@@ -2640,6 +2644,18 @@ interface EbayFulfillmentOrder {
       amount?: { value?: string };
     }>;
   };
+  fulfillmentStartInstructions?: Array<{
+    shippingStep?: {
+      shipTo?: {
+        contactAddress?: {
+          city?: string;
+          stateOrProvince?: string;
+          postalCode?: string;
+          countryCode?: string;
+        };
+      };
+    };
+  }>;
   lineItems?: Array<{
     lineItemId?: string;
     legacyItemId?: string;
@@ -2721,6 +2737,14 @@ export async function fetchEbaySalesOrders(daysBack = 365): Promise<{
       const cancelReason =
         order.cancelStatus?.cancelRequests?.[0]?.cancelReason || null;
 
+      const shipAddr =
+        order.fulfillmentStartInstructions?.[0]?.shippingStep?.shipTo
+          ?.contactAddress;
+      const buyerCity = shipAddr?.city?.trim() || null;
+      const buyerState = shipAddr?.stateOrProvince?.trim() || null;
+      const buyerPostal = shipAddr?.postalCode?.trim() || null;
+      const buyerCountry = shipAddr?.countryCode?.trim() || null;
+
       items.forEach((li, idx) => {
         const { gross, shipCost } = rawLineGrosses[idx];
         const share =
@@ -2781,6 +2805,10 @@ export async function fetchEbaySalesOrders(daysBack = 365): Promise<{
               : null,
           returnReason: cancelReason,
           soldAt: order.creationDate || new Date().toISOString(),
+          buyerCity,
+          buyerState,
+          buyerPostal,
+          buyerCountry,
         });
       });
     }
@@ -2836,6 +2864,21 @@ export async function fetchEbaySalesOrders(daysBack = 365): Promise<{
         ) || 0
       );
 
+      const shipAddrBlock = extractXmlTag(ob, "ShippingAddress") || "";
+      const buyerCity =
+        decodeXmlEntities(extractXmlTag(shipAddrBlock, "CityName") || "").trim() ||
+        null;
+      const buyerState =
+        decodeXmlEntities(
+          extractXmlTag(shipAddrBlock, "StateOrProvince") || ""
+        ).trim() || null;
+      const buyerPostal =
+        decodeXmlEntities(extractXmlTag(shipAddrBlock, "PostalCode") || "").trim() ||
+        null;
+      const buyerCountry =
+        decodeXmlEntities(extractXmlTag(shipAddrBlock, "Country") || "").trim() ||
+        null;
+
       const txBlocks = extractAllXmlTags(ob, "Transaction");
       txBlocks.forEach((tx, idx) => {
         const itemBlock = extractXmlTag(tx, "Item") || "";
@@ -2883,6 +2926,10 @@ export async function fetchEbaySalesOrders(daysBack = 365): Promise<{
           shippedAt: shippedTime,
           returnReason: null,
           soldAt: createdTime,
+          buyerCity,
+          buyerState,
+          buyerPostal,
+          buyerCountry,
         });
       });
     }

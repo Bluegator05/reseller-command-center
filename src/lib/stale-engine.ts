@@ -251,6 +251,29 @@ export function enrichStaleRadarRow(
       Number(specs.quantity_available) >= 1
         ? Math.floor(Number(specs.quantity_available))
         : 1,
+    quantity_purchased:
+      Number.isFinite(Number(specs.quantity_purchased)) &&
+      Number(specs.quantity_purchased) >= 1
+        ? Math.floor(Number(specs.quantity_purchased))
+        : Number.isFinite(Number(specs.quantity_available)) &&
+            Number(specs.quantity_available) >= 1
+          ? Math.floor(Number(specs.quantity_available))
+          : 1,
+    bulk_buy_id:
+      typeof specs.bulk_buy_id === "string" && specs.bulk_buy_id.trim()
+        ? specs.bulk_buy_id.trim()
+        : null,
+    bulk_buy_locked:
+      specs.bulk_buy_locked === true || specs.bulk_buy_locked === "true",
+    disposal_status:
+      specs.disposal_status === "donated" || specs.disposal_status === "discarded"
+        ? specs.disposal_status
+        : null,
+    disposal_date:
+      typeof specs.disposal_date === "string" ? specs.disposal_date : null,
+    activity_log: Array.isArray(specs.activity_log)
+      ? (specs.activity_log as StaleRadarRow["activity_log"])
+      : [],
     relist_count: relistCount,
     last_relisted_at: lastRelistedAt,
     days_since_relist: daysSinceRelist,

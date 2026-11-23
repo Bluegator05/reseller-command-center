@@ -2,12 +2,15 @@ import { getDemoStore } from "./demo-store";
 import { DEFAULT_EBAY_FEE_PCT, enrichStaleRadarRow, roundCurrency } from "./stale-engine";
 import { getEnvReadiness, getSupabaseServerClient } from "./supabase";
 import type {
+  BulkBuyRecord,
   BusinessExpense,
   ChannelJob,
   CommandCenterPayload,
   CrossChannelListingSummary,
+  DisposedInventoryRecord,
   InventoryAuditRecord,
   InventoryItem,
+  ItemActivityEvent,
   MarketplaceAccount,
   MarketplaceListing,
   MarketplaceType,
@@ -55,7 +58,7 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
           const { data: page, error } = await supabase
             .from("sales_orders")
             .select(
-              "*, inventory_items(sku, title, image_urls, cogs, prep_cost, source_location, source_type, acquired_at, bin_location, weight_oz, length_in, width_in, height_in)"
+              "*, inventory_items(sku, title, image_urls, cogs, prep_cost, source_location, source_type, acquired_at, bin_location, weight_oz, length_in, width_in, height_in, item_specifics, created_at)"
             )
             .order("sold_at", { ascending: false })
             .range(from, from + pageSize - 1);
@@ -75,6 +78,8 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
         draftsRes,
         expensesRes,
         auditLogRes,
+        bulkBuysRes,
+        archivedRes,
       ] = await Promise.all([
         fetchAllActiveListings(),
         supabase.from("marketplace_accounts").select("*"),
@@ -99,6 +104,19 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
           .select("item_specifics")
           .eq("sku", "__RCC_AUDIT_LOG__")
           .maybeSingle(),
+        supabase
+          .from("inventory_items")
+          .select("item_specifics")
+          .eq("sku", "__RCC_BULK_BUYS__")
+          .maybeSingle(),
+        supabase
+          .from("inventory_items")
+          .select(
+            "id, sku, title, image_urls, cogs, prep_cost, bin_location, source_location, source_type, acquired_at, item_specifics, updated_at"
+          )
+          .eq("status", "archived")
+          .order("updated_at", { ascending: false })
+          .limit(500),
       ]);
 
       const rawAuditHistory = (
@@ -109,6 +127,66 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
       const auditHistory: InventoryAuditRecord[] = Array.isArray(rawAuditHistory)
         ? (rawAuditHistory as InventoryAuditRecord[])
         : [];
+
+      const rawBulkBuys = (
+        bulkBuysRes.data?.item_specifics as
+          | { bulk_buys?: unknown }
+          | undefined
+      )?.bulk_buys;
+      const bulkBuys: BulkBuyRecord[] = Array.isArray(rawBulkBuys)
+        ? (rawBulkBuys as BulkBuyRecord[])
+        : [];
+
+      const disposedItems: DisposedInventoryRecord[] = [];
+      for (const rawArch of archivedRes.data ?? []) {
+        const row = rawArch as {
+          id: string;
+          sku: string;
+          title: string;
+          image_urls?: string[] | null;
+          cogs?: number;
+          prep_cost?: number;
+          bin_location?: string | null;
+          source_location?: string | null;
+          source_type?: string | null;
+          acquired_at?: string | null;
+          item_specifics?: Record<string, unknown> | null;
+          updated_at?: string;
+        };
+        if (row.sku?.startsWith("__RCC_")) continue;
+        const sp = (row.item_specifics || {}) as Record<string, unknown>;
+        const disp = sp.disposal_status ?? sp.disposition;
+        if (disp !== "donated" && disp !== "discarded") continue;
+        disposedItems.push({
+          id: row.id,
+          sku: row.sku,
+          title: row.title,
+          image_url:
+            Array.isArray(row.image_urls) && row.image_urls.length > 0
+              ? row.image_urls[0] || null
+              : null,
+          cogs: Number(row.cogs ?? 0),
+          prep_cost: Number(row.prep_cost ?? 0),
+          bin_location: row.bin_location ?? null,
+          source_location: row.source_location ?? null,
+          source_type: row.source_type ?? null,
+          acquired_at: row.acquired_at ?? null,
+          disposal_status: disp,
+          disposal_date:
+            (typeof sp.disposal_date === "string" && sp.disposal_date) ||
+            (typeof sp.disposition_at === "string" && sp.disposition_at) ||
+            row.updated_at ||
+            new Date().toISOString(),
+          disposal_notes:
+            typeof sp.disposal_notes === "string" ? sp.disposal_notes : null,
+          bulk_buy_id:
+            typeof sp.bulk_buy_id === "string" && sp.bulk_buy_id.trim()
+              ? sp.bulk_buy_id.trim()
+              : null,
+          bulk_buy_locked:
+            sp.bulk_buy_locked === true || sp.bulk_buy_locked === "true",
+        });
+      }
 
       const accounts = (accountsRes.data ?? []) as MarketplaceAccount[];
       const ebayFeePct =
@@ -225,6 +303,8 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
                 length_in?: number | null;
                 width_in?: number | null;
                 height_in?: number | null;
+                item_specifics?: Record<string, unknown> | null;
+                created_at?: string | null;
               }
             | Array<{
                 sku?: string;
@@ -240,12 +320,15 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
                 length_in?: number | null;
                 width_in?: number | null;
                 height_in?: number | null;
+                item_specifics?: Record<string, unknown> | null;
+                created_at?: string | null;
               }>
             | null;
         };
         const inv = Array.isArray(rec.inventory_items)
           ? rec.inventory_items[0]
           : rec.inventory_items;
+        const sp = (inv?.item_specifics || {}) as Record<string, unknown>;
         const cogs = Number(inv?.cogs ?? 0);
         const prepCost = Number(inv?.prep_cost ?? 0);
         const netProfit = Number(rec.net_profit ?? 0);
@@ -265,6 +348,22 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
             ? inv.image_urls[0] || null
             : null;
 
+        // Per-order buyer location lookup (supports multi-qty items where each order has its own buyer!)
+        const orderLocMap =
+          sp.order_locations && typeof sp.order_locations === "object"
+            ? (sp.order_locations as Record<
+                string,
+                {
+                  city?: string | null;
+                  state?: string | null;
+                  postal?: string | null;
+                  country?: string | null;
+                }
+              >)
+            : null;
+        const orderLoc =
+          (rec.external_order_id && orderLocMap?.[rec.external_order_id]) || null;
+
         return {
           id: rec.id,
           item_id: rec.item_id,
@@ -275,6 +374,10 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
           external_order_id: rec.external_order_id,
           gross_sale_price: Number(rec.gross_sale_price),
           marketplace_fees: Number(rec.marketplace_fees),
+          ad_fee:
+            Number.isFinite(Number(sp.ad_fee)) && Number(sp.ad_fee) > 0
+              ? roundCurrency(Number(sp.ad_fee))
+              : undefined,
           shipping_cost: Number(rec.shipping_cost),
           refund_amount: Number(rec.refund_amount ?? 0),
           cogs,
@@ -282,7 +385,18 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
           source_location: inv?.source_location ?? null,
           source_type: inv?.source_type ?? null,
           acquired_at: inv?.acquired_at ?? null,
+          listed_at:
+            (typeof sp.listed_at === "string" ? sp.listed_at : null) ??
+            inv?.created_at ??
+            inv?.acquired_at ??
+            null,
           bin_location: inv?.bin_location ?? null,
+          bulk_buy_id:
+            typeof sp.bulk_buy_id === "string" && sp.bulk_buy_id.trim()
+              ? sp.bulk_buy_id.trim()
+              : null,
+          bulk_buy_locked:
+            sp.bulk_buy_locked === true || sp.bulk_buy_locked === "true",
           weight_oz: inv?.weight_oz ?? null,
           pkg_dimensions: pkgDims,
           fulfillment_status: status,
@@ -290,6 +404,21 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
           shipped_at: rec.shipped_at ?? null,
           return_reason: rec.return_reason ?? null,
           restocked: Boolean(rec.restocked),
+          buyer_city:
+            orderLoc?.city ??
+            (typeof sp.buyer_city === "string" ? sp.buyer_city : null),
+          buyer_state:
+            orderLoc?.state ??
+            (typeof sp.buyer_state === "string" ? sp.buyer_state : null),
+          buyer_postal:
+            orderLoc?.postal ??
+            (typeof sp.buyer_postal === "string" ? sp.buyer_postal : null),
+          buyer_country:
+            orderLoc?.country ??
+            (typeof sp.buyer_country === "string" ? sp.buyer_country : null),
+          activity_log: Array.isArray(sp.activity_log)
+            ? (sp.activity_log as ItemActivityEvent[])
+            : [],
           net_profit: netProfit,
           true_net_after_cogs: roundCurrency(netProfit - cogsApplied),
           sold_at: rec.sold_at,
@@ -320,6 +449,8 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
         envReadiness,
         items,
         draftItems: (draftsRes.data ?? []) as InventoryItem[],
+        disposedItems,
+        bulkBuys,
         accounts,
         recentJobs: allJobs.slice(0, 20),
         extensionJobs: allJobs.filter((j) => j.execution_mode === "extension"),

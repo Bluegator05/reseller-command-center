@@ -153,6 +153,30 @@ export async function POST(request: Request) {
             newPrice: calc.nextPrice,
           });
 
+          const priceSpecs = (inv.item_specifics || {}) as Record<string, unknown>;
+          const prevPriceLog = Array.isArray(priceSpecs.activity_log)
+            ? priceSpecs.activity_log
+            : [];
+          await supabase!
+            .from("inventory_items")
+            .update({
+              item_specifics: {
+                ...priceSpecs,
+                activity_log: [
+                  {
+                    id: `evt-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+                    type: "price_changed",
+                    timestamp: nowIso,
+                    title: "Listing price changed",
+                    detail: `eBay list price changed from $${currentPrice.toFixed(2)} to $${calc.nextPrice.toFixed(2)}`,
+                  },
+                  ...prevPriceLog.slice(0, 49),
+                ],
+              },
+              updated_at: nowIso,
+            })
+            .eq("id", inv.id);
+
           await supabase!
             .from("marketplace_listings")
             .update({
@@ -345,6 +369,17 @@ export async function POST(request: Request) {
               : 0;
           const nextRelistCount = prevRelistCount + 1;
 
+          const prevRelistLog = Array.isArray(existingSpecs.activity_log)
+            ? existingSpecs.activity_log
+            : [];
+          const relistDetailParts = [
+            `Relisted on eBay for $${targetRelistPrice.toFixed(2)}`,
+            appliedPromoteRate !== null
+              ? `Promoted at ${appliedPromoteRate}% ad rate`
+              : null,
+            `Item #${relisted.newListingId}`,
+          ].filter(Boolean);
+
           await supabase!
             .from("inventory_items")
             .update({
@@ -361,6 +396,16 @@ export async function POST(request: Request) {
                 ...mergedSpecs,
                 relist_count: String(nextRelistCount),
                 last_relisted_at: nowIso,
+                activity_log: [
+                  {
+                    id: `evt-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+                    type: "relisted",
+                    timestamp: nowIso,
+                    title: "Relisted on eBay",
+                    detail: relistDetailParts.join(" · "),
+                  },
+                  ...prevRelistLog.slice(0, 49),
+                ],
               },
               updated_at: nowIso,
             })

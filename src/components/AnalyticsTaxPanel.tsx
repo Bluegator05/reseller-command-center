@@ -4,22 +4,29 @@ import { useMemo, useState } from "react";
 import {
   AlertTriangle,
   Award,
+  BarChart3,
   Calendar,
   Car,
   CheckCircle2,
   ClipboardCheck,
   Download,
   FileSpreadsheet,
+  Gift,
   Loader2,
+  MapPin,
   Package,
   Plus,
   Receipt,
+  RotateCcw,
   ShieldAlert,
   Trash2,
   TrendingUp,
 } from "lucide-react";
+import { BuyerMapPanel } from "./BuyerMapPanel";
+import { SalesInsightsCharts } from "./SalesInsightsCharts";
 import type {
   BusinessExpense,
+  DisposedInventoryRecord,
   ExpenseCategoryType,
   InventoryItem,
   SalesOrderRecord,
@@ -29,9 +36,14 @@ import type {
 interface AnalyticsTaxPanelProps {
   activeItems: StaleRadarRow[];
   draftItems: InventoryItem[];
+  disposedItems?: DisposedInventoryRecord[];
   salesOrders: SalesOrderRecord[];
   expenses: BusinessExpense[];
   onOpenItemDetail?: (row: StaleRadarRow) => void;
+  onSelectOrder?: (order: SalesOrderRecord) => void;
+  onRestoreDisposed?: (itemId: string) => Promise<void>;
+  onSyncEbayLocations?: () => Promise<void>;
+  isSyncingLocations?: boolean;
   onAddExpense: (input: {
     expense_date: string;
     category: ExpenseCategoryType;
@@ -79,12 +91,19 @@ function downloadCsv(filename: string, header: string[], rows: Array<Array<strin
 export function AnalyticsTaxPanel({
   activeItems,
   draftItems,
+  disposedItems = [],
   salesOrders,
   expenses,
   onOpenItemDetail,
+  onSelectOrder,
+  onRestoreDisposed,
+  onSyncEbayLocations,
+  isSyncingLocations = false,
   onAddExpense,
   onDeleteExpense,
 }: AnalyticsTaxPanelProps) {
+  const [subTab, setSubTab] = useState<"insights" | "taxes" | "map">("insights");
+  const [restoringId, setRestoringId] = useState<string | null>(null);
   const [mountNow] = useState(() => Date.now());
   const [taxReservePct, setTaxReservePct] = useState<number>(25);
   const [expDate, setExpDate] = useState(() =>
@@ -429,8 +448,96 @@ export function AnalyticsTaxPanel({
       ? Number(expMiles) * IRS_MILEAGE_RATE
       : null;
 
+  const disposedSummary = useMemo(() => {
+    let donatedCount = 0;
+    let donatedCogs = 0;
+    let discardedCount = 0;
+    let discardedCogs = 0;
+    for (const d of disposedItems) {
+      const basis = (d.cogs || 0) + (d.prep_cost || 0);
+      if (d.disposal_status === "donated") {
+        donatedCount += 1;
+        donatedCogs += basis;
+      } else {
+        discardedCount += 1;
+        discardedCogs += basis;
+      }
+    }
+    return {
+      donatedCount,
+      donatedCogs,
+      discardedCount,
+      discardedCogs,
+      totalWriteOff: donatedCogs + discardedCogs,
+    };
+  }, [disposedItems]);
+
   return (
     <div className="space-y-5">
+      {/* 3-Tab Sub-Navigation: Insights & Charts | Taxes & Bookkeeping | Buyer Map */}
+      <div className="bg-white border border-[#E5E8E6] rounded-xl p-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setSubTab("insights")}
+            className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold transition cursor-pointer ${
+              subTab === "insights"
+                ? "bg-[#14151A] text-white shadow-xs"
+                : "text-[#5C606B] hover:bg-[#F3F5F4] hover:text-[#14151A]"
+            }`}
+          >
+            <BarChart3 className="w-3.5 h-3.5" />
+            Insights &amp; Charts
+          </button>
+          <button
+            type="button"
+            onClick={() => setSubTab("taxes")}
+            className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold transition cursor-pointer ${
+              subTab === "taxes"
+                ? "bg-[#0F766E] text-white shadow-xs"
+                : "text-[#5C606B] hover:bg-[#F3F5F4] hover:text-[#14151A]"
+            }`}
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5" />
+            Taxes &amp; Bookkeeping
+          </button>
+          <button
+            type="button"
+            onClick={() => setSubTab("map")}
+            className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold transition cursor-pointer ${
+              subTab === "map"
+                ? "bg-[#EA580C] text-white shadow-xs"
+                : "text-[#5C606B] hover:bg-[#F3F5F4] hover:text-[#14151A]"
+            }`}
+          >
+            <MapPin className="w-3.5 h-3.5" />
+            Where Your Buyers Are
+          </button>
+        </div>
+        {disposedItems.length > 0 && (
+          <span className="text-[11px] font-medium text-[#6D28D9] bg-[#F5F3FF] border border-[#DDD6FE] px-2.5 py-1 rounded-full">
+            {disposedItems.length} Donated/Discarded ({fmtMoney(disposedSummary.totalWriteOff)} COGS)
+          </span>
+        )}
+      </div>
+
+      {subTab === "insights" ? (
+        <SalesInsightsCharts
+          salesOrders={salesOrders}
+          activeItems={activeItems}
+          draftItems={draftItems}
+        />
+      ) : subTab === "map" ? (
+        <BuyerMapPanel
+          salesOrders={salesOrders}
+          onSyncEbayLocations={async () => {
+            if (onSyncEbayLocations) await onSyncEbayLocations();
+          }}
+          isSyncingLocations={isSyncingLocations}
+          onSelectOrder={onSelectOrder}
+        />
+      ) : (
+        <>
       {/* Top Schedule C Business Net Income Summary */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
         <div className="bg-white border border-[#E5E8E6] rounded-xl px-4 py-3.5 shadow-[0_1px_2px_rgba(20,21,26,0.03)]">
@@ -1083,6 +1190,108 @@ export function AnalyticsTaxPanel({
           </table>
         </div>
       </section>
+
+      {/* Donated & Discarded Inventory Write-Off Ledger */}
+      <section className="bg-white border border-[#E5E8E6] rounded-xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-[#ECEFE9] flex flex-wrap items-center justify-between gap-2 bg-[#FAFBF9]">
+          <div className="flex items-center gap-2">
+            <Gift className="w-4 h-4 text-[#6D28D9]" />
+            <div>
+              <h2 className="text-xs font-semibold uppercase tracking-[0.06em] text-[#171A1D]">
+                Donated &amp; Discarded Write-Off Ledger
+              </h2>
+              <p className="text-[11px] text-[#5F666D]">
+                Items cleared out via Donate or Discard — removed from active bins and tracked for year-end COGS write-off / charitable deduction.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3 text-xs font-mono">
+            <span className="px-2 py-0.5 rounded-full bg-[#F5F3FF] text-[#6D28D9] font-bold">
+              Donated: {disposedSummary.donatedCount} ({fmtMoney(disposedSummary.donatedCogs)})
+            </span>
+            <span className="px-2 py-0.5 rounded-full bg-[#FEF2F2] text-[#B91C1C] font-bold">
+              Discarded: {disposedSummary.discardedCount} ({fmtMoney(disposedSummary.discardedCogs)})
+            </span>
+          </div>
+        </div>
+        {disposedItems.length === 0 ? (
+          <div className="px-4 py-6 text-center text-xs text-[#64748B]">
+            No donated or discarded items yet — open any item in Inventory and click <strong>Donated</strong> or <strong>Discarded</strong> to clear dead stock cleanly.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className="border-b border-[#ECEFE9] bg-[#F8FAF9] text-[10px] font-bold uppercase tracking-wider text-[#5F666D]">
+                  <th className="py-2 px-4">Item</th>
+                  <th className="py-2 px-3">Status</th>
+                  <th className="py-2 px-3">Date</th>
+                  <th className="py-2 px-3 text-right">COGS Basis</th>
+                  <th className="py-2 px-4 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#ECEFE9]">
+                {disposedItems.map((d) => (
+                  <tr key={d.id} className="hover:bg-[#FAFBF9]">
+                    <td className="py-2.5 px-4 max-w-[320px]">
+                      <div className="font-semibold text-[#171A1D] truncate">
+                        {d.title}
+                      </div>
+                      <div className="text-[10px] font-mono text-[#5F666D]">
+                        {d.sku}
+                        {d.disposal_notes ? ` · ${d.disposal_notes}` : ""}
+                      </div>
+                    </td>
+                    <td className="py-2.5 px-3">
+                      <span
+                        className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold capitalize ${
+                          d.disposal_status === "donated"
+                            ? "bg-[#F5F3FF] text-[#6D28D9]"
+                            : "bg-[#FEF2F2] text-[#B91C1C]"
+                        }`}
+                      >
+                        {d.disposal_status}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-3 font-mono text-[#5F666D]">
+                      {d.disposal_date.slice(0, 10)}
+                    </td>
+                    <td className="py-2.5 px-3 text-right font-mono font-bold text-[#171A1D]">
+                      {fmtMoney((d.cogs || 0) + (d.prep_cost || 0))}
+                    </td>
+                    <td className="py-2.5 px-4 text-right">
+                      {onRestoreDisposed && (
+                        <button
+                          type="button"
+                          disabled={restoringId === d.id}
+                          onClick={async () => {
+                            setRestoringId(d.id);
+                            try {
+                              await onRestoreDisposed(d.id);
+                            } finally {
+                              setRestoringId(null);
+                            }
+                          }}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-[#DCE1DE] bg-white hover:border-[#0F766E] hover:text-[#0F766E] text-[11px] font-semibold text-[#475569] cursor-pointer disabled:opacity-50"
+                        >
+                          {restoringId === d.id ? (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <RotateCcw className="w-3 h-3" />
+                          )}
+                          Restore
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+      </>
+      )}
     </div>
   );
 }

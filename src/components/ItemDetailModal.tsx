@@ -4,19 +4,24 @@ import { useMemo, useState } from "react";
 import {
   AlertTriangle,
   ArrowUpRight,
+  Boxes,
   Calendar,
   Calculator,
+  Clock,
   DollarSign,
   ExternalLink,
   FileText,
+  Gift,
   Loader2,
   MapPin,
   Package,
   Printer,
   Receipt,
+  RefreshCw,
   Save,
   Search,
   Tag,
+  Trash2,
   Truck,
   X,
 } from "lucide-react";
@@ -24,6 +29,9 @@ import { estimateShippingRates } from "@/lib/shipping";
 import { printThermalSkuLabels } from "@/lib/thermal-label";
 import { MarketplaceIcon } from "./MarketplaceIcons";
 import type {
+  BulkBuyRecord,
+  ChannelJob,
+  ItemActivityEvent,
   ItemDetailUpdateRequest,
   MarketplaceType,
   StaleRadarRow,
@@ -31,11 +39,19 @@ import type {
 
 interface ItemDetailModalProps {
   row: StaleRadarRow | null;
+  bulkBuys?: BulkBuyRecord[];
+  jobs?: ChannelJob[];
   onClose: () => void;
   onSave: (updates: ItemDetailUpdateRequest) => Promise<void>;
+  onDispose?: (
+    itemId: string,
+    disposition: "donated" | "discarded"
+  ) => Promise<void>;
 }
 
 const SOURCE_TYPE_OPTIONS = [
+  { value: "storage_auction", label: "Storage Auction (Bulk Buy)" },
+  { value: "pallet_liquidation", label: "Pallet Liquidation (Bulk Buy)" },
   { value: "thrift", label: "Thrift Store (Goodwill / Savers)" },
   { value: "bins", label: "Goodwill Outlet (Bins)" },
   { value: "estate_sale", label: "Estate Sale" },
@@ -101,13 +117,26 @@ function fallbackChannelUrl(
 
 function ItemDetailModalInner({
   row,
+  bulkBuys = [],
+  jobs = [],
   onClose,
   onSave,
+  onDispose,
 }: {
   row: StaleRadarRow;
+  bulkBuys?: BulkBuyRecord[];
+  jobs?: ChannelJob[];
   onClose: () => void;
   onSave: (updates: ItemDetailUpdateRequest) => Promise<void>;
+  onDispose?: (
+    itemId: string,
+    disposition: "donated" | "discarded"
+  ) => Promise<void>;
 }) {
+  const [activeView, setActiveView] = useState<"edit" | "activity">("edit");
+  const [disposingAs, setDisposingAs] = useState<"donated" | "discarded" | null>(
+    null
+  );
   const [title, setTitle] = useState(row.title);
   const [sku, setSku] = useState(row.sku);
   const [condition, setCondition] = useState(row.condition);
@@ -272,6 +301,112 @@ function ItemDetailModalInner({
     }
   };
 
+  const linkedBulkBuy = useMemo(
+    () => bulkBuys.find((b) => b.id === row.bulk_buy_id) ?? null,
+    [bulkBuys, row.bulk_buy_id]
+  );
+
+  const activityTimeline = useMemo<ItemActivityEvent[]>(() => {
+    const events: ItemActivityEvent[] = [...(row.activity_log || [])];
+    const hasType = (t: string) => events.some((e) => e.type === t);
+
+    if (row.audit_verified_at && !hasType("audit_verified")) {
+      events.push({
+        id: `audit-${row.item_id}`,
+        type: "audit_verified",
+        timestamp: row.audit_verified_at,
+        title:
+          row.audit_status === "missing"
+            ? "Flagged Missing in Bin Audit"
+            : "Verified in Physical Bin Audit",
+        detail: row.bin_location
+          ? `Confirmed location: ${row.bin_location}`
+          : "Physical inventory check",
+      });
+    }
+
+    if (row.last_relisted_at && !hasType("relisted")) {
+      events.push({
+        id: `relist-${row.item_id}`,
+        type: "relisted",
+        timestamp: row.last_relisted_at,
+        title: `Relisted on eBay (${row.relist_count}×)`,
+        detail: `Current price ${fmtMoney(row.listed_price)}${row.promoted_ad_rate_pct > 0 ? ` · Promoted at ${row.promoted_ad_rate_pct}%` : ""}`,
+      });
+    }
+
+    if (row.last_price_drop_at && !hasType("price_changed")) {
+      events.push({
+        id: `drop-${row.item_id}`,
+        type: "price_changed",
+        timestamp: row.last_price_drop_at,
+        title: "Listing price dropped",
+        detail: `Current eBay price ${fmtMoney(row.listed_price)}`,
+      });
+    }
+
+    if (row.listed_at) {
+      events.push({
+        id: `listed-${row.item_id}`,
+        type: "listed",
+        timestamp: row.listed_at,
+        title: "Listed on eBay",
+        detail: `Asking ${fmtMoney(row.listed_price)}${row.external_listing_id ? ` · Item #${row.external_listing_id}` : ""}`,
+      });
+    }
+
+    for (const j of jobs) {
+      if (j.item_id !== row.item_id) continue;
+      events.push({
+        id: `job-${j.id}`,
+        type:
+          j.action === "end_and_sell_similar"
+            ? "relisted"
+            : j.action === "update_price"
+              ? "price_changed"
+              : j.action === "promote_listing"
+                ? "promoted"
+                : "note",
+        timestamp: j.completed_at || j.created_at,
+        title: `${j.action.replace(/_/g, " ")} (${j.marketplace.toUpperCase()})`,
+        detail: `Status: ${j.status}${j.error_message ? ` — ${j.error_message}` : ""}`,
+      });
+    }
+
+    if (row.acquired_at && !hasType("acquired")) {
+      events.push({
+        id: `acq-${row.item_id}`,
+        type: "acquired",
+        timestamp: row.acquired_at,
+        title: "Acquired / Sourced",
+        detail: `${row.source_location || "Inventory"}${linkedBulkBuy ? ` · Bulk Buy: ${linkedBulkBuy.name}` : ""} · COGS ${fmtMoney(row.cogs)}`,
+      });
+    }
+
+    return events.sort(
+      (a, b) => Date.parse(b.timestamp || "") - Date.parse(a.timestamp || "")
+    );
+  }, [row, jobs, linkedBulkBuy]);
+
+  const handleDisposeClick = async (disposition: "donated" | "discarded") => {
+    if (!onDispose) return;
+    const label = disposition === "donated" ? "Donated" : "Discarded";
+    if (
+      !window.confirm(
+        `Mark "${row.title}" as ${label}? This will end active eBay/Etsy listings, queue auto-delists for cross-listed marketplaces, and move it into your Donated/Discarded tax write-off ledger.`
+      )
+    ) {
+      return;
+    }
+    setDisposingAs(disposition);
+    try {
+      await onDispose(row.item_id, disposition);
+      onClose();
+    } finally {
+      setDisposingAs(null);
+    }
+  };
+
   const thumb = row.image_urls[0];
   const ebaySoldCompsUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(
     title
@@ -292,6 +427,13 @@ function ItemDetailModalInner({
               <span className="px-2 py-0.5 rounded bg-[#ECFDF5] text-[#0F766E] font-semibold">
                 {sku || row.sku}
               </span>
+              {linkedBulkBuy && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#FFF7ED] text-[#C2410C] font-semibold">
+                  <Boxes className="w-3 h-3" />
+                  {linkedBulkBuy.name}
+                  {row.bulk_buy_locked ? " (Locked)" : ""}
+                </span>
+              )}
               {row.is_newly_listed && (
                 <span className="px-2 py-0.5 rounded bg-[#EFF6FF] text-[#1D4ED8] font-semibold">
                   Newly Listed ({row.days_listed}d)
@@ -303,9 +445,36 @@ function ItemDetailModalInner({
               <span>·</span>
               <span>{row.watchers_count} watchers</span>
             </div>
-            <h2 className="mt-1 text-base font-bold text-[#171A1D] leading-snug">
-              Item Details, Sourcing &amp; Tax Ledger
-            </h2>
+            <div className="mt-1.5 flex flex-wrap items-center gap-3">
+              <h2 className="text-base font-bold text-[#171A1D] leading-snug">
+                Item Details, Sourcing &amp; Tax Ledger
+              </h2>
+              <div className="inline-flex rounded-lg border border-[#DCE1DE] bg-white p-0.5">
+                <button
+                  type="button"
+                  onClick={() => setActiveView("edit")}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition cursor-pointer ${
+                    activeView === "edit"
+                      ? "bg-[#14151A] text-white"
+                      : "text-[#5F666D] hover:text-[#171A1D]"
+                  }`}
+                >
+                  Edit &amp; Bookkeeping
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveView("activity")}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-semibold transition cursor-pointer ${
+                    activeView === "activity"
+                      ? "bg-[#0F766E] text-white"
+                      : "text-[#5F666D] hover:text-[#171A1D]"
+                  }`}
+                >
+                  <Clock className="w-3 h-3" />
+                  Activity &amp; P&amp;L ({activityTimeline.length})
+                </button>
+              </div>
+            </div>
           </div>
 
           <button
@@ -318,7 +487,182 @@ function ItemDetailModalInner({
           </button>
         </div>
 
-        {/* Body */}
+        {activeView === "activity" ? (
+          <div className="flex-1 overflow-y-auto p-5 grid grid-cols-1 lg:grid-cols-12 gap-5">
+            {/* Left: Multi-Qty & Projected Line-by-Line P&L */}
+            <div className="lg:col-span-5 space-y-4">
+              <div className="border border-[#E5E8E6] rounded-xl overflow-hidden">
+                <div className="px-3.5 py-2 bg-[#F8FAF9] border-b border-[#E5E8E6] text-[10px] font-bold uppercase tracking-wider text-[#5C606B]">
+                  Inventory &amp; Quantity Summary
+                </div>
+                <div className="divide-y divide-[#ECEFE9] text-xs">
+                  <div className="px-3.5 py-2 flex justify-between">
+                    <span className="text-[#5C606B]">Status</span>
+                    <span className="font-semibold text-[#0F766E] capitalize">
+                      {row.status}
+                    </span>
+                  </div>
+                  <div className="px-3.5 py-2 flex justify-between">
+                    <span className="text-[#5C606B]">Qty Purchased</span>
+                    <span className="font-mono font-bold text-[#14151A]">
+                      {row.quantity_purchased || row.quantity_available || 1}
+                    </span>
+                  </div>
+                  <div className="px-3.5 py-2 flex justify-between">
+                    <span className="text-[#5C606B]">Qty Currently Listed</span>
+                    <span className="font-mono font-bold text-[#14151A]">
+                      {row.quantity_available || 1}
+                    </span>
+                  </div>
+                  <div className="px-3.5 py-2 flex justify-between">
+                    <span className="text-[#5C606B]">Storage Location</span>
+                    <span className="font-mono font-semibold text-[#14151A]">
+                      {row.bin_location || "Unassigned"}
+                    </span>
+                  </div>
+                  <div className="px-3.5 py-2 flex justify-between">
+                    <span className="text-[#5C606B]">Listed For</span>
+                    <span className="font-medium text-[#14151A]">
+                      {row.days_listed} day{row.days_listed === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                  <div className="px-3.5 py-2 flex justify-between">
+                    <span className="text-[#5C606B]">Time to List</span>
+                    <span className="font-medium text-[#14151A]">
+                      {liveCalc.deathPileLag === 0
+                        ? "< 1 day"
+                        : `${liveCalc.deathPileLag} days`}
+                    </span>
+                  </div>
+                  <div className="px-3.5 py-2 flex justify-between">
+                    <span className="text-[#5C606B]">Source / Bulk Buy</span>
+                    <span className="font-semibold text-[#14151A] text-right">
+                      {linkedBulkBuy
+                        ? linkedBulkBuy.name
+                        : row.source_location || "—"}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="border border-[#E5E8E6] rounded-xl overflow-hidden">
+                <div className="px-3.5 py-2 bg-[#F0FDF9] border-b border-[#CCFBF1] text-[10px] font-bold uppercase tracking-wider text-[#0F766E]">
+                  Projected Sale P&amp;L (at {fmtMoney(row.listed_price)})
+                </div>
+                <div className="divide-y divide-[#ECEFE9] text-xs">
+                  <div className="px-3.5 py-2 flex justify-between">
+                    <span className="text-[#5C606B]">Purchase price (COGS)</span>
+                    <span className="font-mono font-semibold text-[#B91C1C]">
+                      {fmtMoney(liveCalc.totalBasis)}
+                    </span>
+                  </div>
+                  <div className="px-3.5 py-2 flex justify-between">
+                    <span className="text-[#5C606B]">
+                      Est. eBay FVF + Promoted ({liveCalc.feeRate.toFixed(1)}%)
+                    </span>
+                    <span className="font-mono font-semibold text-[#B91C1C]">
+                      {fmtMoney(liveCalc.estFees)}
+                    </span>
+                  </div>
+                  <div className="px-3.5 py-2.5 flex justify-between bg-[#FAFBFA]">
+                    <span className="font-bold text-[#14151A]">
+                      Est. Net Profit
+                    </span>
+                    <span
+                      className={`font-mono font-bold ${
+                        liveCalc.estNet >= 0
+                          ? "text-[#0B8A5F]"
+                          : "text-[#B91C1C]"
+                      }`}
+                    >
+                      {fmtMoney(liveCalc.estNet)}
+                    </span>
+                  </div>
+                  <div className="px-3.5 py-2 flex justify-between">
+                    <span className="text-[#5C606B]">Est. ROI</span>
+                    <span className="font-mono font-bold text-[#0B8A5F]">
+                      {liveCalc.totalBasis > 0
+                        ? `${Math.round(liveCalc.roiPct)}%`
+                        : "∞"}
+                    </span>
+                  </div>
+                  <div className="px-3.5 py-2 flex justify-between">
+                    <span className="text-[#5C606B]">Net Profit Margin</span>
+                    <span className="font-mono font-bold text-[#0B8A5F]">
+                      {Math.round(liveCalc.marginPct)}%
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Right: Chronological Activity Timeline */}
+            <div className="lg:col-span-7 border border-[#E5E8E6] rounded-xl p-4">
+              <div className="flex items-center gap-2 mb-3.5">
+                <Clock className="w-4 h-4 text-[#0F766E]" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-[#14151A]">
+                  Item Activity Timeline
+                </h3>
+              </div>
+              {activityTimeline.length === 0 ? (
+                <p className="text-xs text-[#64748B] py-6 text-center">
+                  No activity logged yet — future relists, price drops, bulk buy assignments, and bin audits appear here automatically.
+                </p>
+              ) : (
+                <div className="space-y-3.5 relative before:content-[''] before:absolute before:left-[11px] before:top-2 before:bottom-2 before:w-px before:bg-[#E2E5E8]">
+                  {activityTimeline.map((evt) => {
+                    const iconBg =
+                      evt.type === "relisted" || evt.type === "price_changed"
+                        ? "bg-[#0284C7] text-white"
+                        : evt.type === "bulk_buy_added" ||
+                            evt.type === "bulk_buy_cost_locked"
+                          ? "bg-[#EA580C] text-white"
+                          : evt.type === "listed" ||
+                              evt.type === "audit_verified"
+                            ? "bg-[#0B8A5F] text-white"
+                            : "bg-[#64748B] text-white";
+                    return (
+                      <div key={evt.id} className="relative pl-8">
+                        <span
+                          className={`w-6 h-6 rounded-full flex items-center justify-center absolute left-0 top-0.5 ${iconBg}`}
+                        >
+                          {evt.type === "relisted" ? (
+                            <RefreshCw className="w-3 h-3" />
+                          ) : evt.type === "bulk_buy_added" ||
+                              evt.type === "bulk_buy_cost_locked" ? (
+                            <Boxes className="w-3 h-3" />
+                          ) : (
+                            <Tag className="w-3 h-3" />
+                          )}
+                        </span>
+                        <div className="text-xs font-bold text-[#14151A]">
+                          {evt.title}
+                        </div>
+                        <div className="text-[10px] text-[#64748B]">
+                          {evt.timestamp
+                            ? new Date(evt.timestamp).toLocaleString("en-US", {
+                                month: "short",
+                                day: "numeric",
+                                year: "numeric",
+                                hour: "numeric",
+                                minute: "2-digit",
+                              })
+                            : "—"}
+                        </div>
+                        {evt.detail && (
+                          <div className="text-xs text-[#334155] mt-0.5">
+                            {evt.detail}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+        /* Body */
         <form
           onSubmit={handleSubmit}
           className="flex-1 overflow-y-auto grid grid-cols-1 lg:grid-cols-[290px_1fr] divide-y lg:divide-y-0 lg:divide-x divide-[#ECEFE9]"
@@ -804,25 +1148,57 @@ function ItemDetailModalInner({
 
             {/* Action Footer */}
             <div className="pt-3 border-t border-[#ECEFE9] flex flex-wrap items-center justify-between gap-2.5">
-              <button
-                type="button"
-                onClick={() =>
-                  printThermalSkuLabels([
-                    {
-                      sku: sku.trim() || row.sku,
-                      bin: binLocation.trim() || row.bin_location,
-                      title: title.trim() || row.title,
-                      acquiredAt: acquiredDate || row.acquired_at,
-                      cogs: Number(cogs) || row.cogs,
-                      price: row.listed_price,
-                    },
-                  ])
-                }
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-[#DCE1DE] bg-white text-xs font-semibold text-[#171A1D] hover:border-[#0F766E] hover:text-[#0F766E] transition cursor-pointer"
-              >
-                <Printer className="w-3.5 h-3.5" />
-                <span>Print 2×1 SKU Label</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    printThermalSkuLabels([
+                      {
+                        sku: sku.trim() || row.sku,
+                        bin: binLocation.trim() || row.bin_location,
+                        title: title.trim() || row.title,
+                        acquiredAt: acquiredDate || row.acquired_at,
+                        cogs: Number(cogs) || row.cogs,
+                        price: row.listed_price,
+                      },
+                    ])
+                  }
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-[#DCE1DE] bg-white text-xs font-semibold text-[#171A1D] hover:border-[#0F766E] hover:text-[#0F766E] transition cursor-pointer"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>Print 2×1 Label</span>
+                </button>
+                {onDispose && (
+                  <>
+                    <button
+                      type="button"
+                      disabled={disposingAs !== null}
+                      onClick={() => handleDisposeClick("donated")}
+                      className="inline-flex items-center gap-1 px-2.5 py-2 rounded-lg border border-[#DDD6FE] bg-[#F5F3FF] hover:bg-[#EDE9FE] text-xs font-semibold text-[#6D28D9] transition cursor-pointer disabled:opacity-50"
+                    >
+                      {disposingAs === "donated" ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Gift className="w-3.5 h-3.5" />
+                      )}
+                      Donated
+                    </button>
+                    <button
+                      type="button"
+                      disabled={disposingAs !== null}
+                      onClick={() => handleDisposeClick("discarded")}
+                      className="inline-flex items-center gap-1 px-2.5 py-2 rounded-lg border border-[#FECACA] bg-[#FEF2F2] hover:bg-[#FEE2E2] text-xs font-semibold text-[#B91C1C] transition cursor-pointer disabled:opacity-50"
+                    >
+                      {disposingAs === "discarded" ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Trash2 className="w-3.5 h-3.5" />
+                      )}
+                      Discarded
+                    </button>
+                  </>
+                )}
+              </div>
 
               <div className="flex items-center gap-2.5">
                 <button
@@ -848,6 +1224,7 @@ function ItemDetailModalInner({
             </div>
           </div>
         </form>
+        )}
       </div>
     </div>
   );
@@ -855,16 +1232,22 @@ function ItemDetailModalInner({
 
 export function ItemDetailModal({
   row,
+  bulkBuys,
+  jobs,
   onClose,
   onSave,
+  onDispose,
 }: ItemDetailModalProps) {
   if (!row) return null;
   return (
     <ItemDetailModalInner
       key={row.item_id}
       row={row}
+      bulkBuys={bulkBuys}
+      jobs={jobs}
       onClose={onClose}
       onSave={onSave}
+      onDispose={onDispose}
     />
   );
 }
