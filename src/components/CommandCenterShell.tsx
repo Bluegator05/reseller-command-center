@@ -649,7 +649,7 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
   return (
     <div className="min-h-screen flex bg-[#F7F9F8]">
       {/* Persistent Left Icon Navigation Rail (Single Source of Navigation) */}
-      <aside className="flex flex-col items-center w-[72px] shrink-0 bg-white border-r border-[#E4E4DD] py-3 px-1.5 sticky top-0 h-screen overflow-y-auto z-40">
+      <aside className="flex flex-col items-center w-[72px] shrink-0 bg-white border-r border-[#E4E4DD] py-3 px-1.5 sticky top-0 h-screen overflow-y-auto overflow-x-hidden z-40">
         <button
           type="button"
           onClick={() => setActiveTab("radar")}
@@ -767,8 +767,8 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
             />
             <span>Sales</span>
             {toShipCount > 0 && (
-              <span className="absolute -top-1 -right-0.5 flex h-5 min-w-[20px] items-center justify-center">
-                <span className="absolute inline-flex h-full w-full rounded-full bg-[#10B981] opacity-65 animate-ping" />
+              <span className="pointer-events-none absolute top-0.5 right-0.5 flex h-5 min-w-[20px] items-center justify-center">
+                <span className="absolute inline-flex h-4 w-4 rounded-full bg-[#10B981] opacity-65 animate-ping" />
                 <span className="relative inline-flex min-w-[20px] h-5 px-1.5 rounded-full font-mono tabular-nums text-[10px] font-extrabold bg-[#059669] text-white ring-2 ring-white shadow-xs items-center justify-center">
                   {toShipCount}
                 </span>
@@ -1440,6 +1440,7 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
           <SalesLedgerPanel
             activeItems={data.items}
             salesOrders={data.salesOrders}
+            recentJobs={data.recentJobs}
             isLiveMode={isLiveMode}
             isSyncingEbaySales={isSyncingEbaySales}
             onSyncEbaySales={handleSyncEbaySales}

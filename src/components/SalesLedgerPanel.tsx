@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import type {
   AutoDelistCascadeResult,
+  ChannelJob,
   MarketplaceType,
   OrderFulfillmentStatus,
   SalesOrderRecord,
@@ -36,6 +37,7 @@ type TimeRangePreset = "all" | "7d" | "30d" | "90d" | "365d" | "custom";
 interface SalesLedgerPanelProps {
   activeItems: StaleRadarRow[];
   salesOrders: SalesOrderRecord[];
+  recentJobs?: ChannelJob[];
   isLiveMode?: boolean;
   isSyncingEbaySales?: boolean;
   onSyncEbaySales?: (daysBack: number) => Promise<void>;
@@ -99,6 +101,7 @@ function defaultRangeDate(daysAgo: number): string {
 export function SalesLedgerPanel({
   activeItems,
   salesOrders,
+  recentJobs = [],
   isLiveMode = false,
   isSyncingEbaySales = false,
   onSyncEbaySales,
@@ -109,6 +112,7 @@ export function SalesLedgerPanel({
   const [subView, setSubView] = useState<"ledger" | "picklist">("ledger");
   const [ingestMode, setIngestMode] = useState<"webhook" | "email">("email");
   const [showIngestWorkbench, setShowIngestWorkbench] = useState(!isLiveMode);
+  const [showDelistLog, setShowDelistLog] = useState(false);
   const [ebayImportDays, setEbayImportDays] = useState<number>(365);
   const [timeRange, setTimeRange] = useState<TimeRangePreset>("all");
   const [customStart, setCustomStart] = useState<string>(() =>
@@ -118,6 +122,11 @@ export function SalesLedgerPanel({
   const [mountNow] = useState(() => Date.now());
   const [channelFilter, setChannelFilter] = useState<"all" | MarketplaceType>(
     "all"
+  );
+
+  const delistJobs = useMemo(
+    () => recentJobs.filter((j) => j.action === "delist"),
+    [recentJobs]
   );
 
   // Pick-list tracking numbers map & Return/Refund modal state
@@ -621,6 +630,14 @@ export function SalesLedgerPanel({
                             {order.marketplace}
                           </span>
                           {statusBadge(order.fulfillment_status)}
+                          {order.delisted_channels.map((ch) => (
+                            <span
+                              key={`pick-delist-${order.id}-${ch}`}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#ECFDF5] border border-[#A7F3D0] text-[#0F766E]"
+                            >
+                              ✓ Delisted {ch.toUpperCase()}
+                            </span>
+                          ))}
                         </div>
                         <div className="mt-1 text-sm font-semibold text-[#14151A]">
                           {order.title}
@@ -807,19 +824,108 @@ export function SalesLedgerPanel({
           </div>
         </div>
 
-        <div className="bg-white border border-[#E4E4DD] rounded-xl px-4 py-3.5 shadow-[0_1px_2px_rgba(20,21,26,0.03)]">
+        <button
+          type="button"
+          onClick={() => setShowDelistLog((v) => !v)}
+          className="text-left bg-white border border-[#E4E4DD] hover:border-[#1D4ED8] rounded-xl px-4 py-3.5 shadow-[0_1px_2px_rgba(20,21,26,0.03)] transition cursor-pointer"
+        >
           <div className="flex items-center justify-between text-xs text-[#5C606B]">
             <span>Auto-Delists Triggered</span>
             <ShieldCheck className="w-3.5 h-3.5 text-[#1D4ED8]" />
           </div>
-          <div className="mt-1.5 flex items-baseline gap-2">
-            <span className="text-2xl font-semibold font-mono tabular-nums text-[#1D4ED8]">
-              {metrics.delistCount}
+          <div className="mt-1.5 flex items-baseline justify-between gap-2">
+            <div className="flex items-baseline gap-2">
+              <span className="text-2xl font-semibold font-mono tabular-nums text-[#1D4ED8]">
+                {Math.max(metrics.delistCount, delistJobs.length)}
+              </span>
+              <span className="text-xs text-[#5C606B]">
+                double-sells blocked
+              </span>
+            </div>
+            <span className="text-[11px] font-semibold text-[#1D4ED8]">
+              {showDelistLog ? "Hide log ▴" : "View log ▾"}
             </span>
-            <span className="text-xs text-[#5C606B]">double-sells blocked</span>
           </div>
-        </div>
+        </button>
       </div>
+
+      {/* Expandable Auto-Delist Verification Log (eBay API + Poshmark/Mercari Extension) */}
+      {showDelistLog && (
+        <div className="bg-white border border-[#BFDBFE] rounded-xl shadow-[0_1px_2px_rgba(20,21,26,0.03)] overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-[#DBEAFE] bg-[#EFF6FF] flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs font-bold text-[#1E40AF]">
+              <ShieldCheck className="w-4 h-4" />
+              <span>
+                Auto-Delist Verification Log ({delistJobs.length} recent)
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowDelistLog(false)}
+              className="text-[11px] font-semibold text-[#1D4ED8] hover:underline cursor-pointer"
+            >
+              Close
+            </button>
+          </div>
+          {delistJobs.length === 0 ? (
+            <div className="p-4 text-xs text-[#5C606B]">
+              No auto-delist jobs logged yet. Whenever an item sells on one
+              marketplace and is linked on another, the eBay API / Mac Mini
+              delist confirmation appears here automatically.
+            </div>
+          ) : (
+            <div className="divide-y divide-[#F1F1EC]">
+              {delistJobs.slice(0, 25).map((job) => {
+                const isDone = job.status === "completed";
+                const isFailed = job.status === "failed";
+                return (
+                  <div
+                    key={job.id}
+                    className="px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                            isDone
+                              ? "bg-[#ECFDF5] border border-[#A7F3D0] text-[#0F766E]"
+                              : isFailed
+                                ? "bg-[#FEF2F2] border border-[#FECACA] text-[#B91C1C]"
+                                : "bg-[#FFFBEB] border border-[#FDE68A] text-[#92400E]"
+                          }`}
+                        >
+                          {isDone
+                            ? `✓ Delisted ${job.marketplace}`
+                            : isFailed
+                              ? `⚠ Failed (${job.marketplace})`
+                              : `Queued (${job.marketplace})`}
+                        </span>
+                        <span className="font-mono text-[11px] font-semibold text-[#14151A]">
+                          {job.item_sku || job.item_id.slice(0, 8)}
+                        </span>
+                        <span className="text-[10px] font-mono text-[#6B7280] uppercase">
+                          via {job.execution_mode === "api" ? "API" : "Mac Mini"}
+                        </span>
+                      </div>
+                      <div className="text-xs text-[#444B52] truncate mt-0.5">
+                        {job.item_title || "Sold item"}
+                        {job.error_message ? (
+                          <span className="text-[#B91C1C] ml-1.5">
+                            — {job.error_message}
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
+                    <span className="text-[11px] font-mono text-[#5C606B] shrink-0">
+                      {fmtDate(job.completed_at || job.created_at)}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Anti-Double-Sell Ingestion Workbench (Webhooks + Inbound Email Parser) */}
       <div className="bg-white border border-[#E4E4DD] rounded-xl shadow-[0_1px_2px_rgba(20,21,26,0.03)] overflow-hidden">
