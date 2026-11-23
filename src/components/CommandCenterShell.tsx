@@ -1000,6 +1000,34 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
             draftItems={data.draftItems}
             auditHistory={data.auditHistory ?? []}
             onOpenItemDetail={(row) => setDetailModalItemId(row.item_id)}
+            onSetBinLocation={async (itemId, nextBin) => {
+              setData((prev) => ({
+                ...prev,
+                items: prev.items.map((it) =>
+                  it.item_id === itemId ? { ...it, bin_location: nextBin } : it
+                ),
+                draftItems: prev.draftItems.map((d) =>
+                  d.id === itemId ? { ...d, bin_location: nextBin } : d
+                ),
+              }));
+              try {
+                const res = await fetch("/api/inventory", {
+                  method: "PATCH",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ itemId, bin_location: nextBin }),
+                });
+                if (!res.ok) {
+                  throw new Error("Could not update bin location");
+                }
+              } catch (err) {
+                pushToast(
+                  "error",
+                  "Bin Update Failed",
+                  err instanceof Error ? err.message : "Could not save bin"
+                );
+                await refreshInventory();
+              }
+            }}
             onCompleteInventoryAudit={async (summary) => {
               const res = await fetch("/api/inventory", {
                 method: "POST",

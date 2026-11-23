@@ -38,6 +38,7 @@ interface BinAuditPanelProps {
   auditHistory?: InventoryAuditRecord[];
   onOpenItemDetail: (row: StaleRadarRow) => void;
   onSetBinAudit?: (itemIds: string[], auditStatus: AuditStatus) => Promise<void>;
+  onSetBinLocation?: (itemId: string, binLocation: string) => Promise<void>;
   onCompleteInventoryAudit?: (summary: {
     totalItems: number;
     verifiedCount: number;
@@ -86,6 +87,38 @@ function formatShortAuditDate(iso: string | null): string {
 const CLOTHING_HINT_RE =
   /\b(clothing|apparel|shirt|t-shirt|tshirt|tee|polo|blouse|top|sweater|sweatshirt|hoodie|pullover|cardigan|jacket|coat|blazer|vest|parka|windbreaker|fleece|pants|jeans|denim|trousers|slacks|chinos|shorts|leggings|joggers|sweatpants|skirt|dress|romper|jumpsuit|suit|tuxedo|jersey|flannel|henley|tunic|tank|camisole|bodysuit|swimsuit|bikini|trunks|robe|pajama|sleepwear|lingerie|bra|underwear|socks|tie|necktie|scarf|beanie|hat|cap|gloves|belt|womens|women's|mens|men's|boys|girls|youth|kids|size\s*(?:xxs|xs|s|m|l|xl|xxl|2xl|3xl|4xl))\b/i;
 
+/**
+ * Matches "Shelf <Letter>" with optional sub-bin ("Bin A/B/C" or shorthand "Shelf H-A",
+ * "Shelf I B", "Shelf J (C)") so Shelves H, I, and J cleanly separate into sub-bins.
+ */
+function matchShelfWithSubBin(raw: string): string | null {
+  // 1. Explicit "Shelf H - Bin A", "Shelf I · Bin B", "Shelf J Bin C"
+  const explicitSub = raw.match(
+    /\bshelf\s*[-#:]?\s*([A-Za-z])[\s,.\-–—·/()]*bin\s*[-#:]?\s*([A-Za-z])(?=\b|[^A-Za-z]|$)/i
+  );
+  if (explicitSub) {
+    return `Shelf ${explicitSub[1].toUpperCase()} · Bin ${explicitSub[2].toUpperCase()}`;
+  }
+
+  // 2. Shorthand on Shelves H, I, J: "Shelf H-A", "Shelf H A", "Shelf I (B)", "Shelf J/C"
+  const hijSub = raw.match(
+    /\bshelf\s*[-#:]?\s*([HIJ])(?:\s*[-–—·/:,]\s*|\s+\(|\s+)([ABC])(?=\)?(?:\s|$|[^A-Za-z]))/i
+  );
+  if (hijSub) {
+    return `Shelf ${hijSub[1].toUpperCase()} · Bin ${hijSub[2].toUpperCase()}`;
+  }
+
+  // 3. Standard "Shelf <Letter>"
+  const shelfLetter = raw.match(
+    /\bshelf\s*[-#:]?\s*([A-Za-z])(?=\b|[^A-Za-z]|$)/i
+  );
+  if (shelfLetter) {
+    return `Shelf ${shelfLetter[1].toUpperCase()}`;
+  }
+
+  return null;
+}
+
 function normalizeExplicitBin(raw: string): string | null {
   const cleaned = raw
     .replace(/^[\s()[\]{}*.,;:\-–—/\\]+|[\s()[\]{}*.,;:\-–—/\\]+$/g, "")
@@ -94,10 +127,8 @@ function normalizeExplicitBin(raw: string): string | null {
   if (!cleaned || !/[A-Za-z0-9]/.test(cleaned)) return null;
   if (cleaned.toUpperCase() === "UNASSIGNED") return null;
 
-  const shelfLetter = cleaned.match(
-    /\bshelf\s*[-#:]?\s*([A-Za-z])(?=\b|[^A-Za-z]|$)/i
-  );
-  if (shelfLetter) return `Shelf ${shelfLetter[1].toUpperCase()}`;
+  const shelfMatch = matchShelfWithSubBin(cleaned);
+  if (shelfMatch) return shelfMatch;
 
   const shelfNum = cleaned.match(/\bshelf\s*[-#:]?\s*(\d{1,2})\b/i);
   if (shelfNum) return `Shelf ${shelfNum[1]}`;
@@ -116,7 +147,7 @@ function normalizeExplicitBin(raw: string): string | null {
 
 /**
  * Parses custom reseller SKUs into clean physical locations:
- *  1) Any "Shelf <Letter>" anywhere in SKU -> "Shelf A", "Shelf E", "Shelf F", ...
+ *  1) Any "Shelf <Letter>" anywhere in SKU (plus Bin A/B/C sub-bins on Shelves H/I/J)
  *  2) Garage bins G1–G9 anywhere in SKU (incl. G4001, G4016) -> "G1"–"G5", ...
  *  3) Any "Closet" anywhere in SKU         -> "Closet" (all floor items in shipping closet)
  *  4) Any "Rack" anywhere in SKU           -> "Rack"   (all items on shipping rack)
@@ -167,13 +198,11 @@ function parseCustomSkuLocation(
     return { bin: explicit, source, dateStr, itemNumber: null };
   }
 
-  // Priority 1: "Shelf <Letter>" anywhere in SKU (handles ") 2 SHELF A/7 STORAGE", "0001 SHELF F", "Shelf L - 2044")
-  const shelfLetterMatch = sku.match(
-    /\bshelf\s*[-#:]?\s*([A-Za-z])(?=\b|[^A-Za-z]|$)/i
-  );
-  if (shelfLetterMatch) {
+  // Priority 1: "Shelf <Letter>" (with optional Bin A/B/C sub-bin on Shelves H, I, J)
+  const shelfMatched = matchShelfWithSubBin(sku);
+  if (shelfMatched) {
     return {
-      bin: `Shelf ${shelfLetterMatch[1].toUpperCase()}`,
+      bin: shelfMatched,
       source,
       dateStr,
       itemNumber: null,
@@ -307,6 +336,7 @@ export function BinAuditPanel({
   auditHistory = [],
   onOpenItemDetail,
   onSetBinAudit,
+  onSetBinLocation,
   onCompleteInventoryAudit,
 }: BinAuditPanelProps) {
   const [search, setSearch] = useState("");
@@ -1116,7 +1146,58 @@ export function BinAuditPanel({
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-1.5 shrink-0 ml-auto">
+                          <div className="flex flex-wrap items-center gap-1.5 shrink-0 ml-auto">
+                            {onSetBinLocation &&
+                              /^Shelf ([HIJ])(?:\s*·\s*Bin ([ABC]))?$/i.test(
+                                b.bin
+                              ) &&
+                              (() => {
+                                const m = b.bin.match(
+                                  /^Shelf ([HIJ])(?:\s*·\s*Bin ([ABC]))?$/i
+                                );
+                                const shelfLetter = m?.[1]?.toUpperCase() || "";
+                                const activeSub = m?.[2]?.toUpperCase() || null;
+                                return (
+                                  <div
+                                    className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-lg bg-[#FAF9F6] border border-[#E4E4DD]"
+                                    title={`Assign to Shelf ${shelfLetter} Bin A, B, or C`}
+                                  >
+                                    <span className="text-[9px] font-bold uppercase text-[#5C606B] mr-0.5">
+                                      Bin
+                                    </span>
+                                    {(["A", "B", "C"] as const).map((sub) => {
+                                      const isCurrent = activeSub === sub;
+                                      const targetBin = `Shelf ${shelfLetter} · Bin ${sub}`;
+                                      return (
+                                        <button
+                                          key={sub}
+                                          type="button"
+                                          onClick={() => {
+                                            if (isCurrent) return;
+                                            setExpandedBins((prev) => {
+                                              const next = new Set(prev);
+                                              next.add(targetBin);
+                                              return next;
+                                            });
+                                            void onSetBinLocation(
+                                              it.id,
+                                              targetBin
+                                            );
+                                          }}
+                                          className={`w-5 h-5 rounded text-[10px] font-mono font-bold transition cursor-pointer ${
+                                            isCurrent
+                                              ? "bg-[#0F766E] text-white"
+                                              : "bg-white border border-[#DDE2DF] text-[#444B52] hover:border-[#0F766E] hover:text-[#0F766E]"
+                                          }`}
+                                        >
+                                          {sub}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                );
+                              })()}
+
                             <span className="font-mono font-semibold text-[#14151A] mr-1">
                               ${Number(it.price || 0).toFixed(2)}
                             </span>
