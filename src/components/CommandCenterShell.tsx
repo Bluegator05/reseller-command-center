@@ -999,6 +999,55 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
             activeItems={data.items}
             draftItems={data.draftItems}
             onOpenItemDetail={(row) => setDetailModalItemId(row.item_id)}
+            onSetBinAudit={async (itemIds, auditStatus) => {
+              const idSet = new Set(itemIds);
+              const nowIso = auditStatus ? new Date().toISOString() : null;
+              setData((prev) => ({
+                ...prev,
+                items: prev.items.map((it) =>
+                  idSet.has(it.item_id)
+                    ? {
+                        ...it,
+                        audit_status: auditStatus,
+                        audit_verified_at: nowIso,
+                      }
+                    : it
+                ),
+                draftItems: prev.draftItems.map((d) => {
+                  if (!idSet.has(d.id)) return d;
+                  const nextSpecs = { ...(d.item_specifics || {}) };
+                  if (auditStatus && nowIso) {
+                    nextSpecs.audit_status = auditStatus;
+                    nextSpecs.audit_verified_at = nowIso;
+                  } else {
+                    delete nextSpecs.audit_status;
+                    delete nextSpecs.audit_verified_at;
+                  }
+                  return { ...d, item_specifics: nextSpecs };
+                }),
+              }));
+              try {
+                const res = await fetch("/api/inventory", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    action: "set_bin_audit",
+                    itemIds,
+                    auditStatus,
+                  }),
+                });
+                if (!res.ok) {
+                  throw new Error("Could not save inventory audit status");
+                }
+              } catch (err) {
+                pushToast(
+                  "error",
+                  "Audit Sync Failed",
+                  err instanceof Error ? err.message : "Could not save audit status"
+                );
+                await refreshInventory();
+              }
+            }}
           />
         ) : activeTab === "offers" ? (
           <WatcherOffersPanel

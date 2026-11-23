@@ -2,13 +2,17 @@
 
 import { useMemo, useState } from "react";
 import {
+  AlertTriangle,
   Archive,
+  Check,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
   ChevronsDownUp,
   ChevronsUpDown,
   MapPin,
   Printer,
+  RotateCcw,
   Search,
   Tag,
 } from "lucide-react";
@@ -19,10 +23,14 @@ import {
 } from "@/lib/thermal-label";
 import type { InventoryItem, StaleRadarRow } from "@/lib/types";
 
+type AuditStatus = "verified" | "missing" | null;
+type AuditFilterMode = "all" | "unverified" | "verified" | "missing";
+
 interface BinAuditPanelProps {
   activeItems: StaleRadarRow[];
   draftItems: InventoryItem[];
   onOpenItemDetail: (row: StaleRadarRow) => void;
+  onSetBinAudit?: (itemIds: string[], auditStatus: AuditStatus) => Promise<void>;
 }
 
 interface ParsedSkuMeta {
@@ -42,11 +50,22 @@ interface BinEntry {
       parsedSource?: string | null;
       parsedDate?: string | null;
       parsedItemNumber?: string | null;
+      auditStatus: AuditStatus;
+      auditVerifiedAt: string | null;
       radarRow?: StaleRadarRow;
     }
   >;
   totalBasis: number;
   totalRetail: number;
+  verifiedCount: number;
+  missingCount: number;
+}
+
+function formatShortAuditDate(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
 const CLOTHING_HINT_RE =
@@ -195,7 +214,6 @@ function parseCustomSkuLocation(
   }
 
   // Priority 5: Clothing without a Shelf / Garage bin -> "Clothes"
-  // Strip storage count notes like "(1 Garage / 7 storage)", dates, and punctuation/asterisks
   const cleanedTokensStr = sku
     .replace(/\([^)]*(?:garage|storage)[^)]*\)/gi, " ")
     .replace(/\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/g, " ")
@@ -234,9 +252,11 @@ export function BinAuditPanel({
   activeItems,
   draftItems,
   onOpenItemDetail,
+  onSetBinAudit,
 }: BinAuditPanelProps) {
   const [search, setSearch] = useState("");
   const [selectedBinFilter, setSelectedBinFilter] = useState<string>("ALL");
+  const [auditFilter, setAuditFilter] = useState<AuditFilterMode>("all");
   const [expandedBins, setExpandedBins] = useState<Set<string>>(new Set());
 
   const allBins = useMemo<BinEntry[]>(() => {
@@ -249,12 +269,21 @@ export function BinAuditPanel({
     ) => {
       let bucket = map.get(binKey);
       if (!bucket) {
-        bucket = { bin: binKey, items: [], totalBasis: 0, totalRetail: 0 };
+        bucket = {
+          bin: binKey,
+          items: [],
+          totalBasis: 0,
+          totalRetail: 0,
+          verifiedCount: 0,
+          missingCount: 0,
+        };
         map.set(binKey, bucket);
       }
       bucket.items.push(entry);
       bucket.totalBasis += basis;
       bucket.totalRetail += retail;
+      if (entry.auditStatus === "verified") bucket.verifiedCount += 1;
+      if (entry.auditStatus === "missing") bucket.missingCount += 1;
     };
 
     for (const r of activeItems) {
@@ -279,6 +308,8 @@ export function BinAuditPanel({
           parsedSource: parsed.source,
           parsedDate: parsed.dateStr,
           parsedItemNumber: parsed.itemNumber,
+          auditStatus: r.audit_status ?? null,
+          auditVerifiedAt: r.audit_verified_at ?? null,
           radarRow: r,
         },
         r.total_cost_basis,
@@ -294,6 +325,15 @@ export function BinAuditPanel({
         d.title,
         d.category_hint
       );
+      const dSpecs = (d.item_specifics || {}) as Record<string, unknown>;
+      const dAuditStatus: AuditStatus =
+        dSpecs.audit_status === "verified" || dSpecs.audit_status === "missing"
+          ? dSpecs.audit_status
+          : null;
+      const dAuditAt =
+        typeof dSpecs.audit_verified_at === "string"
+          ? dSpecs.audit_verified_at
+          : null;
       add(
         parsed.bin,
         {
@@ -309,6 +349,8 @@ export function BinAuditPanel({
           parsedSource: parsed.source,
           parsedDate: parsed.dateStr,
           parsedItemNumber: parsed.itemNumber,
+          auditStatus: dAuditStatus,
+          auditVerifiedAt: dAuditAt,
         },
         basis,
         Number(d.target_price || 0)
@@ -322,28 +364,60 @@ export function BinAuditPanel({
     });
   }, [activeItems, draftItems]);
 
+  const auditStats = useMemo(() => {
+    let total = 0;
+    let verified = 0;
+    let missing = 0;
+    const auditedIds: string[] = [];
+    for (const b of allBins) {
+      for (const it of b.items) {
+        total += 1;
+        if (it.auditStatus === "verified") {
+          verified += 1;
+          auditedIds.push(it.id);
+        } else if (it.auditStatus === "missing") {
+          missing += 1;
+          auditedIds.push(it.id);
+        }
+      }
+    }
+    const unverified = total - verified - missing;
+    const pct = total > 0 ? Math.round((verified / total) * 100) : 0;
+    return { total, verified, missing, unverified, pct, auditedIds };
+  }, [allBins]);
+
   const visibleBins = useMemo<BinEntry[]>(() => {
     const q = search.trim().toLowerCase();
     return allBins
       .filter((b) => selectedBinFilter === "ALL" || b.bin === selectedBinFilter)
       .map((b) => {
-        if (!q) return b;
-        if (b.bin.toLowerCase().includes(q)) return b;
-        const matchedItems = b.items.filter(
-          (i) =>
+        const filteredItems = b.items.filter((i) => {
+          if (auditFilter === "verified" && i.auditStatus !== "verified") {
+            return false;
+          }
+          if (auditFilter === "missing" && i.auditStatus !== "missing") {
+            return false;
+          }
+          if (auditFilter === "unverified" && i.auditStatus !== null) {
+            return false;
+          }
+          if (!q) return true;
+          if (b.bin.toLowerCase().includes(q)) return true;
+          return (
             i.sku.toLowerCase().includes(q) ||
             i.title.toLowerCase().includes(q) ||
             (i.parsedSource?.toLowerCase().includes(q) ?? false)
-        );
+          );
+        });
         return {
           ...b,
-          items: matchedItems,
-          totalBasis: matchedItems.reduce((s, x) => s + (x.cogs || 0), 0),
-          totalRetail: matchedItems.reduce((s, x) => s + (x.price || 0), 0),
+          items: filteredItems,
+          totalBasis: filteredItems.reduce((s, x) => s + (x.cogs || 0), 0),
+          totalRetail: filteredItems.reduce((s, x) => s + (x.price || 0), 0),
         };
       })
       .filter((b) => b.items.length > 0);
-  }, [allBins, search, selectedBinFilter]);
+  }, [allBins, search, selectedBinFilter, auditFilter]);
 
   const allVisibleLabels = useMemo(
     () => visibleBins.flatMap((b) => b.items),
@@ -351,8 +425,14 @@ export function BinAuditPanel({
   );
 
   const isBinOpen = (binName: string) => {
-    // Auto-open when searching or filtered to a single bin
-    if (search.trim().length > 0 || selectedBinFilter !== "ALL") return true;
+    // Auto-open when searching, filtered to a single bin, or inspecting missing items
+    if (
+      search.trim().length > 0 ||
+      selectedBinFilter !== "ALL" ||
+      auditFilter === "missing"
+    ) {
+      return true;
+    }
     return expandedBins.has(binName);
   };
 
@@ -391,10 +471,8 @@ export function BinAuditPanel({
                 {activeItems.length + draftItems.length} SKUs)
               </h2>
               <p className="text-xs text-[#5C606B] mt-0.5">
-                Grouped by <strong>Shelf A–Z</strong>, Garage{" "}
-                <strong>G1–G5</strong>, <strong>Closet</strong>,{" "}
-                <strong>Rack</strong>, and <strong>Clothes</strong>. Click any
-                location to expand everything stored there.
+                Tap <strong>Verify</strong> as you physically confirm each item
+                on its shelf — syncs live across your iPhone &amp; Mac.
               </p>
             </div>
           </div>
@@ -408,6 +486,85 @@ export function BinAuditPanel({
             <Printer className="w-3.5 h-3.5" />
             <span>Print {allVisibleLabels.length} Labels</span>
           </button>
+        </div>
+
+        {/* Live Physical Inventory Audit Progress Strip */}
+        <div className="p-3 rounded-xl bg-[#FAFBF9] border border-[#E5E8E6] space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-bold text-[#14151A] inline-flex items-center gap-1.5">
+                <CheckCircle2 className="w-4 h-4 text-[#0F766E]" />
+                Inventory Audit: {auditStats.verified} / {auditStats.total}{" "}
+                Verified ({auditStats.pct}%)
+              </span>
+              {auditStats.missing > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setAuditFilter("missing")}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#FEF2F2] border border-[#FECACA] text-[11px] font-bold text-[#B91C1C] cursor-pointer hover:bg-[#FEE2E2]"
+                >
+                  <AlertTriangle className="w-3 h-3" />
+                  {auditStats.missing} Missing
+                </button>
+              )}
+            </div>
+
+            {onSetBinAudit && auditStats.auditedIds.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      `Reset audit checkmarks for all ${auditStats.auditedIds.length} checked items to start a fresh inventory count?`
+                    )
+                  ) {
+                    void onSetBinAudit(auditStats.auditedIds, null);
+                  }
+                }}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-[#DDE2DF] bg-white text-[11px] font-semibold text-[#5C606B] hover:border-[#B91C1C] hover:text-[#B91C1C] cursor-pointer"
+              >
+                <RotateCcw className="w-3 h-3" />
+                Start Fresh Audit
+              </button>
+            )}
+          </div>
+
+          <div className="h-2 rounded-full bg-[#E5E8E6] overflow-hidden">
+            <div
+              className="h-full bg-[#0F766E] transition-all duration-300"
+              style={{ width: `${auditStats.pct}%` }}
+            />
+          </div>
+
+          {/* Audit Status Filter Pills */}
+          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+            {(
+              [
+                { id: "all", label: `All (${auditStats.total})` },
+                { id: "unverified", label: `To Check (${auditStats.unverified})` },
+                { id: "verified", label: `Verified (${auditStats.verified})` },
+                { id: "missing", label: `Missing (${auditStats.missing})` },
+              ] as const
+            ).map((pill) => {
+              const active = auditFilter === pill.id;
+              return (
+                <button
+                  key={pill.id}
+                  type="button"
+                  onClick={() => setAuditFilter(pill.id)}
+                  className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border transition cursor-pointer ${
+                    active
+                      ? pill.id === "missing"
+                        ? "bg-[#B91C1C] border-[#B91C1C] text-white"
+                        : "bg-[#14151A] border-[#14151A] text-white"
+                      : "bg-white border-[#DDE2DF] text-[#5C606B] hover:border-[#0F766E] hover:text-[#14151A]"
+                  }`}
+                >
+                  {pill.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         {/* Location Jump Dropdown + Search + Expand/Collapse */}
@@ -432,8 +589,7 @@ export function BinAuditPanel({
                 </option>
                 {allBins.map((b) => (
                   <option key={b.bin} value={b.bin}>
-                    {b.bin} ({b.items.length}{" "}
-                    {b.items.length === 1 ? "item" : "items"})
+                    {b.bin} ({b.verifiedCount}/{b.items.length} verified)
                   </option>
                 ))}
               </select>
@@ -475,11 +631,21 @@ export function BinAuditPanel({
       {/* Collapsible Accordion Sections Grouped by Bin / Location */}
       {visibleBins.length === 0 ? (
         <div className="bg-white border border-[#E4E4DD] rounded-xl p-10 text-center text-xs text-[#5C606B]">
-          No items match your current location or search filter.
+          {auditFilter === "unverified" && auditStats.total > 0
+            ? "Every item in this view has been audited!"
+            : auditFilter === "missing"
+              ? "Zero missing items — everything is accounted for!"
+              : "No items match your current location or search filter."}
         </div>
       ) : (
         <div className="space-y-2.5">
           {visibleBins.map((b) => {
+            const fullBin = allBins.find((x) => x.bin === b.bin) || b;
+            const fullCount = fullBin.items.length;
+            const binComplete =
+              fullCount > 0 && fullBin.verifiedCount === fullCount;
+            const binHasAudited =
+              fullBin.verifiedCount > 0 || fullBin.missingCount > 0;
             const open = isBinOpen(b.bin);
             const isUnassigned = b.bin === "Unassigned";
             const isGarage = /^G[1-9]\d?$/i.test(b.bin);
@@ -488,16 +654,18 @@ export function BinAuditPanel({
             const badgeClass = isUnassigned
               ? "bg-[#E5E7EB] text-[#4B5563]"
               : isGarage
-              ? "bg-[#1D4ED8] text-white"
-              : isClosetOrRack
-              ? "bg-[#B45309] text-white"
-              : isClothes
-              ? "bg-[#6D28D9] text-white"
-              : "bg-[#0F766E] text-white";
+                ? "bg-[#1D4ED8] text-white"
+                : isClosetOrRack
+                  ? "bg-[#B45309] text-white"
+                  : isClothes
+                    ? "bg-[#6D28D9] text-white"
+                    : "bg-[#0F766E] text-white";
             return (
               <section
                 key={b.bin}
-                className="bg-white border border-[#E4E4DD] rounded-xl overflow-hidden shadow-[0_1px_2px_rgba(20,21,26,0.02)]"
+                className={`bg-white border rounded-xl overflow-hidden shadow-[0_1px_2px_rgba(20,21,26,0.02)] ${
+                  binComplete ? "border-[#A7F3D0]" : "border-[#E4E4DD]"
+                }`}
               >
                 <div
                   role="button"
@@ -509,9 +677,13 @@ export function BinAuditPanel({
                       toggleBin(b.bin);
                     }
                   }}
-                  className="w-full px-4 py-3 bg-[#FAF9F6] hover:bg-[#F3F5F3] transition flex flex-wrap items-center justify-between gap-2 cursor-pointer select-none"
+                  className={`w-full px-4 py-3 transition flex flex-wrap items-center justify-between gap-2 cursor-pointer select-none ${
+                    binComplete
+                      ? "bg-[#ECFDF5]/65 hover:bg-[#ECFDF5]"
+                      : "bg-[#FAF9F6] hover:bg-[#F3F5F3]"
+                  }`}
                 >
-                  <div className="flex flex-wrap items-center gap-2.5">
+                  <div className="flex flex-wrap items-center gap-2">
                     {open ? (
                       <ChevronDown className="w-4 h-4 text-[#0F766E] shrink-0" />
                     ) : (
@@ -535,7 +707,25 @@ export function BinAuditPanel({
                     <span className="text-xs font-mono font-semibold text-[#14151A]">
                       {b.items.length} item{b.items.length === 1 ? "" : "s"}
                     </span>
-                    <span className="text-xs text-[#5C606B] font-mono">
+                    <span
+                      className={`px-2 py-0.5 rounded-full font-mono text-[10px] font-bold ${
+                        binComplete
+                          ? "bg-[#0F766E] text-white"
+                          : fullBin.verifiedCount > 0
+                            ? "bg-[#ECFDF5] border border-[#A7F3D0] text-[#0F766E]"
+                            : "bg-white border border-[#E4E4DD] text-[#5C606B]"
+                      }`}
+                    >
+                      {binComplete
+                        ? `✓ ${fullCount}/${fullCount} Audited`
+                        : `${fullBin.verifiedCount}/${fullCount} verified`}
+                    </span>
+                    {fullBin.missingCount > 0 && (
+                      <span className="px-2 py-0.5 rounded-full bg-[#FEE2E2] text-[#B91C1C] font-mono text-[10px] font-bold">
+                        {fullBin.missingCount} missing
+                      </span>
+                    )}
+                    <span className="text-xs text-[#5C606B] font-mono hidden sm:inline">
                       · ${b.totalRetail.toFixed(0)} retail
                       {b.totalBasis > 0
                         ? ` · $${b.totalBasis.toFixed(2)} COGS`
@@ -547,6 +737,24 @@ export function BinAuditPanel({
                     className="flex items-center gap-1.5"
                     onClick={(e) => e.stopPropagation()}
                   >
+                    {onSetBinAudit && binHasAudited && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const ids = fullBin.items
+                            .filter((x) => x.auditStatus !== null)
+                            .map((x) => x.id);
+                          if (ids.length > 0) {
+                            void onSetBinAudit(ids, null);
+                          }
+                        }}
+                        title={`Reset audit checkmarks for ${b.bin}`}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-[#DDE2DF] bg-white text-[11px] font-semibold text-[#5C606B] hover:border-[#B91C1C] hover:text-[#B91C1C] cursor-pointer"
+                      >
+                        <RotateCcw className="w-3 h-3" />
+                        <span className="hidden sm:inline">Reset</span>
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => printThermalSkuLabels(b.items)}
@@ -568,82 +776,148 @@ export function BinAuditPanel({
 
                 {open && (
                   <div className="divide-y divide-[#F1F1EC] border-t border-[#ECECE6]">
-                    {b.items.map((it) => (
-                      <div
-                        key={it.id}
-                        className="px-4 py-2.5 flex items-center justify-between gap-3 text-xs hover:bg-[#FAFBF9]"
-                      >
-                        <div className="flex items-center gap-3 min-w-0 flex-1">
-                          {it.thumbUrl ? (
-                            // eslint-disable-next-line @next/next/no-img-element
-                            <img
-                              src={it.thumbUrl}
-                              alt=""
-                              className="w-9 h-9 rounded-lg object-cover border border-[#E5E8E6] shrink-0 bg-[#FAFBF9]"
-                            />
-                          ) : (
-                            <div className="w-9 h-9 rounded-lg border border-[#E5E8E6] bg-[#FAFBF9] flex items-center justify-center text-[10px] text-[#8E969D] shrink-0">
-                              SKU
-                            </div>
-                          )}
-
-                          <div className="min-w-0 flex-1">
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <span className="font-mono font-bold text-[#14151A]">
-                                {it.sku}
-                              </span>
-                              <span
-                                className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${
-                                  it.status === "draft"
-                                    ? "bg-[#FEF3C7] text-[#92400E]"
-                                    : "bg-[#ECFDF5] text-[#0F766E]"
-                                }`}
-                              >
-                                {it.status === "draft" ? "Death Pile" : "Active"}
-                              </span>
-                              {it.parsedSource && (
-                                <span className="text-[10px] font-mono text-[#6B7280]">
-                                  Source: {it.parsedSource}
-                                </span>
-                              )}
-                              {it.parsedDate && (
-                                <span className="text-[10px] font-mono text-[#6B7280]">
-                                  · {it.parsedDate}
-                                </span>
-                              )}
-                            </div>
-
-                            {it.radarRow ? (
-                              <button
-                                type="button"
-                                onClick={() => onOpenItemDetail(it.radarRow!)}
-                                className="text-left text-xs text-[#444B52] hover:text-[#0F766E] hover:underline truncate block w-full cursor-pointer mt-0.5"
-                              >
-                                {it.title}
-                              </button>
+                    {b.items.map((it) => {
+                      const isVerified = it.auditStatus === "verified";
+                      const isMissing = it.auditStatus === "missing";
+                      const shortDate = formatShortAuditDate(it.auditVerifiedAt);
+                      return (
+                        <div
+                          key={it.id}
+                          className={`px-4 py-2.5 flex flex-wrap sm:flex-nowrap items-center justify-between gap-3 text-xs transition ${
+                            isVerified
+                              ? "bg-[#ECFDF5]/45"
+                              : isMissing
+                                ? "bg-[#FEF2F2]/60"
+                                : "hover:bg-[#FAFBF9]"
+                          }`}
+                        >
+                          <div className="flex items-center gap-3 min-w-0 flex-1">
+                            {it.thumbUrl ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                src={it.thumbUrl}
+                                alt=""
+                                className="w-10 h-10 rounded-lg object-cover border border-[#E5E8E6] shrink-0 bg-[#FAFBF9]"
+                              />
                             ) : (
-                              <div className="text-xs text-[#444B52] truncate mt-0.5">
-                                {it.title}
+                              <div className="w-10 h-10 rounded-lg border border-[#E5E8E6] bg-[#FAFBF9] flex items-center justify-center text-[10px] text-[#8E969D] shrink-0">
+                                SKU
                               </div>
                             )}
+
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="font-mono font-bold text-[#14151A]">
+                                  {it.sku}
+                                </span>
+                                <span
+                                  className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${
+                                    it.status === "draft"
+                                      ? "bg-[#FEF3C7] text-[#92400E]"
+                                      : "bg-[#ECFDF5] text-[#0F766E]"
+                                  }`}
+                                >
+                                  {it.status === "draft"
+                                    ? "Death Pile"
+                                    : "Active"}
+                                </span>
+                                {isVerified && shortDate && (
+                                  <span className="text-[10px] font-semibold text-[#0F766E]">
+                                    ✓ Confirmed {shortDate}
+                                  </span>
+                                )}
+                                {isMissing && (
+                                  <span className="text-[10px] font-bold text-[#B91C1C]">
+                                    ⚠ Flagged Missing{shortDate ? ` ${shortDate}` : ""}
+                                  </span>
+                                )}
+                                {it.parsedSource && (
+                                  <span className="text-[10px] font-mono text-[#6B7280] hidden md:inline">
+                                    · {it.parsedSource}
+                                  </span>
+                                )}
+                              </div>
+
+                              {it.radarRow ? (
+                                <button
+                                  type="button"
+                                  onClick={() => onOpenItemDetail(it.radarRow!)}
+                                  className={`text-left text-xs hover:text-[#0F766E] hover:underline truncate block w-full cursor-pointer mt-0.5 ${
+                                    isVerified
+                                      ? "text-[#5C606B]"
+                                      : "text-[#14151A] font-medium"
+                                  }`}
+                                >
+                                  {it.title}
+                                </button>
+                              ) : (
+                                <div className="text-xs text-[#444B52] truncate mt-0.5">
+                                  {it.title}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0 ml-auto">
+                            <span className="font-mono font-semibold text-[#14151A] mr-1">
+                              ${Number(it.price || 0).toFixed(2)}
+                            </span>
+
+                            {onSetBinAudit && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    void onSetBinAudit(
+                                      [it.id],
+                                      isVerified ? null : "verified"
+                                    )
+                                  }
+                                  className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-bold border transition cursor-pointer ${
+                                    isVerified
+                                      ? "bg-[#0F766E] border-[#0F766E] text-white hover:bg-[#0B5B55]"
+                                      : "bg-white border-[#CBD5E1] text-[#14151A] hover:border-[#0F766E] hover:text-[#0F766E]"
+                                  }`}
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                  <span>{isVerified ? "Verified" : "Verify"}</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    void onSetBinAudit(
+                                      [it.id],
+                                      isMissing ? null : "missing"
+                                    )
+                                  }
+                                  title="Flag item as not found in this bin"
+                                  className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold border transition cursor-pointer ${
+                                    isMissing
+                                      ? "bg-[#B91C1C] border-[#B91C1C] text-white hover:bg-[#991B1B]"
+                                      : "bg-white border-[#E4E4DD] text-[#6B7280] hover:border-[#FCA5A5] hover:text-[#B91C1C]"
+                                  }`}
+                                >
+                                  <AlertTriangle className="w-3 h-3" />
+                                  <span className="hidden sm:inline">
+                                    Missing
+                                  </span>
+                                </button>
+                              </>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => printThermalSkuLabels([it])}
+                              title={`Print 2×1 thermal label for ${it.sku}`}
+                              className="px-2 py-1.5 rounded-lg border border-[#E4E4DD] bg-white text-[10px] font-semibold text-[#5C606B] hover:text-[#0F766E] hover:border-[#0F766E] cursor-pointer"
+                            >
+                              🏷️
+                            </button>
                           </div>
                         </div>
-
-                        <div className="flex items-center gap-2.5 shrink-0">
-                          <span className="font-mono font-semibold text-[#14151A]">
-                            ${Number(it.price || 0).toFixed(2)}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => printThermalSkuLabels([it])}
-                            title={`Print 2×1 thermal label for ${it.sku}`}
-                            className="px-2 py-1 rounded border border-[#E4E4DD] text-[10px] font-semibold text-[#5C606B] hover:text-[#0F766E] hover:border-[#0F766E] cursor-pointer"
-                          >
-                            🏷️ Label
-                          </button>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </section>

@@ -47,10 +47,78 @@ export async function POST(request: Request) {
           action: "set_stale_exempt";
           itemId: string;
           exempt: boolean;
+        }
+      | {
+          action: "set_bin_audit";
+          itemId?: string;
+          itemIds?: string[];
+          auditStatus: "verified" | "missing" | null;
         };
 
     const envReadiness = getEnvReadiness();
     const supabase = getSupabaseServerClient();
+
+    if (body.action === "set_bin_audit") {
+      const targetIds = Array.from(
+        new Set(
+          [
+            ...(Array.isArray(body.itemIds) ? body.itemIds : []),
+            ...(body.itemId ? [body.itemId] : []),
+          ].filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+        )
+      );
+      if (targetIds.length === 0) {
+        return NextResponse.json({ error: "Missing itemId or itemIds" }, { status: 400 });
+      }
+      const nextStatus: "verified" | "missing" | null =
+        body.auditStatus === "verified" || body.auditStatus === "missing"
+          ? body.auditStatus
+          : null;
+      const nowIso = new Date().toISOString();
+
+      if (supabase && envReadiness.isSupabaseReady) {
+        const { data: existingRows, error: fetchErr } = await supabase
+          .from("inventory_items")
+          .select("id, item_specifics")
+          .in("id", targetIds);
+        if (fetchErr) {
+          return NextResponse.json({ error: fetchErr.message }, { status: 400 });
+        }
+
+        const rows = existingRows ?? [];
+        await Promise.all(
+          rows.map(async (row) => {
+            const specs = (row.item_specifics || {}) as Record<string, unknown>;
+            const nextSpecs: Record<string, unknown> = { ...specs };
+            if (nextStatus) {
+              nextSpecs.audit_status = nextStatus;
+              nextSpecs.audit_verified_at = nowIso;
+            } else {
+              delete nextSpecs.audit_status;
+              delete nextSpecs.audit_verified_at;
+            }
+            await supabase
+              .from("inventory_items")
+              .update({ item_specifics: nextSpecs, updated_at: nowIso })
+              .eq("id", row.id);
+          })
+        );
+
+        return NextResponse.json({
+          mode: "live",
+          updatedCount: rows.length,
+          auditStatus: nextStatus,
+          auditVerifiedAt: nextStatus ? nowIso : null,
+        });
+      }
+
+      return NextResponse.json({
+        mode: "demo",
+        updatedCount: targetIds.length,
+        auditStatus: nextStatus,
+        auditVerifiedAt: nextStatus ? nowIso : null,
+      });
+    }
 
     if (body.action === "set_stale_exempt") {
       if (!body.itemId) {

@@ -238,6 +238,14 @@ export function enrichStaleRadarRow(
     is_low_views: staleRadarExempt ? false : isLowViews,
     fb_local_only: item.item_specifics?.fb_local_only === "true",
     stale_radar_exempt: staleRadarExempt,
+    audit_status:
+      specs.audit_status === "verified" || specs.audit_status === "missing"
+        ? specs.audit_status
+        : null,
+    audit_verified_at:
+      typeof specs.audit_verified_at === "string"
+        ? specs.audit_verified_at
+        : null,
     relist_count: relistCount,
     last_relisted_at: lastRelistedAt,
     days_since_relist: daysSinceRelist,
