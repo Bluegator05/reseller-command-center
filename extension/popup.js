@@ -13,6 +13,9 @@ const bridgeFieldsEl = document.getElementById("bridge-fields");
 const supabaseFieldsEl = document.getElementById("supabase-fields");
 const autoPilotEl = document.getElementById("cfg-autopilot");
 const autoPilotBadgeEl = document.getElementById("autopilot-badge");
+const autoSyncEl = document.getElementById("cfg-autosync");
+const autoSyncMetaEl = document.getElementById("autosync-meta");
+const btnSyncAllMkts = document.getElementById("btn-sync-all-mkts");
 
 function updateAutoPilotBadge(enabled) {
   if (!autoPilotBadgeEl) return;
@@ -36,7 +39,23 @@ if (autoPilotEl) {
     updateAutoPilotBadge(enabled);
     await chrome.runtime.sendMessage({
       type: "RCC_SAVE_CONFIG",
-      config: { autoPilot: enabled, autoPilotSaveDraft: true },
+      config: {
+        autoPilot: enabled,
+        autoPilotSaveDraft: true,
+        autoSyncMarketplaces: autoSyncEl ? Boolean(autoSyncEl.checked) : true,
+      },
+    });
+    await loadState();
+  });
+}
+
+if (autoSyncEl) {
+  autoSyncEl.addEventListener("change", async () => {
+    await chrome.runtime.sendMessage({
+      type: "RCC_SAVE_CONFIG",
+      config: {
+        autoSyncMarketplaces: Boolean(autoSyncEl.checked),
+      },
     });
     await loadState();
   });
@@ -152,8 +171,20 @@ async function loadState() {
   if (autoPilotEl) {
     autoPilotEl.checked = Boolean(res.config.autoPilot);
   }
+  if (autoSyncEl) {
+    autoSyncEl.checked = res.config.autoSyncMarketplaces !== false;
+  }
   updateAutoPilotBadge(Boolean(res.config.autoPilot));
   toggleModeFields();
+
+  if (autoSyncMetaEl && res.lastMarketplaceSync?.at) {
+    const t = new Date(res.lastMarketplaceSync.at).toLocaleTimeString([], {
+      hour: "numeric",
+      minute: "2-digit",
+    });
+    autoSyncMetaEl.style.display = "block";
+    autoSyncMetaEl.textContent = `Last sync ${t} · ${res.lastMarketplaceSync.summary || "Done"}`;
+  }
 
   if (
     cfgDetailsEl &&
@@ -198,6 +229,7 @@ document.getElementById("btn-save-cfg").addEventListener("click", async () => {
       supabaseAnonKey: sbKeyEl.value.trim(),
       autoPilot: Boolean(autoPilotEl?.checked),
       autoPilotSaveDraft: true,
+      autoSyncMarketplaces: autoSyncEl ? Boolean(autoSyncEl.checked) : true,
     },
   });
   await chrome.runtime.sendMessage({ type: "RCC_POLL_NOW" });
@@ -212,6 +244,36 @@ const btnScanEl = document.getElementById("btn-scan-page");
 const scanStatusEl = document.getElementById("scan-status");
 const scanReviewEl = document.getElementById("scan-review");
 
+if (btnSyncAllMkts) {
+  btnSyncAllMkts.addEventListener("click", async () => {
+    btnSyncAllMkts.disabled = true;
+    btnSyncAllMkts.textContent = "Syncing eBay, Poshmark & Mercari...";
+    errorBarEl.style.display = "none";
+    scanStatusEl.style.display = "none";
+    scanReviewEl.innerHTML = "";
+
+    try {
+      const res = await chrome.runtime.sendMessage({
+        type: "RCC_SYNC_ALL_MARKETPLACES",
+        includeEbay: true,
+        includePoshmark: true,
+        includeMercari: true,
+      });
+      await loadState();
+      if (!res?.ok) {
+        errorBarEl.style.display = "block";
+        errorBarEl.textContent = res?.error || res?.message || "Sync failed";
+        return;
+      }
+      scanStatusEl.style.display = "block";
+      scanStatusEl.innerHTML = `<strong>All-Marketplace Sync Complete:</strong> ${res.message}`;
+    } finally {
+      btnSyncAllMkts.disabled = false;
+      btnSyncAllMkts.textContent = "Sync eBay, Poshmark & Mercari Now";
+    }
+  });
+}
+
 if (btnScanEl) {
   btnScanEl.addEventListener("click", async () => {
     btnScanEl.disabled = true;
@@ -225,7 +287,7 @@ if (btnScanEl) {
     });
 
     btnScanEl.disabled = false;
-    btnScanEl.textContent = "Auto-Scroll & Scan All Listings";
+    btnScanEl.textContent = "Manual Scan Active Tab (FB / Any)";
 
     if (!res?.ok) {
       errorBarEl.style.display = "block";

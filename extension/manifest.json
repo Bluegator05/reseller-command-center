@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Reseller Command Center — Companion Extension",
-  "version": "1.1.4",
-  "description": "1-click instant cross-listing on iMac/MacBook Air + unattended Mac Mini Auto-Pilot for iPhone queuing + full-closet scanner for Poshmark, Mercari, and Facebook Marketplace.",
+  "version": "1.1.5",
+  "description": "1-click instant cross-listing on iMac/MacBook Air + unattended Mac Mini Auto-Pilot for iPhone queuing + 24/7 scheduled sync for eBay, Poshmark & Mercari.",
   "permissions": [
     "storage",
     "alarms",

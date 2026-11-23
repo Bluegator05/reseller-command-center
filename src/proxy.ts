@@ -42,6 +42,7 @@ export async function proxy(request: NextRequest) {
 
   if (
     pathname.startsWith("/api/extension/") ||
+    pathname === "/api/ebay/sync" ||
     pathname === "/api/ebay/sync-sales"
   ) {
     const extPasscode = request.headers.get("x-owner-passcode")?.trim();

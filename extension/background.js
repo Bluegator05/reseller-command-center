@@ -11,6 +11,8 @@
 
 const POLL_ALARM_NAME = "rcc_poll_extension_jobs";
 const SALE_WATCH_ALARM_NAME = "rcc_sale_watch_poll";
+const EBAY_SYNC_ALARM_NAME = "rcc_auto_sync_ebay";
+const MARKETPLACE_SYNC_ALARM_NAME = "rcc_auto_sync_marketplaces";
 const MARKETPLACE_CREATE_URLS = {
   poshmark: "https://poshmark.com/create-listing",
   mercari: "https://www.mercari.com/sell/",
@@ -27,10 +29,13 @@ const DEFAULT_CONFIG = {
   pollIntervalMinutes: 0.5,
   autoPilot: false, // Turn ON on Mac Mini only; keep OFF on iMac / MacBook Air
   autoPilotSaveDraft: true, // Auto-click Save Draft on Poshmark & Mercari so drafts appear on iPhone
+  autoSyncMarketplaces: true, // Auto-sync eBay (1h) + Poshmark & Mercari (3h) while Auto-Pilot is ON (FB stays manual)
+  poshmarkClosetUrl: "", // Auto-detected from logged-in Poshmark session on Mac Mini
 };
 
 let autoPilotBusy = false;
 let saleWatchBusy = false;
+let inventorySyncBusy = false;
 
 async function getConfig() {
   const stored = await chrome.storage.local.get(["rccConfig"]);
@@ -48,16 +53,28 @@ async function saveConfig(partial) {
 async function configureAlarm(config) {
   await chrome.alarms.clear(POLL_ALARM_NAME);
   await chrome.alarms.clear(SALE_WATCH_ALARM_NAME);
+  await chrome.alarms.clear(EBAY_SYNC_ALARM_NAME);
+  await chrome.alarms.clear(MARKETPLACE_SYNC_ALARM_NAME);
   if (config.autoPoll || config.autoPilot) {
     chrome.alarms.create(POLL_ALARM_NAME, {
       periodInMinutes: Math.max(0.5, Number(config.pollIntervalMinutes) || 0.5),
     });
   }
-  // When Mac Mini Auto-Pilot is ON, automatically check eBay, Poshmark & Mercari for new sales every 10 minutes
+  // When Mac Mini Auto-Pilot is ON:
+  // - Check eBay, Poshmark & Mercari for new sales every 10 minutes
+  // - Auto-sync active eBay listings every 60 minutes (API) and Poshmark/Mercari every 3 hours (background tabs)
   if (config.autoPilot) {
     chrome.alarms.create(SALE_WATCH_ALARM_NAME, {
       periodInMinutes: 10,
     });
+    if (config.autoSyncMarketplaces !== false) {
+      chrome.alarms.create(EBAY_SYNC_ALARM_NAME, {
+        periodInMinutes: 60,
+      });
+      chrome.alarms.create(MARKETPLACE_SYNC_ALARM_NAME, {
+        periodInMinutes: 180,
+      });
+    }
   }
 }
 
@@ -585,6 +602,14 @@ async function scanActiveTabAndImport() {
     );
   }
 
+  if (marketplace === "poshmark") {
+    const closetMatch = tab.url.match(/https?:\/\/poshmark\.com\/closet\/([^/?#]+)/i);
+    if (closetMatch?.[1]) {
+      const normalizedCloset = `https://poshmark.com/closet/${closetMatch[1]}`;
+      await saveConfig({ poshmarkClosetUrl: normalizedCloset });
+    }
+  }
+
   const injected = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
     func: scrapeActiveListingsFromDom,
@@ -622,6 +647,357 @@ async function scanActiveTabAndImport() {
 
   await refreshJobsCache();
   return { ok: true, ...data };
+}
+
+async function waitForTabLoad(tabId, settleMs = 2200, timeoutMs = 18000) {
+  await new Promise((resolve) => {
+    let finished = false;
+    const done = () => {
+      if (finished) return;
+      finished = true;
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve();
+    };
+    const listener = (id, changeInfo) => {
+      if (id === tabId && changeInfo.status === "complete") {
+        setTimeout(done, settleMs);
+      }
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    setTimeout(done, timeoutMs);
+  });
+}
+
+/**
+ * Resolves the logged-in user's Poshmark Closet URL automatically (zero manual setup):
+ * 1. Uses cached `config.poshmarkClosetUrl` if already learned.
+ * 2. Scans open `poshmark.com/closet/<user>` tabs.
+ * 3. Inspects any open Poshmark tab (or quietly opens `poshmark.com/feed` in a temp background tab)
+ *    to read the logged-in user's own My Closet link / handle.
+ */
+async function resolvePoshmarkClosetUrl() {
+  const config = await getConfig();
+  if (
+    config.poshmarkClosetUrl &&
+    /^https:\/\/poshmark\.com\/closet\/[^/?#]+/i.test(config.poshmarkClosetUrl)
+  ) {
+    return config.poshmarkClosetUrl.replace(/\?.*$/, "");
+  }
+
+  const poshTabs = await chrome.tabs.query({ url: "https://poshmark.com/*" });
+  for (const t of poshTabs) {
+    const m = (t.url || "").match(/https?:\/\/poshmark\.com\/closet\/([^/?#]+)/i);
+    if (m?.[1]) {
+      const url = `https://poshmark.com/closet/${m[1]}`;
+      await saveConfig({ poshmarkClosetUrl: url });
+      return url;
+    }
+  }
+
+  const extractHandleFromPage = () => {
+    // 1. Check navbar "My Closet" link explicitly
+    const allClosetLinks = Array.from(document.querySelectorAll('a[href*="/closet/"]'));
+    for (const a of allClosetLinks) {
+      const txt = (a.textContent || "").trim().toLowerCase();
+      const href = a.getAttribute("href") || a.href || "";
+      if (
+        txt.includes("my closet") ||
+        a.getAttribute("data-et-name") === "my_closet" ||
+        a.closest("header, nav, .header__account-info, .dropdown__menu")
+      ) {
+        const m = href.match(/\/closet\/([^/?#]+)/i);
+        if (m?.[1] && !/^(all|women|men|kids|home)$/i.test(m[1])) {
+          return m[1];
+        }
+      }
+    }
+    // 2. Fallback: look for logged-in username in embedded JSON / page state
+    try {
+      const state = window.__INITIAL_STATE__;
+      const u =
+        state?.$_user?.user?.username ||
+        state?.user?.username ||
+        state?.session?.user?.username;
+      if (typeof u === "string" && u.trim()) return u.trim();
+    } catch {
+      // ignore
+    }
+    // 3. Fallback: scan inline script text for logged-in username
+    const scripts = Array.from(document.querySelectorAll("script"));
+    for (const s of scripts) {
+      const txt = s.textContent || "";
+      if (txt.includes('"logged_in":true') || txt.includes("$_user")) {
+        const m = txt.match(/"username"\s*:\s*"([a-zA-Z0-9_.-]{2,40})"/);
+        if (m?.[1]) return m[1];
+      }
+    }
+    return null;
+  };
+
+  let tabToInspect = poshTabs.find((t) => t.id);
+  let createdTemp = false;
+  if (!tabToInspect) {
+    tabToInspect = await chrome.tabs.create({
+      url: "https://poshmark.com/feed",
+      active: false,
+    });
+    createdTemp = true;
+    await waitForTabLoad(tabToInspect.id, 2200, 15000);
+  }
+
+  try {
+    const res = await chrome.scripting.executeScript({
+      target: { tabId: tabToInspect.id },
+      func: extractHandleFromPage,
+    });
+    const handle = res?.[0]?.result;
+    if (handle) {
+      const url = `https://poshmark.com/closet/${handle}`;
+      await saveConfig({ poshmarkClosetUrl: url });
+      return url;
+    }
+  } finally {
+    if (createdTemp && tabToInspect?.id) {
+      chrome.tabs.remove(tabToInspect.id).catch(() => {});
+    }
+  }
+
+  return null;
+}
+
+async function syncEbayActiveListings() {
+  const config = await getConfig();
+  const base = (
+    config.apiBaseUrl || "https://reseller-command-center-black.vercel.app"
+  ).replace(/\/+$/, "");
+
+  const res = await fetch(`${base}/api/ebay/sync`, {
+    method: "POST",
+    headers: buildBridgeHeaders(config, true),
+    credentials: "include",
+  });
+
+  if (res.status === 401) {
+    throw new Error("Owner passcode required for eBay sync.");
+  }
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || `eBay sync failed (${res.status})`);
+  }
+  return {
+    ok: true,
+    syncedCount: Number(data.syncedCount || 0),
+    createdCount: Number(data.createdCount || 0),
+    updatedCount: Number(data.updatedCount || 0),
+  };
+}
+
+/**
+ * Quietly opens a background tab to Poshmark Closet or Mercari Active Listings,
+ * runs `scrapeActiveListingsFromDom`, syncs to `/api/extension/import-listings`,
+ * and closes the temporary background tab when done.
+ */
+async function syncMarketplaceListingsBackground(marketplace) {
+  if (marketplace !== "poshmark" && marketplace !== "mercari") {
+    throw new Error(`Background auto-sync not enabled for ${marketplace}`);
+  }
+
+  let targetUrl = "https://www.mercari.com/mypage/listings/active/";
+  if (marketplace === "poshmark") {
+    const closetUrl = await resolvePoshmarkClosetUrl();
+    if (!closetUrl) {
+      throw new Error(
+        "Could not detect Poshmark closet URL — open your Poshmark Closet tab once while signed in."
+      );
+    }
+    targetUrl = `${closetUrl}?availability=available`;
+  }
+
+  const created = await chrome.tabs.create({ url: targetUrl, active: false });
+  let listings = [];
+  try {
+    await waitForTabLoad(created.id, 2500, 20000);
+    const injected = await chrome.scripting.executeScript({
+      target: { tabId: created.id },
+      func: scrapeActiveListingsFromDom,
+      args: [marketplace],
+    });
+    listings = injected?.[0]?.result || [];
+  } finally {
+    if (created?.id) {
+      chrome.tabs.remove(created.id).catch(() => {});
+    }
+  }
+
+  if (listings.length === 0) {
+    return {
+      ok: true,
+      marketplace,
+      scannedCount: 0,
+      matchedCount: 0,
+      unmatchedCount: 0,
+    };
+  }
+
+  const config = await getConfig();
+  const base = (
+    config.apiBaseUrl || "https://reseller-command-center-black.vercel.app"
+  ).replace(/\/+$/, "");
+
+  const res = await fetch(`${base}/api/extension/import-listings`, {
+    method: "POST",
+    headers: buildBridgeHeaders(config, true),
+    credentials: "include",
+    body: JSON.stringify({ marketplace, listings }),
+  });
+
+  if (res.status === 401) {
+    throw new Error("Owner passcode required for marketplace sync.");
+  }
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || `${marketplace} import failed (${res.status})`);
+  }
+
+  return {
+    ok: true,
+    marketplace,
+    scannedCount: Number(data.scannedCount || listings.length),
+    matchedCount: Number(data.matchedCount || 0),
+    unmatchedCount: Number(data.unmatchedCount || 0),
+  };
+}
+
+/**
+ * Hands-free active listings sync across eBay (API), Poshmark, and Mercari
+ * (Facebook stays manual). Collision-safe: skips background browser scraping
+ * while an Auto-Pilot cross-list or 10-min sale check is actively running.
+ */
+async function runFullMarketplaceSync({
+  includeEbay = true,
+  includePoshmark = true,
+  includeMercari = true,
+  manual = false,
+} = {}) {
+  if (inventorySyncBusy) {
+    return { ok: true, skipped: true, message: "Marketplace sync already running." };
+  }
+  if (
+    !manual &&
+    (includePoshmark || includeMercari) &&
+    (autoPilotBusy || saleWatchBusy || watchedPublishTabs.size > 0)
+  ) {
+    return {
+      ok: true,
+      skipped: true,
+      message: "Deferred sync — cross-list or sale watcher is currently active.",
+    };
+  }
+
+  inventorySyncBusy = true;
+  const result = {
+    at: new Date().toISOString(),
+    ebaySynced: null,
+    poshScanned: null,
+    poshMatched: null,
+    mercariScanned: null,
+    mercariMatched: null,
+    errors: [],
+  };
+
+  try {
+    if (includeEbay) {
+      try {
+        const eb = await syncEbayActiveListings();
+        result.ebaySynced = eb.syncedCount;
+      } catch (err) {
+        result.errors.push(`eBay: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    if (includePoshmark) {
+      try {
+        const pm = await syncMarketplaceListingsBackground("poshmark");
+        result.poshScanned = pm.scannedCount;
+        result.poshMatched = pm.matchedCount;
+      } catch (err) {
+        result.errors.push(
+          `Poshmark: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
+
+    if (includeMercari) {
+      try {
+        const mc = await syncMarketplaceListingsBackground("mercari");
+        result.mercariScanned = mc.scannedCount;
+        result.mercariMatched = mc.matchedCount;
+      } catch (err) {
+        result.errors.push(
+          `Mercari: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
+
+    const parts = [];
+    if (result.ebaySynced !== null) parts.push(`eBay ${result.ebaySynced}`);
+    if (result.poshScanned !== null) {
+      parts.push(`Posh ${result.poshScanned} (${result.poshMatched} linked)`);
+    }
+    if (result.mercariScanned !== null) {
+      parts.push(`Mercari ${result.mercariScanned} (${result.mercariMatched} linked)`);
+    }
+
+    const summaryText =
+      parts.length > 0
+        ? parts.join(" · ")
+        : result.errors.length > 0
+          ? result.errors.join(" | ")
+          : "Sync complete";
+
+    const storedPrev = (await chrome.storage.local.get(["rccLastMarketplaceSync"]))
+      .rccLastMarketplaceSync || {};
+    const mergedRecord = {
+      ...storedPrev,
+      at: result.at,
+      ...(result.ebaySynced !== null ? { ebaySynced: result.ebaySynced, ebayAt: result.at } : {}),
+      ...(result.poshScanned !== null
+        ? {
+            poshScanned: result.poshScanned,
+            poshMatched: result.poshMatched,
+            poshAt: result.at,
+          }
+        : {}),
+      ...(result.mercariScanned !== null
+        ? {
+            mercariScanned: result.mercariScanned,
+            mercariMatched: result.mercariMatched,
+            mercariAt: result.at,
+          }
+        : {}),
+      summary: summaryText,
+      errors: result.errors,
+    };
+
+    await chrome.storage.local.set({ rccLastMarketplaceSync: mergedRecord });
+    await broadcastToCommandCenterTabs({
+      type: "RCC_JOB_COMPLETED",
+      marketplace: "all",
+      sku: summaryText,
+    });
+
+    return {
+      ok: result.errors.length === 0 || parts.length > 0,
+      ...result,
+      lastMarketplaceSync: mergedRecord,
+      message:
+        result.errors.length > 0
+          ? `${summaryText} (Note: ${result.errors.join("; ")})`
+          : `Synced ${summaryText}`,
+    };
+  } finally {
+    inventorySyncBusy = false;
+  }
 }
 
 /**
@@ -1260,6 +1636,11 @@ chrome.runtime.onInstalled.addListener(async () => {
   await refreshJobsCache(false);
 });
 
+chrome.runtime.onStartup.addListener(async () => {
+  const config = await getConfig();
+  await configureAlarm(config);
+});
+
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === POLL_ALARM_NAME) {
     refreshJobsCache(true);
@@ -1267,6 +1648,28 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     getConfig().then((cfg) => {
       if (cfg.autoPilot) {
         runSaleWatchCycle({ background: true });
+      }
+    });
+  } else if (alarm.name === EBAY_SYNC_ALARM_NAME) {
+    getConfig().then((cfg) => {
+      if (cfg.autoPilot && cfg.autoSyncMarketplaces !== false) {
+        runFullMarketplaceSync({
+          includeEbay: true,
+          includePoshmark: false,
+          includeMercari: false,
+          manual: false,
+        });
+      }
+    });
+  } else if (alarm.name === MARKETPLACE_SYNC_ALARM_NAME) {
+    getConfig().then((cfg) => {
+      if (cfg.autoPilot && cfg.autoSyncMarketplaces !== false) {
+        runFullMarketplaceSync({
+          includeEbay: true,
+          includePoshmark: true,
+          includeMercari: true,
+          manual: false,
+        });
       }
     });
   }
@@ -1615,6 +2018,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             "rccJobs",
             "rccLastPollAt",
             "rccLastError",
+            "rccLastMarketplaceSync",
           ]);
           sendResponse({
             ok: true,
@@ -1622,6 +2026,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             jobs: stored.rccJobs || [],
             lastPollAt: stored.rccLastPollAt || null,
             lastError: stored.rccLastError || null,
+            lastMarketplaceSync: stored.rccLastMarketplaceSync || null,
           });
           break;
         }
@@ -1723,6 +2128,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case "RCC_CHECK_NEW_SALES": {
           const watchRes = await runSaleWatchCycle({ background: true });
           sendResponse(watchRes);
+          break;
+        }
+        case "RCC_SYNC_ALL_MARKETPLACES": {
+          const syncRes = await runFullMarketplaceSync({
+            includeEbay: message.includeEbay !== false,
+            includePoshmark: message.includePoshmark !== false,
+            includeMercari: message.includeMercari !== false,
+            manual: true,
+          });
+          sendResponse(syncRes);
           break;
         }
         default:
