@@ -283,12 +283,17 @@ export interface EbayFullItemDetails {
   heightIn: number | null;
   shippingProfileName: string | null;
   shippingType: string | null;
+  currentPrice: number | null;
+  bestOfferEnabled: boolean;
+  bestOfferAutoAcceptPrice: number | null;
+  minimumBestOfferPrice: number | null;
 }
 
 /**
  * Fetches full listing details from eBay Trading API `GetItem` — including ALL
  * full-resolution photos (`<PictureURL>` array, up to 24), full HTML/plain
- * description, Brand, Item Specifics, and real ShippingPackageDetails weight/dims.
+ * description, Brand, Item Specifics, real ShippingPackageDetails weight/dims,
+ * and live Best Offer auto-accept / auto-decline thresholds.
  */
 export async function fetchEbayItemDetails(
   itemId: string
@@ -381,6 +386,38 @@ export async function fetchEbayItemDetails(
     const shipDetailsBlock = extractXmlTag(itemBlock, "ShippingDetails") || "";
     const shippingType = extractXmlTag(shipDetailsBlock, "ShippingType");
 
+    // Extract live Buy It Now price & Best Offer auto-accept / minimum (auto-decline) thresholds
+    const sellingStatusBlock = extractXmlTag(itemBlock, "SellingStatus") || "";
+    const rawCurrentPrice = Number(
+      extractXmlTag(sellingStatusBlock, "CurrentPrice") ||
+        extractXmlTag(itemBlock, "StartPrice") ||
+        0
+    );
+    const currentPrice =
+      Number.isFinite(rawCurrentPrice) && rawCurrentPrice > 0
+        ? roundCurrency(rawCurrentPrice)
+        : null;
+
+    const bestOfferBlock = extractXmlTag(itemBlock, "BestOfferDetails") || "";
+    const bestOfferEnabled =
+      extractXmlTag(bestOfferBlock, "BestOfferEnabled")?.toLowerCase() === "true";
+
+    const listingDetailsBlock = extractXmlTag(itemBlock, "ListingDetails") || "";
+    const rawAutoAccept = Number(
+      extractXmlTag(listingDetailsBlock, "BestOfferAutoAcceptPrice") || 0
+    );
+    const rawMinOffer = Number(
+      extractXmlTag(listingDetailsBlock, "MinimumBestOfferPrice") || 0
+    );
+    const bestOfferAutoAcceptPrice =
+      Number.isFinite(rawAutoAccept) && rawAutoAccept > 0
+        ? roundCurrency(rawAutoAccept)
+        : null;
+    const minimumBestOfferPrice =
+      Number.isFinite(rawMinOffer) && rawMinOffer > 0
+        ? roundCurrency(rawMinOffer)
+        : null;
+
     return {
       itemId: cleanId,
       imageUrls,
@@ -396,6 +433,10 @@ export async function fetchEbayItemDetails(
       heightIn,
       shippingProfileName,
       shippingType,
+      currentPrice,
+      bestOfferEnabled,
+      bestOfferAutoAcceptPrice,
+      minimumBestOfferPrice,
     };
   } catch (err) {
     console.warn(`[ebay] GetItem(${cleanId}) warning:`, err);
@@ -727,10 +768,229 @@ async function resolveInventoryOfferId(
   return null;
 }
 
+interface BestOfferPlan {
+  autoAcceptToSet: number | null;
+  minOfferToSet: number | null;
+  deleteAutoAccept: boolean;
+  deleteMinOffer: boolean;
+  listingDetailsXml: string;
+  deletedFieldsXml: string;
+  note: string | null;
+}
+
+function isBestOfferThresholdError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err || "");
+  return /best\s*offer|auto[- ]?accept|minimum.*offer|auto[- ]?decline|2191660[3456]/i.test(
+    msg
+  );
+}
+
+/**
+ * Reconciles eBay Best Offer Auto-Accept and Minimum Best Offer (auto-decline)
+ * thresholds against a target Buy It Now price so eBay NEVER rejects
+ * `RelistFixedPriceItem` or `ReviseFixedPriceItem` when the asking price drops.
+ *
+ * eBay rules:
+ * - BestOfferAutoAcceptPrice must be strictly < StartPrice (and >= $0.99)
+ * - MinimumBestOfferPrice must be strictly < BestOfferAutoAcceptPrice (if set) AND < StartPrice (and >= $0.99)
+ */
+function resolveBestOfferPlan(params: {
+  targetPrice: number;
+  previousPrice?: number | null;
+  existingAutoAccept: number | null;
+  existingMinOffer: number | null;
+  requestedAutoAccept?: number | null; // undefined = preserve/auto-scale, null = clear
+  requestedMinOffer?: number | null; // undefined = preserve/auto-scale, null = clear
+  currency?: string;
+}): BestOfferPlan {
+  const {
+    targetPrice,
+    previousPrice,
+    existingAutoAccept,
+    existingMinOffer,
+    requestedAutoAccept,
+    requestedMinOffer,
+    currency = "USD",
+  } = params;
+
+  const cleanTarget = roundCurrency(targetPrice);
+  const stepDown = (ceiling: number): number => {
+    const gap = ceiling >= 10 ? 0.5 : ceiling >= 3 ? 0.25 : 0.05;
+    return roundCurrency(ceiling - gap);
+  };
+
+  let nextAutoAccept: number | null = existingAutoAccept;
+  let autoAcceptChanged = false;
+  let deleteAutoAccept = false;
+
+  if (requestedAutoAccept === null) {
+    nextAutoAccept = null;
+    if (existingAutoAccept !== null) {
+      deleteAutoAccept = true;
+      autoAcceptChanged = true;
+    }
+  } else if (typeof requestedAutoAccept === "number" && requestedAutoAccept > 0) {
+    let val = roundCurrency(requestedAutoAccept);
+    if (val >= cleanTarget) {
+      val = stepDown(cleanTarget);
+    }
+    if (val < 0.99) {
+      nextAutoAccept = null;
+      if (existingAutoAccept !== null) {
+        deleteAutoAccept = true;
+        autoAcceptChanged = true;
+      }
+    } else {
+      nextAutoAccept = val;
+      if (existingAutoAccept === null || Math.abs(val - existingAutoAccept) > 0.005) {
+        autoAcceptChanged = true;
+      }
+    }
+  } else if (existingAutoAccept !== null && existingAutoAccept >= cleanTarget - 0.01) {
+    // Existing auto-accept would block the new lower price — scale proportionally
+    const ratio =
+      previousPrice && previousPrice > 0 && existingAutoAccept < previousPrice
+        ? existingAutoAccept / previousPrice
+        : 0.9;
+    let scaled = roundCurrency(cleanTarget * Math.min(0.95, Math.max(0.5, ratio)));
+    if (scaled >= cleanTarget) {
+      scaled = stepDown(cleanTarget);
+    }
+    if (scaled < 0.99) {
+      nextAutoAccept = null;
+      deleteAutoAccept = true;
+      autoAcceptChanged = true;
+    } else {
+      nextAutoAccept = scaled;
+      autoAcceptChanged = true;
+    }
+  }
+
+  const minCeiling = nextAutoAccept !== null ? nextAutoAccept : cleanTarget;
+  let nextMinOffer: number | null = existingMinOffer;
+  let minOfferChanged = false;
+  let deleteMinOffer = false;
+
+  if (requestedMinOffer === null) {
+    nextMinOffer = null;
+    if (existingMinOffer !== null) {
+      deleteMinOffer = true;
+      minOfferChanged = true;
+    }
+  } else if (typeof requestedMinOffer === "number" && requestedMinOffer > 0) {
+    let val = roundCurrency(requestedMinOffer);
+    if (val >= minCeiling) {
+      val = stepDown(minCeiling);
+    }
+    if (val < 0.99) {
+      nextMinOffer = null;
+      if (existingMinOffer !== null) {
+        deleteMinOffer = true;
+        minOfferChanged = true;
+      }
+    } else {
+      nextMinOffer = val;
+      if (existingMinOffer === null || Math.abs(val - existingMinOffer) > 0.005) {
+        minOfferChanged = true;
+      }
+    }
+  } else if (existingMinOffer !== null && existingMinOffer >= minCeiling - 0.01) {
+    // Existing minimum best offer would block the new lower price — scale proportionally
+    const ratio =
+      previousPrice && previousPrice > 0 && existingMinOffer < previousPrice
+        ? existingMinOffer / previousPrice
+        : 0.75;
+    let scaled = roundCurrency(cleanTarget * Math.min(0.85, Math.max(0.4, ratio)));
+    if (scaled >= minCeiling) {
+      scaled = stepDown(minCeiling);
+    }
+    if (scaled < 0.99) {
+      nextMinOffer = null;
+      deleteMinOffer = true;
+      minOfferChanged = true;
+    } else {
+      nextMinOffer = scaled;
+      minOfferChanged = true;
+    }
+  }
+
+  const autoAcceptToSet =
+    autoAcceptChanged && !deleteAutoAccept && nextAutoAccept !== null
+      ? nextAutoAccept
+      : null;
+  const minOfferToSet =
+    minOfferChanged && !deleteMinOffer && nextMinOffer !== null
+      ? nextMinOffer
+      : null;
+
+  const listingDetailLines: string[] = [];
+  if (autoAcceptToSet !== null) {
+    listingDetailLines.push(
+      `      <BestOfferAutoAcceptPrice currencyID="${currency}">${autoAcceptToSet.toFixed(2)}</BestOfferAutoAcceptPrice>`
+    );
+  }
+  if (minOfferToSet !== null) {
+    listingDetailLines.push(
+      `      <MinimumBestOfferPrice currencyID="${currency}">${minOfferToSet.toFixed(2)}</MinimumBestOfferPrice>`
+    );
+  }
+  const listingDetailsXml =
+    listingDetailLines.length > 0
+      ? `<ListingDetails>\n${listingDetailLines.join("\n")}\n    </ListingDetails>`
+      : "";
+
+  const deletedFieldLines: string[] = [];
+  if (deleteAutoAccept) {
+    deletedFieldLines.push(
+      `<DeletedField>Item.ListingDetails.BestOfferAutoAcceptPrice</DeletedField>`
+    );
+  }
+  if (deleteMinOffer) {
+    deletedFieldLines.push(
+      `<DeletedField>Item.ListingDetails.MinimumBestOfferPrice</DeletedField>`
+    );
+  }
+  const deletedFieldsXml = deletedFieldLines.join("\n    ");
+
+  let note: string | null = null;
+  if (autoAcceptChanged || minOfferChanged) {
+    const parts: string[] = [];
+    if (deleteAutoAccept && deleteMinOffer) {
+      parts.push("Best Offer auto-rules cleared");
+    } else {
+      if (autoAcceptToSet !== null) {
+        parts.push(`auto-accept $${autoAcceptToSet.toFixed(2)}`);
+      } else if (deleteAutoAccept) {
+        parts.push("auto-accept cleared");
+      }
+      if (minOfferToSet !== null) {
+        parts.push(`min offer $${minOfferToSet.toFixed(2)}`);
+      } else if (deleteMinOffer) {
+        parts.push("min offer cleared");
+      }
+    }
+    if (parts.length > 0) {
+      note = `Best Offer (${parts.join(", ")})`;
+    }
+  }
+
+  return {
+    autoAcceptToSet,
+    minOfferToSet,
+    deleteAutoAccept,
+    deleteMinOffer,
+    listingDetailsXml,
+    deletedFieldsXml,
+    note,
+  };
+}
+
 /**
  * Updates an active eBay listing price.
  * Uses Sell Inventory API if managed as an Offer, or Trading API
  * `ReviseFixedPriceItem` for standard Seller Hub / mobile app listings.
+ * Automatically reconciles any Best Offer Auto-Accept / Minimum Offer rules
+ * that would otherwise block a lower asking price.
  */
 export async function updateEbayOfferPrice(params: {
   offerId: string;
@@ -750,8 +1010,11 @@ export async function updateEbayOfferPrice(params: {
     const existingPricing =
       (existingOffer.pricingSummary as Record<string, unknown> | undefined) ||
       {};
+    const prevPriceVal = Number(
+      (existingPricing.price as { value?: string } | undefined)?.value || 0
+    );
 
-    const updatedPayload = {
+    const updatedPayload: Record<string, unknown> = {
       ...existingOffer,
       pricingSummary: {
         ...existingPricing,
@@ -761,6 +1024,56 @@ export async function updateEbayOfferPrice(params: {
         },
       },
     };
+
+    // Reconcile Inventory API bestOfferTerms if autoAcceptPrice / autoDeclinePrice conflict
+    const policies =
+      (existingOffer.listingPolicies as Record<string, unknown> | undefined) ||
+      null;
+    const bestOfferTerms =
+      (policies?.bestOfferTerms as Record<string, unknown> | undefined) || null;
+    if (bestOfferTerms) {
+      const existingAuto = Number(
+        (bestOfferTerms.autoAcceptPrice as { value?: string } | undefined)
+          ?.value || 0
+      );
+      const existingMin = Number(
+        (bestOfferTerms.autoDeclinePrice as { value?: string } | undefined)
+          ?.value || 0
+      );
+      const plan = resolveBestOfferPlan({
+        targetPrice: Number(formattedPrice),
+        previousPrice: prevPriceVal > 0 ? prevPriceVal : null,
+        existingAutoAccept: existingAuto > 0 ? existingAuto : null,
+        existingMinOffer: existingMin > 0 ? existingMin : null,
+        currency,
+      });
+      if (
+        plan.autoAcceptToSet !== null ||
+        plan.minOfferToSet !== null ||
+        plan.deleteAutoAccept ||
+        plan.deleteMinOffer
+      ) {
+        const nextTerms: Record<string, unknown> = { ...bestOfferTerms };
+        if (plan.deleteAutoAccept) delete nextTerms.autoAcceptPrice;
+        else if (plan.autoAcceptToSet !== null) {
+          nextTerms.autoAcceptPrice = {
+            value: plan.autoAcceptToSet.toFixed(2),
+            currency,
+          };
+        }
+        if (plan.deleteMinOffer) delete nextTerms.autoDeclinePrice;
+        else if (plan.minOfferToSet !== null) {
+          nextTerms.autoDeclinePrice = {
+            value: plan.minOfferToSet.toFixed(2),
+            currency,
+          };
+        }
+        updatedPayload.listingPolicies = {
+          ...policies,
+          bestOfferTerms: nextTerms,
+        };
+      }
+    }
 
     await ebayRequest(
       `/sell/inventory/v1/offer/${encodeURIComponent(invOfferId)}`,
@@ -777,13 +1090,40 @@ export async function updateEbayOfferPrice(params: {
   }
 
   // Fallback for Seller Hub / Trading API listings (12-digit ItemID)
-  await ebayTradingRequest(
-    "ReviseFixedPriceItem",
-    `<Item>
+  const existingDetails = await fetchEbayItemDetails(rawId);
+  const bestOfferPlan = resolveBestOfferPlan({
+    targetPrice: Number(formattedPrice),
+    previousPrice: existingDetails?.currentPrice ?? null,
+    existingAutoAccept: existingDetails?.bestOfferAutoAcceptPrice ?? null,
+    existingMinOffer: existingDetails?.minimumBestOfferPrice ?? null,
+    currency,
+  });
+
+  try {
+    await ebayTradingRequest(
+      "ReviseFixedPriceItem",
+      `<Item>
       <ItemID>${rawId}</ItemID>
       <StartPrice currencyID="${currency}">${formattedPrice}</StartPrice>
-    </Item>`
-  );
+      ${bestOfferPlan.listingDetailsXml}
+    </Item>
+    ${bestOfferPlan.deletedFieldsXml}`
+    );
+  } catch (err) {
+    if (isBestOfferThresholdError(err)) {
+      await ebayTradingRequest(
+        "ReviseFixedPriceItem",
+        `<Item>
+        <ItemID>${rawId}</ItemID>
+        <StartPrice currencyID="${currency}">${formattedPrice}</StartPrice>
+      </Item>
+      <DeletedField>Item.ListingDetails.BestOfferAutoAcceptPrice</DeletedField>
+      <DeletedField>Item.ListingDetails.MinimumBestOfferPrice</DeletedField>`
+      );
+    } else {
+      throw err;
+    }
+  }
 
   return {
     offerId: rawId,
@@ -796,7 +1136,8 @@ export async function updateEbayOfferPrice(params: {
  * eBay Item Number and fresh "Newly Listed" Cassini boost.
  * - For Inventory API offers: withdraw -> delete -> create fresh offer -> publish.
  * - For Seller Hub / Trading API listings: EndFixedPriceItem -> RelistFixedPriceItem
- *   (which mints a brand-new 12-digit ItemID with optional updated StartPrice).
+ *   (which mints a brand-new 12-digit ItemID with optional updated StartPrice,
+ *   Title, ItemSpecifics, Package Weight/Dims, and reconciled Best Offer thresholds).
  */
 export async function endAndSellSimilarEbayOffer(params: {
   offerId: string;
@@ -808,12 +1149,15 @@ export async function endAndSellSimilarEbayOffer(params: {
   widthIn?: number;
   heightIn?: number;
   addItemSpecifics?: Array<{ name: string; value: string }>;
+  bestOfferAutoAcceptPrice?: number | null;
+  minimumBestOfferPrice?: number | null;
 }): Promise<{
   previousOfferId: string;
   previousListingId: string | null;
   newOfferId: string;
   newListingId: string;
   newExternalUrl: string;
+  bestOfferNote?: string | null;
 }> {
   const {
     offerId: rawId,
@@ -825,6 +1169,8 @@ export async function endAndSellSimilarEbayOffer(params: {
     widthIn,
     heightIn,
     addItemSpecifics,
+    bestOfferAutoAcceptPrice,
+    minimumBestOfferPrice,
   } = params;
   const cleanNewTitle = newTitle?.trim().slice(0, 80) || "";
   const cleanAddSpecs = (addItemSpecifics || []).filter(
@@ -833,6 +1179,9 @@ export async function endAndSellSimilarEbayOffer(params: {
   const hasPkgOverride =
     (typeof weightOz === "number" && weightOz > 0) ||
     (typeof lengthIn === "number" && lengthIn > 0);
+  const hasBestOfferOverride =
+    bestOfferAutoAcceptPrice !== undefined ||
+    minimumBestOfferPrice !== undefined;
   const { webBase } = getEbayBaseUrls();
   const invOfferId = await resolveInventoryOfferId(rawId, sku);
 
@@ -917,17 +1266,84 @@ export async function endAndSellSimilarEbayOffer(params: {
     delete clonePayload.listing;
     delete clonePayload.listingStartDate;
 
+    const existingPricing =
+      (clonePayload.pricingSummary as Record<string, unknown> | undefined) ||
+      {};
+    const prevPriceVal = Number(
+      (existingPricing.price as { value?: string } | undefined)?.value || 0
+    );
+    const effectiveTargetPrice =
+      typeof newPrice === "number" && newPrice > 0
+        ? roundCurrency(newPrice)
+        : prevPriceVal;
+
     if (typeof newPrice === "number" && newPrice > 0) {
-      const existingPricing =
-        (clonePayload.pricingSummary as Record<string, unknown> | undefined) ||
-        {};
       clonePayload.pricingSummary = {
         ...existingPricing,
         price: {
-          value: roundCurrency(newPrice).toFixed(2),
+          value: effectiveTargetPrice.toFixed(2),
           currency: "USD",
         },
       };
+    }
+
+    // Reconcile Inventory API Best Offer terms against the new price
+    let bestOfferNote: string | null = null;
+    const policies =
+      (clonePayload.listingPolicies as Record<string, unknown> | undefined) ||
+      null;
+    const bestOfferTerms =
+      (policies?.bestOfferTerms as Record<string, unknown> | undefined) || null;
+    if (
+      effectiveTargetPrice > 0 &&
+      (bestOfferTerms || hasBestOfferOverride)
+    ) {
+      const existingAuto = Number(
+        (bestOfferTerms?.autoAcceptPrice as { value?: string } | undefined)
+          ?.value || 0
+      );
+      const existingMin = Number(
+        (bestOfferTerms?.autoDeclinePrice as { value?: string } | undefined)
+          ?.value || 0
+      );
+      const plan = resolveBestOfferPlan({
+        targetPrice: effectiveTargetPrice,
+        previousPrice: prevPriceVal > 0 ? prevPriceVal : null,
+        existingAutoAccept: existingAuto > 0 ? existingAuto : null,
+        existingMinOffer: existingMin > 0 ? existingMin : null,
+        requestedAutoAccept: bestOfferAutoAcceptPrice,
+        requestedMinOffer: minimumBestOfferPrice,
+      });
+      bestOfferNote = plan.note;
+      if (
+        plan.autoAcceptToSet !== null ||
+        plan.minOfferToSet !== null ||
+        plan.deleteAutoAccept ||
+        plan.deleteMinOffer
+      ) {
+        const nextTerms: Record<string, unknown> = {
+          bestOfferEnabled: true,
+          ...(bestOfferTerms || {}),
+        };
+        if (plan.deleteAutoAccept) delete nextTerms.autoAcceptPrice;
+        else if (plan.autoAcceptToSet !== null) {
+          nextTerms.autoAcceptPrice = {
+            value: plan.autoAcceptToSet.toFixed(2),
+            currency: "USD",
+          };
+        }
+        if (plan.deleteMinOffer) delete nextTerms.autoDeclinePrice;
+        else if (plan.minOfferToSet !== null) {
+          nextTerms.autoDeclinePrice = {
+            value: plan.minOfferToSet.toFixed(2),
+            currency: "USD",
+          };
+        }
+        clonePayload.listingPolicies = {
+          ...(policies || {}),
+          bestOfferTerms: nextTerms,
+        };
+      }
     }
 
     const created = await ebayRequest<{ offerId: string }>(
@@ -949,70 +1365,74 @@ export async function endAndSellSimilarEbayOffer(params: {
       newOfferId: created.offerId,
       newListingId: published.listingId,
       newExternalUrl: `${webBase}/${published.listingId}`,
+      bestOfferNote,
     };
   }
 
   // Seller Hub / Trading API path:
-  // If adding ItemSpecifics or modifying Package Details, read existing values FIRST so nothing is lost!
+  // ALWAYS fetch live GetItem details BEFORE ending the listing whenever price,
+  // Best Offer rules, Item Specifics, or Package Details are involved so we:
+  // 1) Safely merge ItemSpecifics without wiping existing fields
+  // 2) Auto-adjust or clear any Best Offer Auto-Accept / Minimum Best Offer rules
+  //    that are >= the new StartPrice (preventing eBay from rejecting the relist!)
+  const existingDetails = await fetchEbayItemDetails(rawId);
+
   let mergedSpecsXml = "";
   let pkgOverrideXml = "";
 
-  if (cleanAddSpecs.length > 0 || hasPkgOverride) {
-    const existingDetails = await fetchEbayItemDetails(rawId);
-
-    if (cleanAddSpecs.length > 0) {
-      const mergedMap = new Map<string, { name: string; values: string[] }>();
-      for (const [k, vals] of Object.entries(
-        existingDetails?.itemSpecifics || {}
-      )) {
-        if (k.trim() && Array.isArray(vals) && vals.length > 0) {
-          mergedMap.set(k.trim().toLowerCase(), { name: k.trim(), values: vals });
-        }
+  if (cleanAddSpecs.length > 0) {
+    const mergedMap = new Map<string, { name: string; values: string[] }>();
+    for (const [k, vals] of Object.entries(
+      existingDetails?.itemSpecifics || {}
+    )) {
+      if (k.trim() && Array.isArray(vals) && vals.length > 0) {
+        mergedMap.set(k.trim().toLowerCase(), { name: k.trim(), values: vals });
       }
-      for (const s of cleanAddSpecs) {
-        const key = s.name.trim().toLowerCase();
-        mergedMap.set(key, {
-          name: s.name.trim().slice(0, 40),
-          values: [s.value.trim().slice(0, 65)],
-        });
-      }
-      const nvlXml = [...mergedMap.values()]
-        .slice(0, 35)
-        .map(
-          (entry) => `      <NameValueList>
+    }
+    for (const s of cleanAddSpecs) {
+      const key = s.name.trim().toLowerCase();
+      mergedMap.set(key, {
+        name: s.name.trim().slice(0, 40),
+        values: [s.value.trim().slice(0, 65)],
+      });
+    }
+    const nvlXml = [...mergedMap.values()]
+      .slice(0, 35)
+      .map(
+        (entry) => `      <NameValueList>
         <Name>${escapeXml(entry.name)}</Name>
         ${entry.values
           .slice(0, 5)
           .map((v) => `<Value>${escapeXml(v.slice(0, 65))}</Value>`)
           .join("\n        ")}
       </NameValueList>`
-        )
-        .join("\n");
-      if (nvlXml) {
-        mergedSpecsXml = `<ItemSpecifics>\n${nvlXml}\n    </ItemSpecifics>`;
-      }
+      )
+      .join("\n");
+    if (nvlXml) {
+      mergedSpecsXml = `<ItemSpecifics>\n${nvlXml}\n    </ItemSpecifics>`;
     }
+  }
 
-    if (hasPkgOverride) {
-      const finalOz = Math.max(
-        1,
-        Math.round(weightOz || existingDetails?.weightOz || 12)
-      );
-      const wMajor = Math.floor(finalOz / 16);
-      const wMinor = finalOz % 16;
-      const finalLen = Math.max(
-        1,
-        Math.round(lengthIn || existingDetails?.lengthIn || 10)
-      );
-      const finalWid = Math.max(
-        1,
-        Math.round(widthIn || existingDetails?.widthIn || 8)
-      );
-      const finalHgt = Math.max(
-        1,
-        Math.round(heightIn || existingDetails?.heightIn || 4)
-      );
-      pkgOverrideXml = `<ShippingPackageDetails>
+  if (hasPkgOverride) {
+    const finalOz = Math.max(
+      1,
+      Math.round(weightOz || existingDetails?.weightOz || 12)
+    );
+    const wMajor = Math.floor(finalOz / 16);
+    const wMinor = finalOz % 16;
+    const finalLen = Math.max(
+      1,
+      Math.round(lengthIn || existingDetails?.lengthIn || 10)
+    );
+    const finalWid = Math.max(
+      1,
+      Math.round(widthIn || existingDetails?.widthIn || 8)
+    );
+    const finalHgt = Math.max(
+      1,
+      Math.round(heightIn || existingDetails?.heightIn || 4)
+    );
+    pkgOverrideXml = `<ShippingPackageDetails>
       <MeasurementUnit>English</MeasurementUnit>
       <PackageDepth unit="in">${finalHgt}</PackageDepth>
       <PackageLength unit="in">${finalLen}</PackageLength>
@@ -1020,15 +1440,48 @@ export async function endAndSellSimilarEbayOffer(params: {
       <WeightMajor unit="lbs">${wMajor}</WeightMajor>
       <WeightMinor unit="oz">${wMinor}</WeightMinor>
     </ShippingPackageDetails>`;
-    }
   }
 
+  const effectiveTargetPrice =
+    typeof newPrice === "number" && newPrice > 0
+      ? roundCurrency(newPrice)
+      : existingDetails?.currentPrice ?? 0;
+
+  const bestOfferPlan =
+    effectiveTargetPrice > 0
+      ? resolveBestOfferPlan({
+          targetPrice: effectiveTargetPrice,
+          previousPrice: existingDetails?.currentPrice ?? null,
+          existingAutoAccept: existingDetails?.bestOfferAutoAcceptPrice ?? null,
+          existingMinOffer: existingDetails?.minimumBestOfferPrice ?? null,
+          requestedAutoAccept: bestOfferAutoAcceptPrice,
+          requestedMinOffer: minimumBestOfferPrice,
+        })
+      : {
+          autoAcceptToSet: null,
+          minOfferToSet: null,
+          deleteAutoAccept: false,
+          deleteMinOffer: false,
+          listingDetailsXml: "",
+          deletedFieldsXml: "",
+          note: null,
+        };
+
   // EndFixedPriceItem -> RelistFixedPriceItem (fresh 12-digit ItemID)
-  await ebayTradingRequest(
-    "EndFixedPriceItem",
-    `<ItemID>${rawId}</ItemID>
-     <EndingReason>NotAvailable</EndingReason>`
-  );
+  // Tolerate "already ended" so a previously interrupted relist can recover cleanly!
+  try {
+    await ebayTradingRequest(
+      "EndFixedPriceItem",
+      `<ItemID>${rawId}</ItemID>
+       <EndingReason>NotAvailable</EndingReason>`
+    );
+  } catch (endErr) {
+    const endMsg = endErr instanceof Error ? endErr.message : String(endErr || "");
+    if (!/already\s*(been\s*)?ended|has\s*ended|closed|1047/i.test(endMsg)) {
+      throw endErr;
+    }
+    console.warn(`[ebay] EndFixedPriceItem(${rawId}) already ended — continuing to Relist:`, endMsg);
+  }
 
   const titleOverrideXml = cleanNewTitle
     ? `<Title>${escapeXml(cleanNewTitle)}</Title>`
@@ -1038,16 +1491,48 @@ export async function endAndSellSimilarEbayOffer(params: {
       ? `<StartPrice currencyID="USD">${roundCurrency(newPrice).toFixed(2)}</StartPrice>`
       : "";
 
-  const relistXml = await ebayTradingRequest(
-    "RelistFixedPriceItem",
-    `<Item>
+  let relistXml: string;
+  let finalBestOfferNote = bestOfferPlan.note;
+
+  try {
+    relistXml = await ebayTradingRequest(
+      "RelistFixedPriceItem",
+      `<Item>
       <ItemID>${rawId}</ItemID>
       ${titleOverrideXml}
       ${priceOverrideXml}
       ${mergedSpecsXml}
       ${pkgOverrideXml}
-    </Item>`
-  );
+      ${bestOfferPlan.listingDetailsXml}
+    </Item>
+    ${bestOfferPlan.deletedFieldsXml}`
+    );
+  } catch (relistErr) {
+    // Last-resort failsafe: if eBay still rejects due to Best Offer thresholds,
+    // immediately clear BestOfferAutoAcceptPrice & MinimumBestOfferPrice and retry
+    // so the ended listing is NEVER left stranded unpublished!
+    if (isBestOfferThresholdError(relistErr)) {
+      console.warn(
+        `[ebay] RelistFixedPriceItem(${rawId}) hit Best Offer threshold conflict — retrying with cleared Best Offer auto-rules:`,
+        relistErr
+      );
+      relistXml = await ebayTradingRequest(
+        "RelistFixedPriceItem",
+        `<Item>
+        <ItemID>${rawId}</ItemID>
+        ${titleOverrideXml}
+        ${priceOverrideXml}
+        ${mergedSpecsXml}
+        ${pkgOverrideXml}
+      </Item>
+      <DeletedField>Item.ListingDetails.BestOfferAutoAcceptPrice</DeletedField>
+      <DeletedField>Item.ListingDetails.MinimumBestOfferPrice</DeletedField>`
+      );
+      finalBestOfferNote = "Best Offer auto-rules cleared to allow lower price";
+    } else {
+      throw relistErr;
+    }
+  }
 
   const newListingId = extractXmlTag(relistXml, "ItemID") || rawId;
   return {
@@ -1056,6 +1541,7 @@ export async function endAndSellSimilarEbayOffer(params: {
     newOfferId: newListingId,
     newListingId,
     newExternalUrl: `${webBase}/${newListingId}`,
+    bestOfferNote: finalBestOfferNote,
   };
 }
 

@@ -36,6 +36,9 @@ export interface RelistSanityCheckResponse {
   liveHeightIn: number | null;
   liveBrand: string | null;
   liveShippingProfileName: string | null;
+  liveBestOfferEnabled: boolean;
+  liveBestOfferAutoAcceptPrice: number | null;
+  liveMinimumBestOfferPrice: number | null;
   recommendPromote: boolean;
   recommendedPromoteRate: number;
   suggestedSpecifics: Array<{ name: string; value: string }>;
@@ -97,8 +100,11 @@ export async function POST(request: Request) {
   let liveHeightIn = body.heightIn ?? null;
   let liveShippingProfileName: string | null = null;
   let liveShippingType: string | null = null;
+  let liveBestOfferEnabled = false;
+  let liveBestOfferAutoAcceptPrice: number | null = null;
+  let liveMinimumBestOfferPrice: number | null = null;
 
-  // Pull live eBay photo count, brand, category, weight, dims & shipping policy via GetItem
+  // Pull live eBay photo count, brand, category, weight, dims, shipping policy & Best Offer rules via GetItem
   if (
     body.externalListingId &&
     /^\d+$/.test(body.externalListingId.trim()) &&
@@ -123,6 +129,9 @@ export async function POST(request: Request) {
         liveShippingProfileName = details.shippingProfileName;
       }
       if (details.shippingType) liveShippingType = details.shippingType;
+      liveBestOfferEnabled = Boolean(details.bestOfferEnabled);
+      liveBestOfferAutoAcceptPrice = details.bestOfferAutoAcceptPrice;
+      liveMinimumBestOfferPrice = details.minimumBestOfferPrice;
 
       // Silently backfill missing weight/dims/brand/category into Supabase so Pick List & future checks have them too
       const supabase = getSupabaseServerClient();
@@ -479,6 +488,9 @@ For suggestedSpecifics: return 0 to 4 high-value missing eBay Item Specifics cle
     liveHeightIn,
     liveBrand,
     liveShippingProfileName,
+    liveBestOfferEnabled,
+    liveBestOfferAutoAcceptPrice,
+    liveMinimumBestOfferPrice,
     recommendPromote,
     recommendedPromoteRate: 4,
     suggestedSpecifics: suggestedSpecifics.slice(0, 4),

@@ -395,6 +395,10 @@ export interface EbayActionRequest {
   widthIn?: number;
   heightIn?: number;
   addItemSpecifics?: Array<{ name: string; value: string }>;
+  /** Set a new eBay Best Offer auto-accept price, or pass `null` to clear it. */
+  bestOfferAutoAcceptPrice?: number | null;
+  /** Set a new eBay minimum Best Offer (auto-decline) price, or pass `null` to clear it. */
+  minimumBestOfferPrice?: number | null;
 }
 
 export interface EbayActionItemResult {

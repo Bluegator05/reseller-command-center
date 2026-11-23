@@ -27,6 +27,8 @@ export interface RelistFixPayload {
   widthIn?: number;
   heightIn?: number;
   addItemSpecifics?: Array<{ name: string; value: string }>;
+  bestOfferAutoAcceptPrice?: number | null;
+  minimumBestOfferPrice?: number | null;
 }
 
 interface RelistSanityModalProps {
@@ -52,6 +54,13 @@ export function RelistSanityModal({
   const [editPrice, setEditPrice] = useState(row.listed_price.toFixed(2));
   const [promoteEnabled, setPromoteEnabled] = useState(false);
   const [promoteRate, setPromoteRate] = useState<number>(4);
+
+  // Live eBay Best Offer auto-accept / minimum (auto-decline) rules
+  const [baseAutoAccept, setBaseAutoAccept] = useState<number | null>(null);
+  const [baseMinOffer, setBaseMinOffer] = useState<number | null>(null);
+  const [editAutoAccept, setEditAutoAccept] = useState("");
+  const [editMinOffer, setEditMinOffer] = useState("");
+  const [bestOfferAutoAdjusted, setBestOfferAutoAdjusted] = useState(false);
 
   // Live eBay package baseline vs editable weight/dims
   const [baseWeightOz, setBaseWeightOz] = useState<number | null>(
@@ -127,6 +136,15 @@ export function RelistSanityModal({
             setPromoteEnabled(true);
             setPromoteRate(data.recommendedPromoteRate || 4);
           }
+          // Pre-fill live eBay Best Offer Auto-Accept / Minimum Offer thresholds
+          if (data.liveBestOfferAutoAcceptPrice !== null) {
+            setBaseAutoAccept(data.liveBestOfferAutoAcceptPrice);
+            setEditAutoAccept(data.liveBestOfferAutoAcceptPrice.toFixed(2));
+          }
+          if (data.liveMinimumBestOfferPrice !== null) {
+            setBaseMinOffer(data.liveMinimumBestOfferPrice);
+            setEditMinOffer(data.liveMinimumBestOfferPrice.toFixed(2));
+          }
           // Pre-fill real live eBay weight & dimensions
           if (data.liveWeightOz) {
             setBaseWeightOz(data.liveWeightOz);
@@ -170,6 +188,58 @@ export function RelistSanityModal({
     };
   }, [row]);
 
+  // Auto-reconcile Best Offer Auto-Accept & Min Offer whenever the asking price drops at/below them
+  const handlePriceChange = (nextStr: string) => {
+    setEditPrice(nextStr);
+    const nextPrice = Number(nextStr);
+    if (!Number.isFinite(nextPrice) || nextPrice <= 0) return;
+
+    const gap = nextPrice >= 10 ? 0.5 : nextPrice >= 3 ? 0.25 : 0.05;
+    let nextAutoVal =
+      editAutoAccept.trim() !== "" ? Number(editAutoAccept) : null;
+    let nextMinVal = editMinOffer.trim() !== "" ? Number(editMinOffer) : null;
+    let didAdjust = false;
+
+    if (nextAutoVal !== null && Number.isFinite(nextAutoVal) && nextAutoVal >= nextPrice - 0.01) {
+      const ratio =
+        baseAutoAccept && row.listed_price > 0 && baseAutoAccept < row.listed_price
+          ? baseAutoAccept / row.listed_price
+          : 0.9;
+      let scaled = Math.round(nextPrice * Math.min(0.95, Math.max(0.5, ratio)) * 100) / 100;
+      if (scaled >= nextPrice) scaled = Math.round((nextPrice - gap) * 100) / 100;
+      if (scaled < 0.99) {
+        nextAutoVal = null;
+        setEditAutoAccept("");
+      } else {
+        nextAutoVal = scaled;
+        setEditAutoAccept(scaled.toFixed(2));
+      }
+      didAdjust = true;
+    }
+
+    const minCeiling = nextAutoVal !== null && Number.isFinite(nextAutoVal) ? nextAutoVal : nextPrice;
+    if (nextMinVal !== null && Number.isFinite(nextMinVal) && nextMinVal >= minCeiling - 0.01) {
+      const ratio =
+        baseMinOffer && row.listed_price > 0 && baseMinOffer < row.listed_price
+          ? baseMinOffer / row.listed_price
+          : 0.75;
+      let scaled = Math.round(nextPrice * Math.min(0.85, Math.max(0.4, ratio)) * 100) / 100;
+      if (scaled >= minCeiling) scaled = Math.round((minCeiling - gap) * 100) / 100;
+      if (scaled < 0.99) {
+        nextMinVal = null;
+        setEditMinOffer("");
+      } else {
+        nextMinVal = scaled;
+        setEditMinOffer(scaled.toFixed(2));
+      }
+      didAdjust = true;
+    }
+
+    if (didAdjust) {
+      setBestOfferAutoAdjusted(true);
+    }
+  };
+
   const parsedPrice = Number(editPrice);
   const priceChanged =
     Number.isFinite(parsedPrice) &&
@@ -177,6 +247,44 @@ export function RelistSanityModal({
     Math.abs(parsedPrice - row.listed_price) > 0.005;
   const titleChanged =
     editTitle.trim().length >= 3 && editTitle.trim() !== row.title.trim();
+
+  const hasLiveBestOfferRules =
+    baseAutoAccept !== null || baseMinOffer !== null;
+  const parsedAutoAccept =
+    editAutoAccept.trim() === "" ? null : Number(editAutoAccept);
+  const parsedMinOffer =
+    editMinOffer.trim() === "" ? null : Number(editMinOffer);
+
+  const autoAcceptChanged =
+    (baseAutoAccept === null && parsedAutoAccept !== null && Number.isFinite(parsedAutoAccept) && parsedAutoAccept > 0) ||
+    (baseAutoAccept !== null && parsedAutoAccept === null) ||
+    (baseAutoAccept !== null &&
+      parsedAutoAccept !== null &&
+      Number.isFinite(parsedAutoAccept) &&
+      Math.abs(parsedAutoAccept - baseAutoAccept) > 0.005);
+
+  const minOfferChanged =
+    (baseMinOffer === null && parsedMinOffer !== null && Number.isFinite(parsedMinOffer) && parsedMinOffer > 0) ||
+    (baseMinOffer !== null && parsedMinOffer === null) ||
+    (baseMinOffer !== null &&
+      parsedMinOffer !== null &&
+      Number.isFinite(parsedMinOffer) &&
+      Math.abs(parsedMinOffer - baseMinOffer) > 0.005);
+
+  const effectiveAsk =
+    Number.isFinite(parsedPrice) && parsedPrice > 0
+      ? parsedPrice
+      : row.listed_price;
+  const bestOfferHasConflict =
+    (parsedAutoAccept !== null &&
+      Number.isFinite(parsedAutoAccept) &&
+      parsedAutoAccept >= effectiveAsk) ||
+    (parsedMinOffer !== null &&
+      Number.isFinite(parsedMinOffer) &&
+      (parsedMinOffer >= effectiveAsk ||
+        (parsedAutoAccept !== null &&
+          Number.isFinite(parsedAutoAccept) &&
+          parsedMinOffer >= parsedAutoAccept)));
 
   const totalEditOz =
     (editLbs !== "" || editOz !== "")
@@ -203,6 +311,13 @@ export function RelistSanityModal({
   const fixSummaryParts: string[] = [];
   if (titleChanged) fixSummaryParts.push("New Title");
   if (priceChanged) fixSummaryParts.push(`Price $${parsedPrice.toFixed(2)}`);
+  if (autoAcceptChanged || minOfferChanged) {
+    fixSummaryParts.push(
+      parsedAutoAccept === null && parsedMinOffer === null
+        ? "Clear Best Offer Rules"
+        : "Updated Best Offer Rules"
+    );
+  }
   if (promoteEnabled) fixSummaryParts.push(`Promote ${promoteRate}%`);
   if (chosenSpecs.length > 0) fixSummaryParts.push(`+${chosenSpecs.length} Specifics`);
   if (weightChanged || dimsChanged) fixSummaryParts.push("Updated Pkg Weight/Dims");
@@ -488,7 +603,7 @@ export function RelistSanityModal({
                   step="0.01"
                   min="0.99"
                   value={editPrice}
-                  onChange={(e) => setEditPrice(e.target.value)}
+                  onChange={(e) => handlePriceChange(e.target.value)}
                   className="w-full px-2.5 py-1.5 text-xs font-mono font-bold rounded-lg border border-[#DDE2DF] bg-white focus:border-[#0F766E] focus:outline-none"
                 />
               </div>
@@ -496,7 +611,7 @@ export function RelistSanityModal({
               <div className="flex flex-wrap items-center gap-1.5">
                 <button
                   type="button"
-                  onClick={() => setEditPrice(row.listed_price.toFixed(2))}
+                  onClick={() => handlePriceChange(row.listed_price.toFixed(2))}
                   className="px-2 py-1.5 rounded-md border border-[#DDE2DF] bg-white text-[11px] font-mono text-[#5C606B] hover:border-[#0F766E] cursor-pointer"
                 >
                   Keep ${row.listed_price.toFixed(2)}
@@ -504,7 +619,9 @@ export function RelistSanityModal({
                 {report && (
                   <button
                     type="button"
-                    onClick={() => setEditPrice(report.suggestedPrice.toFixed(2))}
+                    onClick={() =>
+                      handlePriceChange(report.suggestedPrice.toFixed(2))
+                    }
                     className="px-2 py-1.5 rounded-md border border-[#A7F3D0] bg-[#ECFDF5] text-[11px] font-mono font-semibold text-[#0F766E] hover:bg-[#D1FAE5] cursor-pointer"
                   >
                     AI ${report.suggestedPrice.toFixed(2)}
@@ -514,7 +631,7 @@ export function RelistSanityModal({
                   <button
                     type="button"
                     onClick={() =>
-                      setEditPrice(row.projected_drop_price.toFixed(2))
+                      handlePriceChange(row.projected_drop_price.toFixed(2))
                     }
                     className="px-2 py-1.5 rounded-md border border-[#DDE2DF] bg-white text-[11px] font-mono text-[#14151A] hover:border-[#0F766E] cursor-pointer"
                   >
@@ -523,13 +640,105 @@ export function RelistSanityModal({
                 )}
                 <button
                   type="button"
-                  onClick={() => setEditPrice(row.floor_price.toFixed(2))}
+                  onClick={() => handlePriceChange(row.floor_price.toFixed(2))}
                   className="px-2 py-1.5 rounded-md border border-[#DDE2DF] bg-white text-[11px] font-mono text-[#5C606B] hover:border-[#0F766E] cursor-pointer"
                 >
                   Floor ${row.floor_price.toFixed(2)}
                 </button>
               </div>
             </div>
+
+            {/* 2b. Live eBay Best Offer Rules (Auto-Accept / Minimum Offer) */}
+            {hasLiveBestOfferRules && (
+              <div
+                className={`p-2.5 rounded-lg border space-y-2 ${
+                  bestOfferHasConflict
+                    ? "bg-[#FEF2F2] border-[#FECACA]"
+                    : bestOfferAutoAdjusted || autoAcceptChanged || minOfferChanged
+                      ? "bg-[#FFFBEB] border-[#FDE68A]"
+                      : "bg-white border-[#E4E4DD]"
+                }`}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-[11px] font-semibold text-[#14151A] inline-flex items-center gap-1.5">
+                    <AlertTriangle
+                      className={`w-3.5 h-3.5 ${
+                        bestOfferHasConflict
+                          ? "text-[#B91C1C]"
+                          : "text-[#D97706]"
+                      }`}
+                    />
+                    <span>eBay Best Offer Auto-Rules Detected</span>
+                    <span className="text-[10px] font-mono font-normal text-[#5C606B]">
+                      (was{" "}
+                      {baseAutoAccept !== null
+                        ? `Auto $${baseAutoAccept.toFixed(2)}`
+                        : "no auto-accept"}
+                      {" · "}
+                      {baseMinOffer !== null
+                        ? `Min $${baseMinOffer.toFixed(2)}`
+                        : "no min"}
+                      )
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditAutoAccept("");
+                      setEditMinOffer("");
+                      setBestOfferAutoAdjusted(false);
+                    }}
+                    className="px-2 py-0.5 rounded bg-white border border-[#DDE2DF] text-[10px] font-semibold text-[#5C606B] hover:border-[#B91C1C] hover:text-[#B91C1C] cursor-pointer"
+                  >
+                    Clear Auto Rules
+                  </button>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3 text-[11px]">
+                  <label className="inline-flex items-center gap-1.5">
+                    <span className="text-[#444B52] font-medium">
+                      Auto-Accept ($)
+                    </span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0.99"
+                      value={editAutoAccept}
+                      onChange={(e) => {
+                        setEditAutoAccept(e.target.value);
+                        setBestOfferAutoAdjusted(false);
+                      }}
+                      placeholder="None"
+                      className="w-20 px-2 py-1 text-xs font-mono rounded border border-[#DDE2DF] bg-white focus:border-[#0F766E] focus:outline-none"
+                    />
+                  </label>
+                  <label className="inline-flex items-center gap-1.5">
+                    <span className="text-[#444B52] font-medium">
+                      Min Offer ($)
+                    </span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0.99"
+                      value={editMinOffer}
+                      onChange={(e) => {
+                        setEditMinOffer(e.target.value);
+                        setBestOfferAutoAdjusted(false);
+                      }}
+                      placeholder="None"
+                      className="w-20 px-2 py-1 text-xs font-mono rounded border border-[#DDE2DF] bg-white focus:border-[#0F766E] focus:outline-none"
+                    />
+                  </label>
+                  <span className="text-[10px] text-[#5C606B]">
+                    {bestOfferHasConflict
+                      ? "Must be lower than Relist Price (will auto-clamp if left high)."
+                      : bestOfferAutoAdjusted
+                        ? "Auto-lowered below your new ask price so eBay publishes cleanly."
+                        : "Leave blank to remove auto-accept/decline while keeping Best Offer on."}
+                  </span>
+                </div>
+              </div>
+            )}
 
             {/* 3. Promote Immediately on Relist */}
             <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-lg bg-white border border-[#E4E4DD]">
@@ -748,6 +957,12 @@ export function RelistSanityModal({
                       : undefined,
                   addItemSpecifics:
                     chosenSpecs.length > 0 ? chosenSpecs : undefined,
+                  bestOfferAutoAcceptPrice: autoAcceptChanged
+                    ? parsedAutoAccept
+                    : undefined,
+                  minimumBestOfferPrice: minOfferChanged
+                    ? parsedMinOffer
+                    : undefined,
                 })
               }
               className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-[#0F766E] text-white text-xs font-bold hover:bg-[#0B5B55] disabled:opacity-50 cursor-pointer shadow-xs"

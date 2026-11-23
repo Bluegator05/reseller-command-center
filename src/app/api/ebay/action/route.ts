@@ -272,6 +272,20 @@ export async function POST(request: Request) {
             typeof body.promoteRatePct === "number" && body.promoteRatePct >= 2
               ? Math.min(20, roundCurrency(body.promoteRatePct))
               : null;
+          const targetBestOfferAutoAccept =
+            body.bestOfferAutoAcceptPrice === null
+              ? null
+              : typeof body.bestOfferAutoAcceptPrice === "number" &&
+                  body.bestOfferAutoAcceptPrice > 0
+                ? roundCurrency(body.bestOfferAutoAcceptPrice)
+                : undefined;
+          const targetMinBestOffer =
+            body.minimumBestOfferPrice === null
+              ? null
+              : typeof body.minimumBestOfferPrice === "number" &&
+                  body.minimumBestOfferPrice > 0
+                ? roundCurrency(body.minimumBestOfferPrice)
+                : undefined;
 
           const relisted = await endAndSellSimilarEbayOffer({
             offerId: listing.external_listing_id,
@@ -283,6 +297,8 @@ export async function POST(request: Request) {
             widthIn: targetWid,
             heightIn: targetHgt,
             addItemSpecifics: targetAddSpecs.length > 0 ? targetAddSpecs : undefined,
+            bestOfferAutoAcceptPrice: targetBestOfferAutoAccept,
+            minimumBestOfferPrice: targetMinBestOffer,
           });
 
           // If seller enabled Promote on Relist, apply promoted ad rate to the brand-new eBay ItemID
@@ -381,6 +397,7 @@ export async function POST(request: Request) {
                 updatedTitle: targetRelistTitle ?? null,
                 promotedAdRatePct: appliedPromoteRate,
                 addedSpecificsCount: targetAddSpecs.length,
+                bestOfferNote: relisted.bestOfferNote ?? null,
               },
               completed_at: new Date().toISOString(),
             })
@@ -400,6 +417,9 @@ export async function POST(request: Request) {
           }
           if (targetWeightOz) {
             tweakNotes.push(`weight ${targetWeightOz}oz`);
+          }
+          if (relisted.bestOfferNote) {
+            tweakNotes.push(relisted.bestOfferNote);
           }
           if (appliedPromoteRate !== null) {
             tweakNotes.push(`promoted ${appliedPromoteRate}%`);
