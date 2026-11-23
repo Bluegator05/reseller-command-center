@@ -47,7 +47,7 @@ interface BinAuditPanelProps {
   }) => Promise<void>;
 }
 
-type SubBinLetter = "A" | "B" | "C";
+type SubBinLetter = "A" | "B" | "C" | "Mom";
 
 interface ParsedSkuMeta {
   bin: string;
@@ -93,13 +93,19 @@ const CLOTHING_HINT_RE =
 
 /**
  * Matches "Shelf <Letter>" keeping the shelf as ONE top-level dropdown (e.g. "Shelf H")
- * while separately extracting optional sub-bin A/B/C for Shelves H, I, and J
- * ("Shelf H - Bin A", "Shelf H · Bin B", "Shelf H-A", "Shelf I (B)", "Shelf J C").
+ * while separately extracting optional sub-bins (A/B/C on H/I/J, plus "Mom" on Shelf H).
  */
 function matchShelfWithSubBin(
   raw: string
 ): { bin: string; subBin: SubBinLetter | null } | null {
-  // 1. Explicit "Shelf H - Bin A", "Shelf I · Bin B", "Shelf J Bin C"
+  // 1a. Shelf H "Mom" bin ("Shelf H · Bin Mom", "Shelf H - Mom", "Shelf H Mom")
+  if (
+    /\bshelf\s*[-#:]?\s*H(?:[\s,.\-–—·/()]+(?:bin[\s\-#:]+)?)mom\b/i.test(raw)
+  ) {
+    return { bin: "Shelf H", subBin: "Mom" };
+  }
+
+  // 1b. Explicit "Shelf H - Bin A", "Shelf I · Bin B", "Shelf J Bin C"
   const explicitSub = raw.match(
     /\bshelf\s*[-#:]?\s*([A-Za-z])[\s,.\-–—·/()]*bin\s*[-#:]?\s*([ABC])(?=\b|[^A-Za-z]|$)/i
   );
@@ -1196,12 +1202,16 @@ export function BinAuditPanel({
                               {onSetBinLocation && shelfLetter && (
                                 <div
                                   className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-lg bg-[#FAF9F6] border border-[#E4E4DD]"
-                                  title={`Move inside Shelf ${shelfLetter} to Bin A, B, or C`}
+                                  title={`Move inside Shelf ${shelfLetter}`}
                                 >
                                   <span className="text-[9px] font-bold uppercase text-[#5C606B] mr-0.5">
                                     Bin
                                   </span>
-                                  {(["A", "B", "C"] as const).map((sub) => {
+                                  {(
+                                    shelfLetter === "H"
+                                      ? (["A", "B", "C", "Mom"] as const)
+                                      : (["A", "B", "C"] as const)
+                                  ).map((sub) => {
                                     const isCurrent = it.subBin === sub;
                                     const targetBin = `Shelf ${shelfLetter} · Bin ${sub}`;
                                     return (
@@ -1215,9 +1225,13 @@ export function BinAuditPanel({
                                             targetBin
                                           );
                                         }}
-                                        className={`w-5 h-5 rounded text-[10px] font-mono font-bold transition cursor-pointer ${
+                                        className={`h-5 ${
+                                          sub === "Mom" ? "px-1.5" : "w-5"
+                                        } rounded text-[10px] font-mono font-bold transition cursor-pointer ${
                                           isCurrent
-                                            ? "bg-[#0F766E] text-white"
+                                            ? sub === "Mom"
+                                              ? "bg-[#BE185D] text-white"
+                                              : "bg-[#0F766E] text-white"
                                             : "bg-white border border-[#DDE2DF] text-[#444B52] hover:border-[#0F766E] hover:text-[#0F766E]"
                                         }`}
                                       >
@@ -1299,12 +1313,20 @@ export function BinAuditPanel({
                         );
                       }
 
-                      // Shelves H, I, J: separated into Bin A, Bin B, Bin C right INSIDE the shelf dropdown
+                      // Shelves H, I, J: separated into Bin A, Bin B, Bin C (and Mom on Shelf H) right INSIDE the shelf dropdown
                       const activeSubFilter = shelfSubFilter[b.bin] ?? "ALL";
                       const binA = b.items.filter((x) => x.subBin === "A");
                       const binB = b.items.filter((x) => x.subBin === "B");
                       const binC = b.items.filter((x) => x.subBin === "C");
-                      const binNone = b.items.filter((x) => !x.subBin);
+                      const binMom =
+                        shelfLetter === "H"
+                          ? b.items.filter((x) => x.subBin === "Mom")
+                          : [];
+                      const binNone = b.items.filter(
+                        (x) =>
+                          !x.subBin ||
+                          (x.subBin === "Mom" && shelfLetter !== "H")
+                      );
 
                       const subSections: Array<{
                         key: SubBinLetter | "NONE";
@@ -1330,11 +1352,24 @@ export function BinAuditPanel({
                           items: binC,
                           pillBg: "bg-[#7C3AED] text-white",
                         },
+                        ...(shelfLetter === "H"
+                          ? [
+                              {
+                                key: "Mom" as const,
+                                label: "Bin Mom",
+                                items: binMom,
+                                pillBg: "bg-[#BE185D] text-white",
+                              },
+                            ]
+                          : []),
                         ...(binNone.length > 0
                           ? [
                               {
                                 key: "NONE" as const,
-                                label: "Not Yet Assigned to Bin A / B / C",
+                                label:
+                                  shelfLetter === "H"
+                                    ? "Not Yet Assigned to Bin A / B / C / Mom"
+                                    : "Not Yet Assigned to Bin A / B / C",
                                 items: binNone,
                                 pillBg: "bg-[#E5E7EB] text-[#4B5563]",
                               },
@@ -1363,6 +1398,14 @@ export function BinAuditPanel({
                                   { id: "A", label: `Bin A (${binA.length})` },
                                   { id: "B", label: `Bin B (${binB.length})` },
                                   { id: "C", label: `Bin C (${binC.length})` },
+                                  ...(shelfLetter === "H"
+                                    ? [
+                                        {
+                                          id: "Mom" as const,
+                                          label: `Mom (${binMom.length})`,
+                                        },
+                                      ]
+                                    : []),
                                   ...(binNone.length > 0
                                     ? [
                                         {
