@@ -47,8 +47,11 @@ interface BinAuditPanelProps {
   }) => Promise<void>;
 }
 
+type SubBinLetter = "A" | "B" | "C";
+
 interface ParsedSkuMeta {
   bin: string;
+  subBin: SubBinLetter | null;
   source: string | null;
   dateStr: string | null;
   itemNumber: string | null;
@@ -64,6 +67,7 @@ interface BinEntry {
       parsedSource?: string | null;
       parsedDate?: string | null;
       parsedItemNumber?: string | null;
+      subBin: SubBinLetter | null;
       auditStatus: AuditStatus;
       auditVerifiedAt: string | null;
       quantity: number;
@@ -88,16 +92,22 @@ const CLOTHING_HINT_RE =
   /\b(clothing|apparel|shirt|t-shirt|tshirt|tee|polo|blouse|top|sweater|sweatshirt|hoodie|pullover|cardigan|jacket|coat|blazer|vest|parka|windbreaker|fleece|pants|jeans|denim|trousers|slacks|chinos|shorts|leggings|joggers|sweatpants|skirt|dress|romper|jumpsuit|suit|tuxedo|jersey|flannel|henley|tunic|tank|camisole|bodysuit|swimsuit|bikini|trunks|robe|pajama|sleepwear|lingerie|bra|underwear|socks|tie|necktie|scarf|beanie|hat|cap|gloves|belt|womens|women's|mens|men's|boys|girls|youth|kids|size\s*(?:xxs|xs|s|m|l|xl|xxl|2xl|3xl|4xl))\b/i;
 
 /**
- * Matches "Shelf <Letter>" with optional sub-bin ("Bin A/B/C" or shorthand "Shelf H-A",
- * "Shelf I B", "Shelf J (C)") so Shelves H, I, and J cleanly separate into sub-bins.
+ * Matches "Shelf <Letter>" keeping the shelf as ONE top-level dropdown (e.g. "Shelf H")
+ * while separately extracting optional sub-bin A/B/C for Shelves H, I, and J
+ * ("Shelf H - Bin A", "Shelf H · Bin B", "Shelf H-A", "Shelf I (B)", "Shelf J C").
  */
-function matchShelfWithSubBin(raw: string): string | null {
+function matchShelfWithSubBin(
+  raw: string
+): { bin: string; subBin: SubBinLetter | null } | null {
   // 1. Explicit "Shelf H - Bin A", "Shelf I · Bin B", "Shelf J Bin C"
   const explicitSub = raw.match(
-    /\bshelf\s*[-#:]?\s*([A-Za-z])[\s,.\-–—·/()]*bin\s*[-#:]?\s*([A-Za-z])(?=\b|[^A-Za-z]|$)/i
+    /\bshelf\s*[-#:]?\s*([A-Za-z])[\s,.\-–—·/()]*bin\s*[-#:]?\s*([ABC])(?=\b|[^A-Za-z]|$)/i
   );
   if (explicitSub) {
-    return `Shelf ${explicitSub[1].toUpperCase()} · Bin ${explicitSub[2].toUpperCase()}`;
+    return {
+      bin: `Shelf ${explicitSub[1].toUpperCase()}`,
+      subBin: explicitSub[2].toUpperCase() as SubBinLetter,
+    };
   }
 
   // 2. Shorthand on Shelves H, I, J: "Shelf H-A", "Shelf H A", "Shelf I (B)", "Shelf J/C"
@@ -105,7 +115,10 @@ function matchShelfWithSubBin(raw: string): string | null {
     /\bshelf\s*[-#:]?\s*([HIJ])(?:\s*[-–—·/:,]\s*|\s+\(|\s+)([ABC])(?=\)?(?:\s|$|[^A-Za-z]))/i
   );
   if (hijSub) {
-    return `Shelf ${hijSub[1].toUpperCase()} · Bin ${hijSub[2].toUpperCase()}`;
+    return {
+      bin: `Shelf ${hijSub[1].toUpperCase()}`,
+      subBin: hijSub[2].toUpperCase() as SubBinLetter,
+    };
   }
 
   // 3. Standard "Shelf <Letter>"
@@ -113,13 +126,18 @@ function matchShelfWithSubBin(raw: string): string | null {
     /\bshelf\s*[-#:]?\s*([A-Za-z])(?=\b|[^A-Za-z]|$)/i
   );
   if (shelfLetter) {
-    return `Shelf ${shelfLetter[1].toUpperCase()}`;
+    return {
+      bin: `Shelf ${shelfLetter[1].toUpperCase()}`,
+      subBin: null,
+    };
   }
 
   return null;
 }
 
-function normalizeExplicitBin(raw: string): string | null {
+function normalizeExplicitBin(
+  raw: string
+): { bin: string; subBin: SubBinLetter | null } | null {
   const cleaned = raw
     .replace(/^[\s()[\]{}*.,;:\-–—/\\]+|[\s()[\]{}*.,;:\-–—/\\]+$/g, "")
     .replace(/\s+/g, " ")
@@ -131,23 +149,23 @@ function normalizeExplicitBin(raw: string): string | null {
   if (shelfMatch) return shelfMatch;
 
   const shelfNum = cleaned.match(/\bshelf\s*[-#:]?\s*(\d{1,2})\b/i);
-  if (shelfNum) return `Shelf ${shelfNum[1]}`;
+  if (shelfNum) return { bin: `Shelf ${shelfNum[1]}`, subBin: null };
 
   const garageBin =
     cleaned.match(/(?:^|[^A-Za-z0-9])G\s*[-#]?([1-9])(?=$|[^A-Za-z0-9])/i) ||
     cleaned.match(/(?:^|[^A-Za-z0-9])G([1-9])\d{2,4}(?=$|[^A-Za-z0-9])/i);
-  if (garageBin) return `G${garageBin[1]}`;
+  if (garageBin) return { bin: `G${garageBin[1]}`, subBin: null };
 
-  if (/\bcloset\b/i.test(cleaned)) return "Closet";
-  if (/\brack\b/i.test(cleaned)) return "Rack";
-  if (/^clothes?$/i.test(cleaned)) return "Clothes";
+  if (/\bcloset\b/i.test(cleaned)) return { bin: "Closet", subBin: null };
+  if (/\brack\b/i.test(cleaned)) return { bin: "Rack", subBin: null };
+  if (/^clothes?$/i.test(cleaned)) return { bin: "Clothes", subBin: null };
 
-  return cleaned;
+  return { bin: cleaned, subBin: null };
 }
 
 /**
  * Parses custom reseller SKUs into clean physical locations:
- *  1) Any "Shelf <Letter>" anywhere in SKU (plus Bin A/B/C sub-bins on Shelves H/I/J)
+ *  1) Any "Shelf <Letter>" anywhere in SKU (with internal Bin A/B/C sub-groups on Shelves H/I/J)
  *  2) Garage bins G1–G9 anywhere in SKU (incl. G4001, G4016) -> "G1"–"G5", ...
  *  3) Any "Closet" anywhere in SKU         -> "Closet" (all floor items in shipping closet)
  *  4) Any "Rack" anywhere in SKU           -> "Rack"   (all items on shipping rack)
@@ -195,14 +213,26 @@ function parseCustomSkuLocation(
 
   // Respect explicit manually-assigned bin_location if clean
   if (explicit) {
-    return { bin: explicit, source, dateStr, itemNumber: null };
+    // If explicit bin_location didn't specify a subBin, still check SKU for Shelf H/I/J sub-bin
+    const skuSub =
+      !explicit.subBin && /^Shelf [HIJ]$/i.test(explicit.bin)
+        ? matchShelfWithSubBin(sku)?.subBin ?? null
+        : explicit.subBin;
+    return {
+      bin: explicit.bin,
+      subBin: skuSub,
+      source,
+      dateStr,
+      itemNumber: null,
+    };
   }
 
-  // Priority 1: "Shelf <Letter>" (with optional Bin A/B/C sub-bin on Shelves H, I, J)
+  // Priority 1: "Shelf <Letter>" (with optional internal Bin A/B/C sub-bin on Shelves H, I, J)
   const shelfMatched = matchShelfWithSubBin(sku);
   if (shelfMatched) {
     return {
-      bin: shelfMatched,
+      bin: shelfMatched.bin,
+      subBin: shelfMatched.subBin,
       source,
       dateStr,
       itemNumber: null,
@@ -212,6 +242,7 @@ function parseCustomSkuLocation(
   if (shelfNumMatch) {
     return {
       bin: `Shelf ${shelfNumMatch[1]}`,
+      subBin: null,
       source,
       dateStr,
       itemNumber: null,
@@ -226,6 +257,7 @@ function parseCustomSkuLocation(
   if (garageBinMatch) {
     return {
       bin: `G${garageBinMatch[1]}`,
+      subBin: null,
       source,
       dateStr,
       itemNumber: null,
@@ -234,10 +266,10 @@ function parseCustomSkuLocation(
 
   // Priority 3: Shipping Closet & Shipping Rack (each grouped into 1 unified bin)
   if (/\bcloset\b/i.test(sku)) {
-    return { bin: "Closet", source, dateStr, itemNumber: null };
+    return { bin: "Closet", subBin: null, source, dateStr, itemNumber: null };
   }
   if (/\brack\b/i.test(sku)) {
-    return { bin: "Rack", source, dateStr, itemNumber: null };
+    return { bin: "Rack", subBin: null, source, dateStr, itemNumber: null };
   }
 
   // Priority 4: Other explicit named containers (ignores "/16 storage" count notes)
@@ -254,7 +286,7 @@ function parseCustomSkuLocation(
       (_, first: string, rest: string) =>
         first.toUpperCase() + rest.toLowerCase()
     );
-    return { bin: formatted, source, dateStr, itemNumber: null };
+    return { bin: formatted, subBin: null, source, dateStr, itemNumber: null };
   }
 
   // Priority 5: Clothing without a Shelf / Garage bin -> "Clothes"
@@ -277,10 +309,10 @@ function parseCustomSkuLocation(
   const isClothingByText = CLOTHING_HINT_RE.test(clothingText);
 
   if (isPureNumericSku || isClothingByText || hasOnlyNumberLocation) {
-    return { bin: "Clothes", source, dateStr, itemNumber: null };
+    return { bin: "Clothes", subBin: null, source, dateStr, itemNumber: null };
   }
 
-  return { bin: "Unassigned", source, dateStr, itemNumber: null };
+  return { bin: "Unassigned", subBin: null, source, dateStr, itemNumber: null };
 }
 
 function getBinSortRank(bin: string): number {
@@ -343,6 +375,9 @@ export function BinAuditPanel({
   const [selectedBinFilter, setSelectedBinFilter] = useState<string>("ALL");
   const [auditFilter, setAuditFilter] = useState<AuditFilterMode>("all");
   const [expandedBins, setExpandedBins] = useState<Set<string>>(new Set());
+  const [shelfSubFilter, setShelfSubFilter] = useState<
+    Record<string, "ALL" | SubBinLetter | "NONE">
+  >({});
   const [isCompletingAudit, setIsCompletingAudit] = useState(false);
   const [showAuditHistory, setShowAuditHistory] = useState(false);
   const [mountNowMs] = useState(() => Date.now());
@@ -390,7 +425,7 @@ export function BinAuditPanel({
         {
           id: r.item_id,
           sku: r.sku,
-          bin: parsed.bin,
+          bin: parsed.subBin ? `${parsed.bin} · Bin ${parsed.subBin}` : parsed.bin,
           title: r.title,
           acquiredAt: r.acquired_at,
           cogs: r.total_cost_basis,
@@ -400,6 +435,7 @@ export function BinAuditPanel({
           parsedSource: parsed.source,
           parsedDate: parsed.dateStr,
           parsedItemNumber: parsed.itemNumber,
+          subBin: parsed.subBin,
           auditStatus: r.audit_status ?? null,
           auditVerifiedAt: r.audit_verified_at ?? null,
           quantity: qty,
@@ -437,7 +473,7 @@ export function BinAuditPanel({
         {
           id: d.id,
           sku: d.sku,
-          bin: parsed.bin,
+          bin: parsed.subBin ? `${parsed.bin} · Bin ${parsed.subBin}` : parsed.bin,
           title: d.title,
           acquiredAt: d.acquired_at,
           cogs: basis,
@@ -447,6 +483,7 @@ export function BinAuditPanel({
           parsedSource: parsed.source,
           parsedDate: parsed.dateStr,
           parsedItemNumber: parsed.itemNumber,
+          subBin: parsed.subBin,
           auditStatus: dAuditStatus,
           auditVerifiedAt: dAuditAt,
           quantity: dQty,
@@ -1051,212 +1088,373 @@ export function BinAuditPanel({
                 </div>
 
                 {open && (
-                  <div className="divide-y divide-[#F1F1EC] border-t border-[#ECECE6]">
-                    {b.items.map((it) => {
-                      const isVerified = it.auditStatus === "verified";
-                      const isMissing = it.auditStatus === "missing";
-                      const shortDate = formatShortAuditDate(it.auditVerifiedAt);
-                      return (
-                        <div
-                          key={it.id}
-                          className={`px-4 py-2.5 flex flex-wrap sm:flex-nowrap items-center justify-between gap-3 text-xs transition ${
-                            isVerified
-                              ? "bg-[#ECFDF5]/45"
-                              : isMissing
-                                ? "bg-[#FEF2F2]/60"
-                                : "hover:bg-[#FAFBF9]"
-                          }`}
-                        >
-                          <div className="flex items-center gap-3 min-w-0 flex-1">
-                            {it.thumbUrl ? (
-                              // eslint-disable-next-line @next/next/no-img-element
-                              <img
-                                src={it.thumbUrl}
-                                alt=""
-                                className="w-10 h-10 rounded-lg object-cover border border-[#E5E8E6] shrink-0 bg-[#FAFBF9]"
-                              />
-                            ) : (
-                              <div className="w-10 h-10 rounded-lg border border-[#E5E8E6] bg-[#FAFBF9] flex items-center justify-center text-[10px] text-[#8E969D] shrink-0">
-                                SKU
-                              </div>
-                            )}
+                  <div className="border-t border-[#ECECE6]">
+                    {(() => {
+                      const hijMatch = b.bin.match(/^Shelf ([HIJ])$/i);
+                      const shelfLetter = hijMatch?.[1]?.toUpperCase() || null;
 
-                            <div className="min-w-0 flex-1">
-                              <div className="flex flex-wrap items-center gap-1.5">
-                                <span className="font-mono font-bold text-[#14151A]">
-                                  {it.sku}
-                                </span>
-                                {it.quantity > 1 ? (
-                                  <span
-                                    title={`eBay quantity available: ${it.quantity} — verify all ${it.quantity} units are on hand!`}
-                                    className="px-2 py-0.5 rounded-md bg-[#FEF3C7] border border-[#F59E0B] text-[#92400E] font-mono text-[10px] font-extrabold tracking-tight"
-                                  >
-                                    QTY ×{it.quantity}
-                                  </span>
-                                ) : (
-                                  <span className="px-1.5 py-0.5 rounded bg-[#F1F5F9] text-[#64748B] font-mono text-[9px] font-semibold">
-                                    Qty 1
-                                  </span>
-                                )}
-                                <span
-                                  className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${
-                                    it.status === "draft"
-                                      ? "bg-[#FEF3C7] text-[#92400E]"
-                                      : "bg-[#ECFDF5] text-[#0F766E]"
-                                  }`}
-                                >
-                                  {it.status === "draft"
-                                    ? "Death Pile"
-                                    : "Active"}
-                                </span>
-                                {isVerified && shortDate && (
-                                  <span className="text-[10px] font-semibold text-[#0F766E]">
-                                    ✓ Confirmed {shortDate}
-                                  </span>
-                                )}
-                                {isMissing && (
-                                  <span className="text-[10px] font-bold text-[#B91C1C]">
-                                    ⚠ Flagged Missing{shortDate ? ` ${shortDate}` : ""}
-                                  </span>
-                                )}
-                                {it.parsedSource && (
-                                  <span className="text-[10px] font-mono text-[#6B7280] hidden md:inline">
-                                    · {it.parsedSource}
-                                  </span>
-                                )}
-                              </div>
-
-                              {it.radarRow ? (
-                                <button
-                                  type="button"
-                                  onClick={() => onOpenItemDetail(it.radarRow!)}
-                                  className={`text-left text-xs hover:text-[#0F766E] hover:underline truncate block w-full cursor-pointer mt-0.5 ${
-                                    isVerified
-                                      ? "text-[#5C606B]"
-                                      : "text-[#14151A] font-medium"
-                                  }`}
-                                >
-                                  {it.title}
-                                </button>
+                      const renderItemRow = (it: BinEntry["items"][number]) => {
+                        const isVerified = it.auditStatus === "verified";
+                        const isMissing = it.auditStatus === "missing";
+                        const shortDate = formatShortAuditDate(
+                          it.auditVerifiedAt
+                        );
+                        return (
+                          <div
+                            key={it.id}
+                            className={`px-4 py-2.5 flex flex-wrap sm:flex-nowrap items-center justify-between gap-3 text-xs transition ${
+                              isVerified
+                                ? "bg-[#ECFDF5]/45"
+                                : isMissing
+                                  ? "bg-[#FEF2F2]/60"
+                                  : "hover:bg-[#FAFBF9]"
+                            }`}
+                          >
+                            <div className="flex items-center gap-3 min-w-0 flex-1">
+                              {it.thumbUrl ? (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img
+                                  src={it.thumbUrl}
+                                  alt=""
+                                  className="w-10 h-10 rounded-lg object-cover border border-[#E5E8E6] shrink-0 bg-[#FAFBF9]"
+                                />
                               ) : (
-                                <div className="text-xs text-[#444B52] truncate mt-0.5">
-                                  {it.title}
+                                <div className="w-10 h-10 rounded-lg border border-[#E5E8E6] bg-[#FAFBF9] flex items-center justify-center text-[10px] text-[#8E969D] shrink-0">
+                                  SKU
                                 </div>
                               )}
+
+                              <div className="min-w-0 flex-1">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span className="font-mono font-bold text-[#14151A]">
+                                    {it.sku}
+                                  </span>
+                                  {it.quantity > 1 ? (
+                                    <span
+                                      title={`eBay quantity available: ${it.quantity} — verify all ${it.quantity} units are on hand!`}
+                                      className="px-2 py-0.5 rounded-md bg-[#FEF3C7] border border-[#F59E0B] text-[#92400E] font-mono text-[10px] font-extrabold tracking-tight"
+                                    >
+                                      QTY ×{it.quantity}
+                                    </span>
+                                  ) : (
+                                    <span className="px-1.5 py-0.5 rounded bg-[#F1F5F9] text-[#64748B] font-mono text-[9px] font-semibold">
+                                      Qty 1
+                                    </span>
+                                  )}
+                                  <span
+                                    className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${
+                                      it.status === "draft"
+                                        ? "bg-[#FEF3C7] text-[#92400E]"
+                                        : "bg-[#ECFDF5] text-[#0F766E]"
+                                    }`}
+                                  >
+                                    {it.status === "draft"
+                                      ? "Death Pile"
+                                      : "Active"}
+                                  </span>
+                                  {isVerified && shortDate && (
+                                    <span className="text-[10px] font-semibold text-[#0F766E]">
+                                      ✓ Confirmed {shortDate}
+                                    </span>
+                                  )}
+                                  {isMissing && (
+                                    <span className="text-[10px] font-bold text-[#B91C1C]">
+                                      ⚠ Flagged Missing
+                                      {shortDate ? ` ${shortDate}` : ""}
+                                    </span>
+                                  )}
+                                  {it.parsedSource && (
+                                    <span className="text-[10px] font-mono text-[#6B7280] hidden md:inline">
+                                      · {it.parsedSource}
+                                    </span>
+                                  )}
+                                </div>
+
+                                {it.radarRow ? (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      onOpenItemDetail(it.radarRow!)
+                                    }
+                                    className={`text-left text-xs hover:text-[#0F766E] hover:underline truncate block w-full cursor-pointer mt-0.5 ${
+                                      isVerified
+                                        ? "text-[#5C606B]"
+                                        : "text-[#14151A] font-medium"
+                                    }`}
+                                  >
+                                    {it.title}
+                                  </button>
+                                ) : (
+                                  <div className="text-xs text-[#444B52] truncate mt-0.5">
+                                    {it.title}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-1.5 shrink-0 ml-auto">
+                              {onSetBinLocation && shelfLetter && (
+                                <div
+                                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-lg bg-[#FAF9F6] border border-[#E4E4DD]"
+                                  title={`Move inside Shelf ${shelfLetter} to Bin A, B, or C`}
+                                >
+                                  <span className="text-[9px] font-bold uppercase text-[#5C606B] mr-0.5">
+                                    Bin
+                                  </span>
+                                  {(["A", "B", "C"] as const).map((sub) => {
+                                    const isCurrent = it.subBin === sub;
+                                    const targetBin = `Shelf ${shelfLetter} · Bin ${sub}`;
+                                    return (
+                                      <button
+                                        key={sub}
+                                        type="button"
+                                        onClick={() => {
+                                          if (isCurrent) return;
+                                          void onSetBinLocation(
+                                            it.id,
+                                            targetBin
+                                          );
+                                        }}
+                                        className={`w-5 h-5 rounded text-[10px] font-mono font-bold transition cursor-pointer ${
+                                          isCurrent
+                                            ? "bg-[#0F766E] text-white"
+                                            : "bg-white border border-[#DDE2DF] text-[#444B52] hover:border-[#0F766E] hover:text-[#0F766E]"
+                                        }`}
+                                      >
+                                        {sub}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              )}
+
+                              <span className="font-mono font-semibold text-[#14151A] mr-1">
+                                ${Number(it.price || 0).toFixed(2)}
+                              </span>
+
+                              {onSetBinAudit && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void onSetBinAudit(
+                                        [it.id],
+                                        isVerified ? null : "verified"
+                                      )
+                                    }
+                                    className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-bold border transition cursor-pointer ${
+                                      isVerified
+                                        ? "bg-[#0F766E] border-[#0F766E] text-white hover:bg-[#0B5B55]"
+                                        : "bg-white border-[#CBD5E1] text-[#14151A] hover:border-[#0F766E] hover:text-[#0F766E]"
+                                    }`}
+                                  >
+                                    <Check className="w-3.5 h-3.5" />
+                                    <span>
+                                      {isVerified ? "Verified" : "Verify"}
+                                    </span>
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void onSetBinAudit(
+                                        [it.id],
+                                        isMissing ? null : "missing"
+                                      )
+                                    }
+                                    title="Flag item as not found in this bin"
+                                    className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold border transition cursor-pointer ${
+                                      isMissing
+                                        ? "bg-[#B91C1C] border-[#B91C1C] text-white hover:bg-[#991B1B]"
+                                        : "bg-white border-[#E4E4DD] text-[#6B7280] hover:border-[#FCA5A5] hover:text-[#B91C1C]"
+                                    }`}
+                                  >
+                                    <AlertTriangle className="w-3 h-3" />
+                                    <span className="hidden sm:inline">
+                                      Missing
+                                    </span>
+                                  </button>
+                                </>
+                              )}
+
+                              <button
+                                type="button"
+                                onClick={() => printThermalSkuLabels([it])}
+                                title={`Print 2×1 thermal label for ${it.sku}`}
+                                className="px-2 py-1.5 rounded-lg border border-[#E4E4DD] bg-white text-[10px] font-semibold text-[#5C606B] hover:text-[#0F766E] hover:border-[#0F766E] cursor-pointer"
+                              >
+                                🏷️
+                              </button>
                             </div>
                           </div>
+                        );
+                      };
 
-                          <div className="flex flex-wrap items-center gap-1.5 shrink-0 ml-auto">
-                            {onSetBinLocation &&
-                              /^Shelf ([HIJ])(?:\s*·\s*Bin ([ABC]))?$/i.test(
-                                b.bin
-                              ) &&
-                              (() => {
-                                const m = b.bin.match(
-                                  /^Shelf ([HIJ])(?:\s*·\s*Bin ([ABC]))?$/i
-                                );
-                                const shelfLetter = m?.[1]?.toUpperCase() || "";
-                                const activeSub = m?.[2]?.toUpperCase() || null;
-                                return (
-                                  <div
-                                    className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-lg bg-[#FAF9F6] border border-[#E4E4DD]"
-                                    title={`Assign to Shelf ${shelfLetter} Bin A, B, or C`}
-                                  >
-                                    <span className="text-[9px] font-bold uppercase text-[#5C606B] mr-0.5">
-                                      Bin
-                                    </span>
-                                    {(["A", "B", "C"] as const).map((sub) => {
-                                      const isCurrent = activeSub === sub;
-                                      const targetBin = `Shelf ${shelfLetter} · Bin ${sub}`;
-                                      return (
-                                        <button
-                                          key={sub}
-                                          type="button"
-                                          onClick={() => {
-                                            if (isCurrent) return;
-                                            setExpandedBins((prev) => {
-                                              const next = new Set(prev);
-                                              next.add(targetBin);
-                                              return next;
-                                            });
-                                            void onSetBinLocation(
-                                              it.id,
-                                              targetBin
-                                            );
-                                          }}
-                                          className={`w-5 h-5 rounded text-[10px] font-mono font-bold transition cursor-pointer ${
-                                            isCurrent
-                                              ? "bg-[#0F766E] text-white"
-                                              : "bg-white border border-[#DDE2DF] text-[#444B52] hover:border-[#0F766E] hover:text-[#0F766E]"
-                                          }`}
-                                        >
-                                          {sub}
-                                        </button>
-                                      );
-                                    })}
-                                  </div>
-                                );
-                              })()}
-
-                            <span className="font-mono font-semibold text-[#14151A] mr-1">
-                              ${Number(it.price || 0).toFixed(2)}
-                            </span>
-
-                            {onSetBinAudit && (
-                              <>
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    void onSetBinAudit(
-                                      [it.id],
-                                      isVerified ? null : "verified"
-                                    )
-                                  }
-                                  className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-bold border transition cursor-pointer ${
-                                    isVerified
-                                      ? "bg-[#0F766E] border-[#0F766E] text-white hover:bg-[#0B5B55]"
-                                      : "bg-white border-[#CBD5E1] text-[#14151A] hover:border-[#0F766E] hover:text-[#0F766E]"
-                                  }`}
-                                >
-                                  <Check className="w-3.5 h-3.5" />
-                                  <span>{isVerified ? "Verified" : "Verify"}</span>
-                                </button>
-
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    void onSetBinAudit(
-                                      [it.id],
-                                      isMissing ? null : "missing"
-                                    )
-                                  }
-                                  title="Flag item as not found in this bin"
-                                  className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold border transition cursor-pointer ${
-                                    isMissing
-                                      ? "bg-[#B91C1C] border-[#B91C1C] text-white hover:bg-[#991B1B]"
-                                      : "bg-white border-[#E4E4DD] text-[#6B7280] hover:border-[#FCA5A5] hover:text-[#B91C1C]"
-                                  }`}
-                                >
-                                  <AlertTriangle className="w-3 h-3" />
-                                  <span className="hidden sm:inline">
-                                    Missing
-                                  </span>
-                                </button>
-                              </>
-                            )}
-
-                            <button
-                              type="button"
-                              onClick={() => printThermalSkuLabels([it])}
-                              title={`Print 2×1 thermal label for ${it.sku}`}
-                              className="px-2 py-1.5 rounded-lg border border-[#E4E4DD] bg-white text-[10px] font-semibold text-[#5C606B] hover:text-[#0F766E] hover:border-[#0F766E] cursor-pointer"
-                            >
-                              🏷️
-                            </button>
+                      // Standard shelves & locations: simple flat list
+                      if (!shelfLetter) {
+                        return (
+                          <div className="divide-y divide-[#F1F1EC]">
+                            {b.items.map(renderItemRow)}
                           </div>
+                        );
+                      }
+
+                      // Shelves H, I, J: separated into Bin A, Bin B, Bin C right INSIDE the shelf dropdown
+                      const activeSubFilter = shelfSubFilter[b.bin] ?? "ALL";
+                      const binA = b.items.filter((x) => x.subBin === "A");
+                      const binB = b.items.filter((x) => x.subBin === "B");
+                      const binC = b.items.filter((x) => x.subBin === "C");
+                      const binNone = b.items.filter((x) => !x.subBin);
+
+                      const subSections: Array<{
+                        key: SubBinLetter | "NONE";
+                        label: string;
+                        items: BinEntry["items"];
+                        pillBg: string;
+                      }> = [
+                        {
+                          key: "A",
+                          label: `Bin A`,
+                          items: binA,
+                          pillBg: "bg-[#0F766E] text-white",
+                        },
+                        {
+                          key: "B",
+                          label: `Bin B`,
+                          items: binB,
+                          pillBg: "bg-[#1D4ED8] text-white",
+                        },
+                        {
+                          key: "C",
+                          label: `Bin C`,
+                          items: binC,
+                          pillBg: "bg-[#7C3AED] text-white",
+                        },
+                        ...(binNone.length > 0
+                          ? [
+                              {
+                                key: "NONE" as const,
+                                label: "Not Yet Assigned to Bin A / B / C",
+                                items: binNone,
+                                pillBg: "bg-[#E5E7EB] text-[#4B5563]",
+                              },
+                            ]
+                          : []),
+                      ];
+
+                      const shownSections = subSections.filter((sec) => {
+                        if (activeSubFilter !== "ALL") {
+                          return sec.key === activeSubFilter;
+                        }
+                        return sec.items.length > 0;
+                      });
+
+                      return (
+                        <div>
+                          {/* Sub-bin quick filter strip inside Shelf H / I / J */}
+                          <div className="px-4 py-2 bg-[#F8FAF9] border-b border-[#ECEFE9] flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-[#5C606B] mr-1">
+                                Shelf {shelfLetter} Bins:
+                              </span>
+                              {(
+                                [
+                                  { id: "ALL", label: `All (${b.items.length})` },
+                                  { id: "A", label: `Bin A (${binA.length})` },
+                                  { id: "B", label: `Bin B (${binB.length})` },
+                                  { id: "C", label: `Bin C (${binC.length})` },
+                                  ...(binNone.length > 0
+                                    ? [
+                                        {
+                                          id: "NONE" as const,
+                                          label: `Unassigned (${binNone.length})`,
+                                        },
+                                      ]
+                                    : []),
+                                ] as const
+                              ).map((tab) => {
+                                const isSel = activeSubFilter === tab.id;
+                                return (
+                                  <button
+                                    key={tab.id}
+                                    type="button"
+                                    onClick={() =>
+                                      setShelfSubFilter((prev) => ({
+                                        ...prev,
+                                        [b.bin]: tab.id,
+                                      }))
+                                    }
+                                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold border transition cursor-pointer ${
+                                      isSel
+                                        ? "bg-[#14151A] border-[#14151A] text-white"
+                                        : "bg-white border-[#DDE2DF] text-[#5C606B] hover:border-[#0F766E] hover:text-[#14151A]"
+                                    }`}
+                                  >
+                                    {tab.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                            <span className="text-[10px] text-[#5C606B]">
+                              Tap <strong>A / B / C</strong> on any item to file
+                              it into its bin
+                            </span>
+                          </div>
+
+                          {shownSections.length === 0 ? (
+                            <div className="px-4 py-6 text-center text-xs text-[#5C606B]">
+                              No items in this sub-bin yet — switch to{" "}
+                              <strong>All</strong> and tap{" "}
+                              <strong>A / B / C</strong> on any item to move it
+                              here.
+                            </div>
+                          ) : (
+                            shownSections.map((sec) => {
+                              const secVerified = sec.items.filter(
+                                (x) => x.auditStatus === "verified"
+                              ).length;
+                              const secComplete =
+                                sec.items.length > 0 &&
+                                secVerified === sec.items.length;
+                              return (
+                                <div
+                                  key={`${b.bin}-${sec.key}`}
+                                  className="border-b border-[#E5E8E6] last:border-b-0"
+                                >
+                                  <div className="px-4 py-1.5 bg-[#F3F5F4] border-b border-[#E8ECEA] flex items-center justify-between gap-2">
+                                    <div className="flex items-center gap-2">
+                                      <span
+                                        className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold ${sec.pillBg}`}
+                                      >
+                                        {sec.label}
+                                      </span>
+                                      <span className="text-[11px] font-mono font-semibold text-[#14151A]">
+                                        {sec.items.length} item
+                                        {sec.items.length === 1 ? "" : "s"}
+                                      </span>
+                                    </div>
+                                    <span
+                                      className={`text-[10px] font-mono font-bold ${
+                                        secComplete
+                                          ? "text-[#0F766E]"
+                                          : "text-[#5C606B]"
+                                      }`}
+                                    >
+                                      {secComplete
+                                        ? `✓ ${secVerified}/${sec.items.length} Verified`
+                                        : `${secVerified}/${sec.items.length} verified`}
+                                    </span>
+                                  </div>
+                                  <div className="divide-y divide-[#F1F1EC]">
+                                    {sec.items.map(renderItemRow)}
+                                  </div>
+                                </div>
+                              );
+                            })
+                          )}
                         </div>
                       );
-                    })}
+                    })()}
                   </div>
                 )}
               </section>
