@@ -43,6 +43,7 @@ export interface NormalizedEbayOffer {
   listedPrice: number;
   shippingPrice: number;
   listedAt: string;
+  hasRealListedAt?: boolean;
   viewsCount: number;
   watchersCount: number;
   impressionsCount: number;
@@ -596,6 +597,7 @@ async function fetchActiveTradingListings(
       "GetMyeBaySelling",
       `<ActiveList>
         <Include>true</Include>
+        <Sort>StartTimeDescending</Sort>
         <Pagination>
           <EntriesPerPage>${entriesPerPage}</EntriesPerPage>
           <PageNumber>${page}</PageNumber>
@@ -630,9 +632,15 @@ async function fetchActiveTradingListings(
       const shippingPrice = roundCurrency(Number(shipCostStr) || 0);
 
       const listingDetailsBlock = extractXmlTag(block, "ListingDetails") || "";
-      const startTime =
+      const rawStartTime =
         extractXmlTag(listingDetailsBlock, "StartTime") ||
-        new Date().toISOString();
+        extractXmlTag(block, "StartTime");
+      const hasRealStartTime = Boolean(
+        rawStartTime && !Number.isNaN(Date.parse(rawStartTime))
+      );
+      const startTime = hasRealStartTime
+        ? new Date(Date.parse(rawStartTime!)).toISOString()
+        : new Date().toISOString();
       const viewItemUrl =
         extractXmlTag(listingDetailsBlock, "ViewItemURL") ||
         `${webBase}/${itemId}`;
@@ -682,6 +690,7 @@ async function fetchActiveTradingListings(
         listedPrice,
         shippingPrice,
         listedAt: startTime,
+        hasRealListedAt: hasRealStartTime,
         viewsCount: hitCount,
         watchersCount: watchCount,
         impressionsCount: hitCount,
@@ -889,6 +898,10 @@ export async function fetchActiveEbayOffersWithMeta(
             }
           } else {
             const invSoldQty = Math.max(0, Math.floor(Number(offer.listing?.soldQuantity || 0)));
+            const hasRealOfferStartDate = Boolean(
+              offer.listingStartDate &&
+                !Number.isNaN(Date.parse(offer.listingStartDate))
+            );
             const record: NormalizedEbayOffer = {
               sku: inv.sku,
               title: inv.product?.title || `SKU ${inv.sku}`,
@@ -904,7 +917,10 @@ export async function fetchActiveEbayOffersWithMeta(
               externalUrl: listingId ? `${webBase}/${listingId}` : null,
               listedPrice: roundCurrency(priceVal),
               shippingPrice: 0,
-              listedAt: offer.listingStartDate || new Date().toISOString(),
+              listedAt: hasRealOfferStartDate
+                ? new Date(Date.parse(offer.listingStartDate!)).toISOString()
+                : new Date().toISOString(),
+              hasRealListedAt: hasRealOfferStartDate,
               viewsCount: 0,
               watchersCount: 0,
               impressionsCount: 0,

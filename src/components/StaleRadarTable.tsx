@@ -265,7 +265,7 @@ export function StaleRadarTable({
 }: StaleRadarTableProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeFilter, setActiveFilter] = useState<FilterKey>("all");
-  const [sortBy, setSortBy] = useState<SortKey>("days_desc");
+  const [sortBy, setSortBy] = useState<SortKey>("days_asc");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [listingAllItemId, setListingAllItemId] = useState<string | null>(null);
   const [resolvingConflictItemId, setResolvingConflictItemId] = useState<
@@ -458,12 +458,21 @@ export function StaleRadarTable({
       );
     });
 
+    const listedMs = (row: StaleRadarRow): number => {
+      const parsed = row.listed_at ? Date.parse(row.listed_at) : NaN;
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+
     return [...matched].sort((a, b) => {
       switch (sortBy) {
-        case "days_desc":
-          return b.days_listed - a.days_listed;
-        case "days_asc":
-          return a.days_listed - b.days_listed;
+        case "days_asc": {
+          const diff = listedMs(b) - listedMs(a);
+          return diff !== 0 ? diff : a.days_listed - b.days_listed;
+        }
+        case "days_desc": {
+          const diff = listedMs(a) - listedMs(b);
+          return diff !== 0 ? diff : b.days_listed - a.days_listed;
+        }
         case "views_asc":
           return a.views_count - b.views_count;
         case "cogs_desc":
@@ -891,8 +900,8 @@ export function StaleRadarTable({
                 onChange={(e) => setSortBy(e.target.value as SortKey)}
                 className="pl-7 pr-3 py-1.5 text-xs rounded-lg border border-[#E5E8E6] bg-white text-[#171A1D] focus:outline-none focus:border-[#0F766E] cursor-pointer"
               >
+                <option value="days_asc">Newest First</option>
                 <option value="days_desc">Oldest First</option>
-                <option value="days_asc">Newest Listed</option>
                 <option value="views_asc">Lowest Views</option>
                 <option value="watchers_desc">Most Watchers</option>
                 <option value="cogs_desc">Highest COGS</option>

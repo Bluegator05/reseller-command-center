@@ -195,10 +195,38 @@ export async function POST() {
     }
 
     // 4. Batch-upsert marketplace_listings in chunks of 100
+    //    Look up existing listed_at first so offers lacking a real eBay StartTime
+    //    (e.g., Sell Inventory API offers without listingStartDate) NEVER overwrite
+    //    older items' real listed_at with `syncedAt` and push newly listed items down.
+    const existingListedAtByItemId = new Map<string, string>();
+    const allSyncedItemIds = Array.from(
+      new Set(
+        offers
+          .map((o) => skuToId.get(o.sku))
+          .filter((id): id is string => Boolean(id))
+      )
+    );
+    for (const idChunk of chunkArray(allSyncedItemIds, 200)) {
+      const { data: existingListings } = await supabase!
+        .from("marketplace_listings")
+        .select("item_id, listed_at")
+        .eq("marketplace", "ebay")
+        .in("item_id", idChunk);
+      for (const row of existingListings ?? []) {
+        if (row.item_id && typeof row.listed_at === "string" && row.listed_at) {
+          existingListedAtByItemId.set(row.item_id as string, row.listed_at);
+        }
+      }
+    }
+
     const listingRows = offers
       .map((offer) => {
         const itemId = skuToId.get(offer.sku);
         if (!itemId) return null;
+        const resolvedListedAt =
+          offer.hasRealListedAt !== false
+            ? offer.listedAt
+            : existingListedAtByItemId.get(itemId) || offer.listedAt;
         return {
           item_id: itemId,
           marketplace: "ebay",
@@ -214,7 +242,7 @@ export async function POST() {
             (offer.externalListingId
               ? promotedRates.get(offer.externalListingId)
               : 0) ?? 0,
-          listed_at: offer.listedAt,
+          listed_at: resolvedListedAt,
           last_synced_at: syncedAt,
         };
       })

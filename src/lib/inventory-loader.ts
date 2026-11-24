@@ -42,7 +42,8 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
             .from("marketplace_listings")
             .select("*, inventory_items(*)")
             .in("status", ["active", "draft"])
-            .order("listed_at", { ascending: true })
+            .order("listed_at", { ascending: false, nullsFirst: false })
+            .order("id", { ascending: false })
             .range(from, from + pageSize - 1);
           if (error) throw error;
           const rows = (page ?? []) as JoinedListingRecord[];
@@ -602,7 +603,11 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
     );
   }
 
-  rows.sort((a, b) => b.days_listed - a.days_listed);
+  rows.sort((a, b) => {
+    const aMs = a.listed_at ? Date.parse(a.listed_at) : 0;
+    const bMs = b.listed_at ? Date.parse(b.listed_at) : 0;
+    return (Number.isFinite(bMs) ? bMs : 0) - (Number.isFinite(aMs) ? aMs : 0);
+  });
   const draftItems = store.items.filter((i) => i.status === "draft");
 
   return {
