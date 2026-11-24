@@ -16,6 +16,7 @@ import {
   Lock,
   Plus,
   Puzzle,
+  RefreshCw,
   Send,
   Smartphone,
   Sparkles,
@@ -976,6 +977,22 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
                 </button>
               )}
 
+              {activeTab === "radar" && (
+                <button
+                  id="btn-header-sync-ebay"
+                  type="button"
+                  disabled={isSyncingEbay}
+                  onClick={handleSyncEbay}
+                  title="Sync live eBay listings & reconcile sold/ended items"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-semibold border border-[#DCE1DE] bg-white text-[#14151A] hover:border-[#0F766E] hover:text-[#0F766E] disabled:opacity-55 transition cursor-pointer whitespace-nowrap"
+                >
+                  <RefreshCw
+                    className={`w-3.5 h-3.5 ${isSyncingEbay ? "animate-spin text-[#0F766E]" : ""}`}
+                  />
+                  <span>{isSyncingEbay ? "Syncing..." : "Sync eBay"}</span>
+                </button>
+              )}
+
               <button
                 id="btn-quick-add-item"
                 type="button"
@@ -990,7 +1007,7 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
         </header>
 
         <main className="flex-1 max-w-[1380px] w-full mx-auto px-4 sm:px-6 py-5 space-y-5">
-        {activeTab !== "sourcing" && activeTab !== "listing" && (
+        {activeTab === "roadmap" && (
           <ChannelStatusStrip
             mode={data.mode}
             accounts={data.accounts}
