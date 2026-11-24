@@ -464,13 +464,22 @@ export function BuyerMapPanel({
         scrollWheelZoom: true,
       });
 
-      // CartoDB Voyager / Positron — clean Flipwise-style light-blue ocean + crisp state lines & city labels!
+      // Free, zero-API-key Esri Light Gray Canvas + City/State Reference Labels
+      // (soft blue oceans, crisp US state borders, sharp city names — lets coral buyer pins pop!)
       Lmod.tileLayer(
-        "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
+        "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
         {
-          subdomains: "abcd",
-          maxZoom: 19,
-          attribution: "&copy; OpenStreetMap &copy; CARTO",
+          maxZoom: 16,
+          attribution: "Tiles &copy; Esri",
+        }
+      ).addTo(map);
+
+      Lmod.tileLayer(
+        "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}",
+        {
+          maxZoom: 16,
+          zIndex: 2,
+          opacity: 0.95,
         }
       ).addTo(map);
 
