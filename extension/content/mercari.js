@@ -935,10 +935,14 @@
             await sleep(1200);
             await clickButtonByText([/^list anyway$/i, /^confirm$/i, /^list item$/i], 2000);
 
+            const isOnMercariConfirmationOrItem = () =>
+              /\/sell\/confirmation\/m\d{8,14}/i.test(window.location.pathname) ||
+              !window.location.pathname.includes("/sell");
+
             // Verify Mercari didn't block submission with an inline validation error (up to 3 auto-fixes)
             for (let retry = 0; retry < 3; retry++) {
               await sleep(900);
-              if (!window.location.pathname.includes("/sell")) {
+              if (isOnMercariConfirmationOrItem()) {
                 validationError = null;
                 break;
               }
@@ -972,17 +976,56 @@
               await clickButtonByText([/^list anyway$/i, /^confirm$/i, /^list item$/i], 1500);
             }
 
-            if (window.location.pathname.includes("/sell") && !validationError) {
+            if (!isOnMercariConfirmationOrItem() && !validationError) {
               validationError = detectMercariValidationError();
             }
 
             if (!validationError) {
-              showRccHud({
-                title: `Listed on Mercari! (${payload.sku || "SKU"})`,
-                message: `Submitted to Mercari — automatically syncing live link back to Command Center...`,
-                tone: "success",
-              });
-              sendResponse({ ok: true, autoPublished: true });
+              // Wait briefly for SPA redirect to /sell/confirmation/m... or /us/item/m... so we can sync directly too
+              let confirmedId = null;
+              for (let w = 0; w < 8; w++) {
+                const m = window.location.href.match(/(?:^|[^a-z0-9])(m\d{8,14})(?:$|[^a-z0-9])/i);
+                if (m) {
+                  confirmedId = m[1];
+                  break;
+                }
+                await sleep(500);
+              }
+
+              if (confirmedId) {
+                const liveUrl = `https://www.mercari.com/us/item/${confirmedId}/`;
+                try {
+                  await chrome.runtime.sendMessage({
+                    type: "RCC_JOB_STATUS_UPDATE",
+                    jobId: job.id,
+                    status: "completed",
+                    extra: {
+                      marketplace: "mercari",
+                      externalListingId: confirmedId,
+                      externalUrl: liveUrl,
+                      listedPrice: payload.suggestedPrice,
+                    },
+                  });
+                } catch {
+                  // background tab watcher will also sync it
+                }
+                showRccHud({
+                  title: `Listed on Mercari! (${payload.sku || "SKU"})`,
+                  message: `Live link (${confirmedId}) synced back to Command Center!`,
+                  tone: "success",
+                });
+                if (isAutoPilot) {
+                  await sleep(1800);
+                  chrome.runtime.sendMessage({ type: "RCC_CLOSE_SENDER_TAB" });
+                }
+              } else {
+                showRccHud({
+                  title: `Listed on Mercari! (${payload.sku || "SKU"})`,
+                  message: `Submitted to Mercari — automatically syncing live link back to Command Center...`,
+                  tone: "success",
+                });
+              }
+              sendResponse({ ok: true, autoPublished: true, externalListingId: confirmedId });
               return;
             }
           }

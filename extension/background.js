@@ -1708,11 +1708,13 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     !url.includes("/create-listing") &&
     (url.includes("/listing/") || url.includes("/closet/"));
 
+  const isMercariConfirmation = /\/sell\/confirmation\/m\d{8,14}/i.test(url);
   const isMercariPublished =
     watch.marketplace === "mercari" &&
     url.includes("mercari.com") &&
-    !url.includes("/sell") &&
-    (url.includes("/item/m") || url.includes("/us/item/m") || url.includes("/mypage/"));
+    (isMercariConfirmation ||
+      (!url.includes("/sell") &&
+        (url.includes("/item/m") || url.includes("/us/item/m") || url.includes("/mypage/"))));
 
   if (!isPoshmarkPublished && !isMercariPublished) return;
 
@@ -2076,6 +2078,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
         case "RCC_JOB_STATUS_UPDATE": {
+          if (message.status === "completed" && sender?.tab?.id) {
+            watchedPublishTabs.delete(sender.tab.id);
+          }
           await updateJobStatus(message.jobId, message.status, message.extra || {});
           await refreshJobsCache(false);
           if (message.status === "completed") {
