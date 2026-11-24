@@ -750,25 +750,6 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
           </button>
 
           <button
-            id="tab-extension-queue"
-            type="button"
-            onClick={() => setActiveTab("extension")}
-            className={`relative w-full py-2 px-1 rounded-xl flex flex-col items-center gap-1 text-[10px] font-semibold transition cursor-pointer ${
-              activeTab === "extension"
-                ? "bg-[#ECFDF5] text-[#0F766E]"
-                : "text-[#5C606B] hover:bg-[#F2F6F4] hover:text-[#14151A]"
-            }`}
-          >
-            <Puzzle className="w-4 h-4" />
-            <span>Queue</span>
-            {extensionActionableCount > 0 && (
-              <span className="absolute top-1 right-1.5 min-w-[16px] h-4 px-1 rounded-full font-mono tabular-nums text-[9px] font-bold bg-[#1D4ED8] text-white inline-flex items-center justify-center">
-                {extensionActionableCount}
-              </span>
-            )}
-          </button>
-
-          <button
             id="tab-sales-ledger"
             type="button"
             onClick={() => setActiveTab("sales")}
@@ -864,6 +845,25 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
           >
             <BarChart3 className="w-4 h-4" />
             <span>Taxes</span>
+          </button>
+
+          <button
+            id="tab-extension-queue"
+            type="button"
+            onClick={() => setActiveTab("extension")}
+            className={`relative w-full py-2 px-1 rounded-xl flex flex-col items-center gap-1 text-[10px] font-semibold transition cursor-pointer ${
+              activeTab === "extension"
+                ? "bg-[#ECFDF5] text-[#0F766E]"
+                : "text-[#5C606B] hover:bg-[#F2F6F4] hover:text-[#14151A]"
+            }`}
+          >
+            <Puzzle className="w-4 h-4" />
+            <span>Queue</span>
+            {extensionActionableCount > 0 && (
+              <span className="absolute top-1 right-1.5 min-w-[16px] h-4 px-1 rounded-full font-mono tabular-nums text-[9px] font-bold bg-[#1D4ED8] text-white inline-flex items-center justify-center">
+                {extensionActionableCount}
+              </span>
+            )}
           </button>
 
           <button
