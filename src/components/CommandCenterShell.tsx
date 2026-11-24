@@ -1883,6 +1883,28 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
             "COGS, shipping cost, and net profit recalculated."
           );
         }}
+        onSavePhoto={async ({ orderId, imageUrl }) => {
+          const res = await fetch("/api/sales", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ orderId, image_url: imageUrl }),
+          });
+          const payload = (await res.json()) as { error?: string };
+          if (!res.ok) {
+            pushToast(
+              "error",
+              "Failed to Update Sale Photo",
+              payload.error || "Unknown error"
+            );
+            throw new Error(payload.error || "Failed to update sale photo");
+          }
+          await refreshInventory();
+          pushToast(
+            "success",
+            imageUrl ? "Sale Photo Saved" : "Sale Photo Removed",
+            "Updated across Sales Ledger, Bulk Buys, and Buyer Map."
+          );
+        }}
       />
 
       <QuickAddItemModal

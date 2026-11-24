@@ -441,6 +441,7 @@ export interface SalesOrderUpdateRequest {
   restockAndRelist?: boolean;
   shipping_cost?: number;
   cogs?: number;
+  image_url?: string | null;
 }
 
 export interface AutoDelistCascadeItem {
@@ -688,6 +689,7 @@ export interface RecordLocalFacebookSaleRequest {
   standaloneCogs?: number;
   marketplaceFees?: number;
   shippingCost?: number;
+  imageUrl?: string | null;
 }
 
 export interface RecordLocalFacebookSaleResponse {

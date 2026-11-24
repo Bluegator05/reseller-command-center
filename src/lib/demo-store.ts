@@ -2001,6 +2001,20 @@ export function updateDemoSalesOrder(
     }
   }
 
+  if (req.image_url !== undefined) {
+    const cleanImg = req.image_url ? req.image_url.trim() : null;
+    order.image_url = cleanImg;
+    const linkedItem = store.items.find(
+      (i) => i.id === order.item_id || i.sku === order.sku
+    );
+    if (linkedItem) {
+      linkedItem.image_urls = cleanImg
+        ? [cleanImg, ...(linkedItem.image_urls || []).filter((u) => u !== cleanImg)]
+        : [];
+      linkedItem.updated_at = nowIso;
+    }
+  }
+
   return { order, restocked: didRestock };
 }
 
@@ -2018,6 +2032,7 @@ export function recordDemoLocalFacebookSale(input: {
   standaloneCogs: number;
   marketplaceFees: number;
   shippingCost: number;
+  imageUrl?: string | null;
 }): {
   orderId: string;
   itemId: string;
@@ -2031,6 +2046,7 @@ export function recordDemoLocalFacebookSale(input: {
   const nowIso = new Date().toISOString();
   const shortTag = Date.now().toString(36).slice(-5).toUpperCase();
   const delistedChannels: MarketplaceType[] = [];
+  const cleanImage = input.imageUrl?.trim() || null;
 
   let item =
     input.mode === "existing" && input.itemId
@@ -2041,6 +2057,12 @@ export function recordDemoLocalFacebookSale(input: {
     item.status = "sold";
     item.payment_method = input.paymentMethod;
     item.updated_at = nowIso;
+    if (cleanImage) {
+      item.image_urls = [
+        cleanImage,
+        ...(item.image_urls || []).filter((u) => u !== cleanImage),
+      ];
+    }
     if (input.bulkBuyId) {
       item.item_specifics = {
         ...(item.item_specifics || {}),
@@ -2088,7 +2110,7 @@ export function recordDemoLocalFacebookSale(input: {
         fb_local_only: "true",
         ...(input.bulkBuyId ? { bulk_buy_id: input.bulkBuyId } : {}),
       },
-      image_urls: [],
+      image_urls: cleanImage ? [cleanImage] : [],
       status: "sold",
       acquired_at: input.soldAtIso,
       created_at: nowIso,

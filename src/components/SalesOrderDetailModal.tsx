@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   Boxes,
+  Camera,
   Check,
   Clock,
   DollarSign,
@@ -12,9 +13,12 @@ import {
   RefreshCw,
   RotateCcw,
   Tag,
+  Trash2,
   Truck,
+  Upload,
   X,
 } from "lucide-react";
+import { uploadSalePhotoFile } from "@/lib/client-photo-upload";
 import type {
   BulkBuyRecord,
   ChannelJob,
@@ -31,6 +35,10 @@ interface SalesOrderDetailModalProps {
     orderId: string;
     cogs?: number;
     shipping_cost?: number;
+  }) => Promise<void>;
+  onSavePhoto?: (params: {
+    orderId: string;
+    imageUrl: string | null;
   }) => Promise<void>;
 }
 
@@ -80,6 +88,7 @@ export function SalesOrderDetailModal({
   jobs,
   onClose,
   onSaveCosts,
+  onSavePhoto,
 }: SalesOrderDetailModalProps) {
   if (!order) return null;
   return (
@@ -90,6 +99,7 @@ export function SalesOrderDetailModal({
       jobs={jobs}
       onClose={onClose}
       onSaveCosts={onSaveCosts}
+      onSavePhoto={onSavePhoto}
     />
   );
 }
@@ -100,6 +110,7 @@ function SalesOrderDetailModalInner({
   jobs,
   onClose,
   onSaveCosts,
+  onSavePhoto,
 }: {
   order: SalesOrderRecord;
   bulkBuys: BulkBuyRecord[];
@@ -110,10 +121,17 @@ function SalesOrderDetailModalInner({
     cogs?: number;
     shipping_cost?: number;
   }) => Promise<void>;
+  onSavePhoto?: (params: {
+    orderId: string;
+    imageUrl: string | null;
+  }) => Promise<void>;
 }) {
+  const photoInputRef = useRef<HTMLInputElement | null>(null);
   const [editCogs, setEditCogs] = useState(String(order.cogs ?? 0));
   const [editShip, setEditShip] = useState(String(order.shipping_cost ?? 0));
   const [saving, setSaving] = useState(false);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [photoError, setPhotoError] = useState<string | null>(null);
 
   const linkedBulkBuy = useMemo(
     () => bulkBuys.find((b) => b.id === order.bulk_buy_id) ?? null,
@@ -260,6 +278,37 @@ function SalesOrderDetailModalInner({
     }
   };
 
+  const handlePhotoUpload = async (file: File) => {
+    if (!onSavePhoto) return;
+    setPhotoError(null);
+    setUploadingPhoto(true);
+    try {
+      const url = await uploadSalePhotoFile(file);
+      await onSavePhoto({ orderId: order.id, imageUrl: url });
+    } catch (err) {
+      setPhotoError(
+        err instanceof Error ? err.message : "Could not upload photo"
+      );
+    } finally {
+      setUploadingPhoto(false);
+    }
+  };
+
+  const handleRemovePhoto = async () => {
+    if (!onSavePhoto) return;
+    setPhotoError(null);
+    setUploadingPhoto(true);
+    try {
+      await onSavePhoto({ orderId: order.id, imageUrl: null });
+    } catch (err) {
+      setPhotoError(
+        err instanceof Error ? err.message : "Could not remove photo"
+      );
+    } finally {
+      setUploadingPhoto(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-[1200] bg-black/45 flex items-center justify-center p-3 sm:p-5">
       <div className="bg-white border border-[#E2E5E8] rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
@@ -290,16 +339,79 @@ function SalesOrderDetailModalInner({
         <div className="flex-1 overflow-y-auto p-5 grid grid-cols-1 md:grid-cols-12 gap-5">
           {/* Left Column */}
           <div className="md:col-span-4 space-y-4">
-            <div className="rounded-xl border border-[#E2E5E8] bg-[#F8FAF9] overflow-hidden aspect-square flex items-center justify-center">
-              {order.image_url ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={order.image_url}
-                  alt={order.title}
-                  className="w-full h-full object-cover"
-                />
-              ) : (
-                <Package className="w-12 h-12 text-[#CBD5E1]" />
+            <div className="space-y-2">
+              <input
+                ref={photoInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void handlePhotoUpload(f);
+                  e.target.value = "";
+                }}
+              />
+              <div className="relative rounded-xl border border-[#E2E5E8] bg-[#F8FAF9] overflow-hidden aspect-square flex items-center justify-center">
+                {order.image_url ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={order.image_url}
+                    alt={order.title}
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <div className="flex flex-col items-center gap-2 text-[#94A3B8]">
+                    <Package className="w-12 h-12 text-[#CBD5E1]" />
+                    {onSavePhoto && (
+                      <span className="text-[11px] font-medium">No photo yet</span>
+                    )}
+                  </div>
+                )}
+
+                {uploadingPhoto && (
+                  <div className="absolute inset-0 bg-white/80 flex flex-col items-center justify-center gap-1.5 text-xs font-semibold text-[#0F766E]">
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    <span>Saving photo…</span>
+                  </div>
+                )}
+              </div>
+
+              {onSavePhoto && (
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={uploadingPhoto}
+                    onClick={() => photoInputRef.current?.click()}
+                    className="flex-1 inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[#DDE2DF] bg-white text-xs font-semibold text-[#14151A] hover:border-[#0F766E] hover:text-[#0F766E] disabled:opacity-50 transition cursor-pointer"
+                  >
+                    {order.image_url ? (
+                      <>
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>Change Photo</span>
+                      </>
+                    ) : (
+                      <>
+                        <Camera className="w-3.5 h-3.5 text-[#0F766E]" />
+                        <span>Add Photo</span>
+                      </>
+                    )}
+                  </button>
+                  {order.image_url && (
+                    <button
+                      type="button"
+                      disabled={uploadingPhoto}
+                      onClick={() => void handleRemovePhoto()}
+                      title="Remove photo"
+                      className="p-1.5 rounded-lg border border-[#E4E4DD] bg-white text-[#7C858D] hover:border-[#FECACA] hover:bg-[#FEF2F2] hover:text-[#B91C1C] disabled:opacity-50 cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {photoError && (
+                <p className="text-[11px] text-[#B91C1C]">{photoError}</p>
               )}
             </div>
 

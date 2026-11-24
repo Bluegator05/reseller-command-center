@@ -86,6 +86,12 @@ export async function POST(request: Request) {
     const shippingCost = roundCurrency(
       Math.max(0, Number(body.shippingCost || 0))
     );
+    const rawImageUrl = (body.imageUrl || "").trim();
+    const cleanImageUrl =
+      rawImageUrl &&
+      (/^(https?:\/\/|data:image\/)/i.test(rawImageUrl))
+        ? rawImageUrl
+        : null;
 
     const envReadiness = getEnvReadiness();
     const supabase = getSupabaseServerClient();
@@ -105,6 +111,7 @@ export async function POST(request: Request) {
         standaloneCogs,
         marketplaceFees,
         shippingCost,
+        imageUrl: cleanImageUrl,
       });
       const resp: RecordLocalFacebookSaleResponse = {
         mode: "demo",
@@ -203,7 +210,7 @@ export async function POST(request: Request) {
         payment_method: paymentMethod,
         notes: noteChunks.join(" · "),
         item_specifics: specs,
-        image_urls: [],
+        image_urls: cleanImageUrl ? [cleanImageUrl] : [],
         status: "sold" as const,
         acquired_at: selectedBulkBuy?.purchase_date || soldAtIso,
         updated_at: nowIso,
@@ -299,6 +306,15 @@ export async function POST(request: Request) {
         item_specifics: nextSpecs,
         updated_at: nowIso,
       };
+      if (cleanImageUrl) {
+        const prevImgs = Array.isArray(existingItem.image_urls)
+          ? existingItem.image_urls
+          : [];
+        itemUpdate.image_urls = [
+          cleanImageUrl,
+          ...prevImgs.filter((u) => u !== cleanImageUrl),
+        ];
+      }
       if (notes) {
         itemUpdate.notes = existingItem.notes
           ? `${existingItem.notes} · FB Local: ${notes}`
@@ -559,6 +575,39 @@ export async function PATCH(request: Request) {
             updated_at: new Date().toISOString(),
           })
           .eq("id", order.item_id);
+      }
+
+      if (body.image_url !== undefined && order.item_id) {
+        const trimmedImg =
+          typeof body.image_url === "string" ? body.image_url.trim() : "";
+        const validImg =
+          trimmedImg && /^(https?:\/\/|data:image\/)/i.test(trimmedImg)
+            ? trimmedImg
+            : null;
+        const { data: invRow } = await supabase
+          .from("inventory_items")
+          .select("image_urls")
+          .eq("id", order.item_id)
+          .maybeSingle();
+        const prevImgs = Array.isArray(invRow?.image_urls)
+          ? (invRow.image_urls as string[])
+          : [];
+        const nextImgs = validImg
+          ? [validImg, ...prevImgs.filter((u) => u !== validImg)]
+          : [];
+        const { error: imgErr } = await supabase
+          .from("inventory_items")
+          .update({
+            image_urls: nextImgs,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", order.item_id);
+        if (imgErr) {
+          return NextResponse.json(
+            { error: `Failed to save photo: ${imgErr.message}` },
+            { status: 400 }
+          );
+        }
       }
 
       if (body.restockAndRelist && order.item_id) {
