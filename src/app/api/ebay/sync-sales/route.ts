@@ -3,6 +3,7 @@ import { cascadeDelistOtherChannelsForSoldItem } from "@/lib/auto-delist";
 import {
   fetchEbayItemThumbnail,
   fetchEbaySalesOrders,
+  fetchLiveActiveEbayIds,
   isEbayConfigured,
 } from "@/lib/ebay";
 import { getEnvReadiness, getSupabaseServerClient } from "@/lib/supabase";
@@ -462,6 +463,132 @@ export async function POST(request: Request) {
       }
     }
 
+    // 4d. Reconcile any currently "active" inventory items that already have a paid/shipped
+    //     eBay sale against eBay's live ActiveList (qty > 0). Truly sold-out items are
+    //     marked Sold immediately; multi-quantity items still live on eBay stay Active!
+    let reconciledSoldCount = 0;
+    const paidEbayItemIds = [
+      ...new Set(
+        [...existingOrders.values()]
+          .filter(
+            (o) =>
+              o.item_id &&
+              o.fulfillment_status !== "unpaid" &&
+              o.fulfillment_status !== "returned"
+          )
+          .map((o) => o.item_id)
+      ),
+    ];
+
+    if (paidEbayItemIds.length > 0) {
+      const candidateActiveListings: Array<{
+        listingId: string;
+        itemId: string;
+        externalListingId: string | null;
+        sku: string;
+        itemSpecifics: Record<string, unknown>;
+      }> = [];
+
+      for (let i = 0; i < paidEbayItemIds.length; i += 100) {
+        const chunk = paidEbayItemIds.slice(i, i + 100);
+        const { data: activeRows } = await supabase
+          .from("marketplace_listings")
+          .select("id, item_id, external_listing_id, inventory_items(sku, status, item_specifics)")
+          .eq("marketplace", "ebay")
+          .eq("status", "active")
+          .in("item_id", chunk);
+
+        for (const r of activeRows ?? []) {
+          const invRaw = r.inventory_items as
+            | { sku?: string; status?: string; item_specifics?: Record<string, unknown> }
+            | Array<{ sku?: string; status?: string; item_specifics?: Record<string, unknown> }>
+            | null;
+          const inv = Array.isArray(invRaw) ? invRaw[0] : invRaw;
+          candidateActiveListings.push({
+            listingId: String(r.id),
+            itemId: String(r.item_id),
+            externalListingId: r.external_listing_id
+              ? String(r.external_listing_id).trim()
+              : null,
+            sku: String(inv?.sku || "").trim(),
+            itemSpecifics:
+              (inv?.item_specifics as Record<string, unknown> | null) ?? {},
+          });
+        }
+      }
+
+      if (candidateActiveListings.length > 0) {
+        const liveEbay = await fetchLiveActiveEbayIds(2000);
+        if (liveEbay && (liveEbay.listingIds.size > 0 || liveEbay.skus.size > 0)) {
+          const nowIso = new Date().toISOString();
+          const soldListingIds: string[] = [];
+          const soldItemIds: string[] = [];
+          const qtyUpdates: Array<{
+            itemId: string;
+            specs: Record<string, unknown>;
+          }> = [];
+
+          for (const cand of candidateActiveListings) {
+            const skuKey = cand.sku.toLowerCase();
+            const liveById =
+              cand.externalListingId &&
+              liveEbay.listingIds.has(cand.externalListingId);
+            const liveBySku = skuKey && liveEbay.skus.has(skuKey);
+
+            if (!liveById && !liveBySku) {
+              soldListingIds.push(cand.listingId);
+              soldItemIds.push(cand.itemId);
+            } else {
+              const liveQty =
+                (cand.externalListingId
+                  ? liveEbay.qtyByListingId.get(cand.externalListingId)
+                  : undefined) ??
+                (skuKey ? liveEbay.qtyBySku.get(skuKey) : undefined);
+              if (
+                liveQty &&
+                String(cand.itemSpecifics.quantity_available || "") !==
+                  String(liveQty)
+              ) {
+                qtyUpdates.push({
+                  itemId: cand.itemId,
+                  specs: {
+                    ...cand.itemSpecifics,
+                    quantity_available: String(liveQty),
+                  },
+                });
+              }
+            }
+          }
+
+          for (let i = 0; i < soldListingIds.length; i += 100) {
+            await supabase
+              .from("marketplace_listings")
+              .update({ status: "sold", last_synced_at: nowIso })
+              .in("id", soldListingIds.slice(i, i + 100));
+          }
+          const uniqueSoldItemIds = [...new Set(soldItemIds)];
+          for (let i = 0; i < uniqueSoldItemIds.length; i += 100) {
+            await supabase
+              .from("inventory_items")
+              .update({ status: "sold", updated_at: nowIso })
+              .in("id", uniqueSoldItemIds.slice(i, i + 100));
+          }
+          reconciledSoldCount = uniqueSoldItemIds.length;
+
+          for (let i = 0; i < qtyUpdates.length; i += 10) {
+            await Promise.all(
+              qtyUpdates.slice(i, i + 10).map((q) =>
+                supabase
+                  .from("inventory_items")
+                  .update({ item_specifics: q.specs, updated_at: nowIso })
+                  .eq("id", q.itemId)
+              )
+            );
+          }
+        }
+      }
+    }
+
     // 5. Anti-Double-Sell Cascade (ONLY when explicitly enabled for live sale watch,
     //    and strictly limited to brand-new paid sales from the past 7 days!)
     const delistedCount = { total: 0 };
@@ -497,6 +624,10 @@ export async function POST(request: Request) {
       buyerLocationsSaved > 0
         ? ` · Synced ${buyerLocationsSaved} buyer map location${buyerLocationsSaved === 1 ? "" : "s"}`
         : "";
+    const soldCleanNote =
+      reconciledSoldCount > 0
+        ? ` · Removed ${reconciledSoldCount} already-sold item${reconciledSoldCount === 1 ? "" : "s"} from Active Inventory`
+        : "";
 
     return NextResponse.json({
       mode: "live",
@@ -505,17 +636,18 @@ export async function POST(request: Request) {
       skippedCount,
       photosBackfilled,
       buyerLocationsSaved,
+      reconciledSoldCount,
       delistedCount: delistedCount.total,
       totalFetched: orders.length,
       sourceApi,
       daysBack: effectiveDays,
       message:
         importedCount > 0
-          ? `Imported ${importedCount} eBay sale${importedCount === 1 ? "" : "s"}${delistedCount.total > 0 ? ` & queued ${delistedCount.total} auto-delist${delistedCount.total === 1 ? "" : "s"}` : ""}${updatedCount > 0 ? ` (${updatedCount} updated)` : ""}${photoNote}${locNote}.`
+          ? `Imported ${importedCount} eBay sale${importedCount === 1 ? "" : "s"}${delistedCount.total > 0 ? ` & queued ${delistedCount.total} auto-delist${delistedCount.total === 1 ? "" : "s"}` : ""}${updatedCount > 0 ? ` (${updatedCount} updated)` : ""}${soldCleanNote}${photoNote}${locNote}.`
           : updatedCount > 0
-            ? `Updated ${updatedCount} existing eBay order${updatedCount === 1 ? "" : "s"}${photoNote}${locNote}.`
-            : photosBackfilled > 0 || buyerLocationsSaved > 0
-              ? `Synced eBay orders${photoNote}${locNote}!`
+            ? `Updated ${updatedCount} existing eBay order${updatedCount === 1 ? "" : "s"}${soldCleanNote}${photoNote}${locNote}.`
+            : reconciledSoldCount > 0 || photosBackfilled > 0 || buyerLocationsSaved > 0
+              ? `Synced eBay orders${soldCleanNote}${photoNote}${locNote}!`
               : `All ${orders.length} eBay orders from the past ${effectiveDays} days are already up to date.`,
     });
   } catch (error) {

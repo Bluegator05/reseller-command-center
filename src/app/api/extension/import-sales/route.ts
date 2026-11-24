@@ -416,6 +416,33 @@ export async function POST(request: Request) {
       importedCount += chunk.length;
     }
 
+    // Mark the selling channel's own marketplace_listings row as "sold" for all
+    // paid/shipped orders so sold Poshmark/Mercari/FB listings never stay stuck as Active
+    const paidSoldItemIds = [
+      ...new Set(
+        [...existingSales.values()]
+          .filter(
+            (s) =>
+              s.item_id &&
+              s.fulfillment_status !== "unpaid" &&
+              s.fulfillment_status !== "returned"
+          )
+          .map((s) => s.item_id)
+      ),
+    ];
+    if (paidSoldItemIds.length > 0) {
+      const nowIso = new Date().toISOString();
+      for (let i = 0; i < paidSoldItemIds.length; i += 100) {
+        const chunk = paidSoldItemIds.slice(i, i + 100);
+        await supabase
+          .from("marketplace_listings")
+          .update({ status: "sold", last_synced_at: nowIso })
+          .eq("marketplace", marketplace)
+          .in("item_id", chunk)
+          .in("status", ["active", "draft"]);
+      }
+    }
+
     // Anti-Double-Sell Cascade: ONLY for brand-new paid sales from the past 7 days
     let delistedCount = 0;
     if (body.cascadeDelist && newRows.length > 0) {

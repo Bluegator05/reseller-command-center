@@ -81,6 +81,8 @@ interface StaleRadarTableProps {
     itemId: string;
     exempt: boolean;
   }) => Promise<void>;
+  onReconcileEbay?: () => Promise<void>;
+  isSyncingEbay?: boolean;
 }
 
 type FilterKey =
@@ -96,6 +98,7 @@ type FilterKey =
   | "missing_mercari"
   | "missing_facebook"
   | "missing_data"
+  | "sold_conflict"
   | "at_floor";
 
 type SortKey =
@@ -252,6 +255,8 @@ export function StaleRadarTable({
   onDisposeItem,
   onSetRelistCount,
   onToggleStaleExempt,
+  onReconcileEbay,
+  isSyncingEbay = false,
 }: StaleRadarTableProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeFilter, setActiveFilter] = useState<FilterKey>("all");
@@ -376,6 +381,9 @@ export function StaleRadarTable({
           !i.bin_location?.trim() ||
           !i.source_location?.trim()
       ).length,
+      soldConflictCount: items.filter(
+        (i) => (i.sold_conflict_orders?.length ?? 0) > 0
+      ).length,
     };
   }, [items, starredSet, donateDaysThreshold]);
 
@@ -407,6 +415,12 @@ export function StaleRadarTable({
           !row.bin_location?.trim() ||
           !row.source_location?.trim()
         )
+      ) {
+        return false;
+      }
+      if (
+        activeFilter === "sold_conflict" &&
+        !(row.sold_conflict_orders && row.sold_conflict_orders.length > 0)
       ) {
         return false;
       }
@@ -804,7 +818,36 @@ export function StaleRadarTable({
                 {draftItems.length}
               </span>
             </button>
-            {activeFilter.startsWith("missing_") && (
+            {metrics.soldConflictCount > 0 && (
+              <button
+                type="button"
+                onClick={() =>
+                  setActiveFilter((prev) =>
+                    prev === "sold_conflict" ? "all" : "sold_conflict"
+                  )
+                }
+                title="Active single-qty items that already appear in your Sales tab — click Reconcile with eBay to clean up"
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer border ${
+                  activeFilter === "sold_conflict"
+                    ? "bg-[#DC2626] text-white border-[#DC2626]"
+                    : "bg-[#FEF2F2] text-[#B91C1C] border-[#FECACA] hover:bg-[#FEE2E2]"
+                }`}
+              >
+                <AlertTriangle className="w-3.5 h-3.5" />
+                <span>Already Sold</span>
+                <span
+                  className={`font-mono tabular-nums text-[11px] px-1.5 rounded ${
+                    activeFilter === "sold_conflict"
+                      ? "bg-white/20 text-white"
+                      : "bg-white text-[#B91C1C]"
+                  }`}
+                >
+                  {metrics.soldConflictCount}
+                </span>
+              </button>
+            )}
+            {activeFilter.startsWith("missing_") &&
+              activeFilter !== "missing_data" && (
               <button
                 type="button"
                 onClick={() => setActiveFilter("all")}
@@ -957,6 +1000,55 @@ export function StaleRadarTable({
           </div>
         )}
       </div>
+
+      {/* Already-Sold Reconciliation Banner */}
+      {metrics.soldConflictCount > 0 && (
+        <div className="bg-[#FEF2F2] border border-[#FECACA] rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5 min-w-0">
+            <AlertTriangle className="w-4 h-4 text-[#DC2626] shrink-0 mt-0.5" />
+            <div className="text-xs text-[#7F1D1D]">
+              <strong>
+                {metrics.soldConflictCount} active item
+                {metrics.soldConflictCount === 1 ? "" : "s"} already appear
+                {metrics.soldConflictCount === 1 ? "s" : ""} in your Sales tab
+              </strong>{" "}
+              — click <strong>Reconcile with eBay</strong> to verify live eBay
+              inventory and automatically clear out any sold or ended listings
+              (multi-quantity listings still live on eBay stay active).
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() =>
+                setActiveFilter((prev) =>
+                  prev === "sold_conflict" ? "all" : "sold_conflict"
+                )
+              }
+              className="px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-white border border-[#FCA5A5] text-[#B91C1C] hover:bg-[#FEE2E2] cursor-pointer"
+            >
+              {activeFilter === "sold_conflict"
+                ? "Show All Active"
+                : `Review ${metrics.soldConflictCount}`}
+            </button>
+            {onReconcileEbay && (
+              <button
+                type="button"
+                disabled={isSyncingEbay}
+                onClick={onReconcileEbay}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#DC2626] hover:bg-[#B91C1C] text-white disabled:opacity-50 cursor-pointer"
+              >
+                {isSyncingEbay ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <RefreshCcw className="w-3.5 h-3.5" />
+                )}
+                {isSyncingEbay ? "Reconciling..." : "Reconcile with eBay"}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Death Pile / Unlisted Backlog Panel */}
       {showDeathPile && (
@@ -1264,6 +1356,17 @@ export function StaleRadarTable({
                                   {statusPill.label}
                                 </span>
                               </div>
+                              {row.sold_conflict_orders &&
+                                row.sold_conflict_orders.length > 0 && (
+                                  <span
+                                    title={`Recorded sold on ${row.sold_conflict_orders[0].marketplace.toUpperCase()} (${row.sold_conflict_orders[0].sold_at.slice(0, 10)}) for $${row.sold_conflict_orders[0].gross_sale_price.toFixed(2)}. Click Reconcile with eBay above to clear sold/ended items.`}
+                                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-[#FEE2E2] text-[#B91C1C] border border-[#FCA5A5]"
+                                  >
+                                    <AlertTriangle className="w-2.5 h-2.5" />
+                                    Already Sold ({row.sold_conflict_orders[0].marketplace.toUpperCase()}{" "}
+                                    {row.sold_conflict_orders[0].sold_at.slice(0, 10)})
+                                  </span>
+                                )}
                               {row.is_newly_listed && (
                                 <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[#EFF6FF] text-[#1D4ED8]">
                                   NEW

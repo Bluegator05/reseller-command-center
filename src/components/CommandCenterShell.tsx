@@ -254,6 +254,27 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
           : `Demo Sync: ${payload.syncedCount} active eBay listings`,
         payload.message
       );
+      if (
+        payload.crossListedSoldWarnings &&
+        payload.crossListedSoldWarnings.length > 0
+      ) {
+        const preview = payload.crossListedSoldWarnings
+          .slice(0, 3)
+          .map(
+            (w) =>
+              `${w.sku} (${w.marketplaces.map((m) => m.toUpperCase()).join(", ")})`
+          )
+          .join(" • ");
+        const extra =
+          payload.crossListedSoldWarnings.length > 3
+            ? ` +${payload.crossListedSoldWarnings.length - 3} more`
+            : "";
+        pushToast(
+          "error",
+          `${payload.crossListedSoldWarnings.length} Sold eBay Item${payload.crossListedSoldWarnings.length === 1 ? "" : "s"} Still Listed Elsewhere`,
+          `Double-check & delist on other channels: ${preview}${extra}`
+        );
+      }
     } catch (error) {
       pushToast(
         "error",
@@ -1190,6 +1211,8 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
             busyListingIds={busyListingIds}
             isBulkBusy={isBulkBusy}
             isLive={isLiveMode}
+            onReconcileEbay={handleSyncEbay}
+            isSyncingEbay={isSyncingEbay}
             onExecuteAction={handleExecuteAction}
             onOpenCrossList={(row, target = "etsy") =>
               setCrossListState({ row, target })

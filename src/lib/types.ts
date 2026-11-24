@@ -291,6 +291,14 @@ export interface StaleRadarRow {
   // Phase 2: Multi-channel presence
   cross_listings: CrossChannelListingSummary[];
   is_listed_on_etsy: boolean;
+  // Reconciliation safety net: active single-qty items that already have a paid/shipped sale
+  sold_conflict_orders?: Array<{
+    id: string;
+    marketplace: MarketplaceType;
+    external_order_id: string | null;
+    sold_at: string;
+    gross_sale_price: number;
+  }>;
 }
 
 export interface EnvReadiness {
@@ -527,6 +535,14 @@ export interface EbaySyncResponse {
   syncedCount: number;
   createdCount: number;
   updatedCount: number;
+  reconciledSoldCount?: number;
+  reconciledEndedCount?: number;
+  crossListedSoldWarnings?: Array<{
+    itemId: string;
+    sku: string;
+    title: string;
+    marketplaces: MarketplaceType[];
+  }>;
   syncedAt: string;
   message: string;
 }

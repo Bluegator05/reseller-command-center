@@ -1,14 +1,14 @@
 import { NextResponse } from "next/server";
 import { simulateDemoEbaySync } from "@/lib/demo-store";
 import {
-  fetchActiveEbayOffers,
+  fetchActiveEbayOffersWithMeta,
   fetchActivePromotedRates,
   isEbayConfigured,
   type NormalizedEbayOffer,
 } from "@/lib/ebay";
 import { roundCurrency } from "@/lib/stale-engine";
 import { getSupabaseServerClient, isSupabaseConfigured } from "@/lib/supabase";
-import type { EbaySyncResponse } from "@/lib/types";
+import type { EbaySyncResponse, MarketplaceType } from "@/lib/types";
 
 export const maxDuration = 60;
 
@@ -24,7 +24,9 @@ function chunkArray<T>(items: T[], size: number): T[][] {
  * POST /api/ebay/sync
  * Pulls ALL active eBay listings (up to 2,000 via paginated Trading API + Sell
  * Inventory API) into Supabase `inventory_items` and `marketplace_listings`
- * using batched inserts/upserts so 500–2,000 listings complete in a few seconds.
+ * using batched inserts/upserts, AND reconciles any previously active eBay
+ * listings that are no longer live on eBay (marking sold items `sold` and
+ * delisted/expired items `ended` so they never stay stuck in Active Inventory).
  */
 export async function POST() {
   const supabase = getSupabaseServerClient();
@@ -49,8 +51,8 @@ export async function POST() {
   }
 
   try {
-    const [offers, promotedRates] = await Promise.all([
-      fetchActiveEbayOffers(2000),
+    const [{ offers, tradingSucceeded }, promotedRates] = await Promise.all([
+      fetchActiveEbayOffersWithMeta(2000),
       fetchActivePromotedRates(),
     ]);
     const syncedAt = new Date().toISOString();
@@ -210,6 +212,158 @@ export async function POST() {
       if (upsertErr) throw upsertErr;
     }
 
+    // 5. Reconcile previously active eBay listings that are NO LONGER live on eBay
+    //    (Safety guard: only run when Trading API succeeded cleanly and returned offers)
+    let reconciledSoldCount = 0;
+    let reconciledEndedCount = 0;
+    const crossListedSoldWarnings: Array<{
+      itemId: string;
+      sku: string;
+      title: string;
+      marketplaces: MarketplaceType[];
+    }> = [];
+
+    if (tradingSucceeded && offers.length > 0) {
+      const liveEbayItemIds = new Set(listingRows.map((r) => r.item_id));
+      const dbActiveEbayListings: Array<{ id: string; item_id: string }> = [];
+
+      for (let from = 0; from < 5000; from += 1000) {
+        const { data: activeRows, error: activeErr } = await supabase!
+          .from("marketplace_listings")
+          .select("id, item_id")
+          .eq("marketplace", "ebay")
+          .eq("status", "active")
+          .range(from, from + 999);
+        if (activeErr) throw activeErr;
+        for (const r of activeRows ?? []) {
+          dbActiveEbayListings.push({
+            id: String(r.id),
+            item_id: String(r.item_id),
+          });
+        }
+        if ((activeRows ?? []).length < 1000) break;
+      }
+
+      const staleListings = dbActiveEbayListings.filter(
+        (l) => !liveEbayItemIds.has(l.item_id)
+      );
+
+      if (staleListings.length > 0) {
+        const staleItemIds = [...new Set(staleListings.map((l) => l.item_id))];
+
+        // Check which disappeared eBay listings have a paid/shipped sale in sales_orders
+        const soldItemIds = new Set<string>();
+        for (const chunk of chunkArray(staleItemIds, 200)) {
+          const { data: saleRows } = await supabase!
+            .from("sales_orders")
+            .select("item_id, fulfillment_status, restocked")
+            .in("item_id", chunk);
+          for (const s of saleRows ?? []) {
+            if (
+              s.fulfillment_status !== "unpaid" &&
+              s.fulfillment_status !== "returned" &&
+              !s.restocked
+            ) {
+              soldItemIds.add(String(s.item_id));
+            }
+          }
+        }
+
+        // Check which disappeared eBay items STILL have active cross-listings on Poshmark/Mercari/Etsy/FB
+        const otherActiveByItem = new Map<string, MarketplaceType[]>();
+        for (const chunk of chunkArray(staleItemIds, 200)) {
+          const { data: otherRows } = await supabase!
+            .from("marketplace_listings")
+            .select("item_id, marketplace")
+            .in("item_id", chunk)
+            .neq("marketplace", "ebay")
+            .eq("status", "active");
+          for (const o of otherRows ?? []) {
+            const iid = String(o.item_id);
+            const list = otherActiveByItem.get(iid) ?? [];
+            const mp = o.marketplace as MarketplaceType;
+            if (!list.includes(mp)) list.push(mp);
+            otherActiveByItem.set(iid, list);
+          }
+        }
+
+        const soldListingIds: string[] = [];
+        const endedListingIds: string[] = [];
+        const markInvSoldIds: string[] = [];
+        const markInvArchivedIds: string[] = [];
+
+        for (const st of staleListings) {
+          if (soldItemIds.has(st.item_id)) {
+            soldListingIds.push(st.id);
+            markInvSoldIds.push(st.item_id);
+          } else {
+            endedListingIds.push(st.id);
+            if (!otherActiveByItem.has(st.item_id)) {
+              markInvArchivedIds.push(st.item_id);
+            }
+          }
+        }
+
+        for (const chunk of chunkArray(soldListingIds, 100)) {
+          await supabase!
+            .from("marketplace_listings")
+            .update({ status: "sold", last_synced_at: syncedAt })
+            .in("id", chunk);
+        }
+        for (const chunk of chunkArray([...new Set(markInvSoldIds)], 100)) {
+          await supabase!
+            .from("inventory_items")
+            .update({ status: "sold", updated_at: syncedAt })
+            .in("id", chunk);
+        }
+        for (const chunk of chunkArray(endedListingIds, 100)) {
+          await supabase!
+            .from("marketplace_listings")
+            .update({ status: "ended", last_synced_at: syncedAt })
+            .in("id", chunk);
+        }
+        for (const chunk of chunkArray([...new Set(markInvArchivedIds)], 100)) {
+          await supabase!
+            .from("inventory_items")
+            .update({ status: "archived", updated_at: syncedAt })
+            .in("id", chunk)
+            .eq("status", "active");
+        }
+
+        reconciledSoldCount = new Set(markInvSoldIds).size;
+        reconciledEndedCount = new Set(
+          staleListings
+            .filter((s) => !soldItemIds.has(s.item_id))
+            .map((s) => s.item_id)
+        ).size;
+
+        // Collect warnings for sold eBay items that STILL have active cross-listings elsewhere
+        const warnIds = [...soldItemIds].filter((id) =>
+          otherActiveByItem.has(id)
+        );
+        if (warnIds.length > 0) {
+          for (const chunk of chunkArray(warnIds, 100)) {
+            const { data: warnItems } = await supabase!
+              .from("inventory_items")
+              .select("id, sku, title")
+              .in("id", chunk);
+            for (const w of warnItems ?? []) {
+              const iid = String(w.id);
+              const mps = otherActiveByItem.get(iid) ?? [];
+              if (mps.length > 0) {
+                crossListedSoldWarnings.push({
+                  itemId: iid,
+                  sku: String(w.sku || ""),
+                  title: String(w.title || ""),
+                  marketplaces: mps,
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+
     await supabase!.from("marketplace_accounts").upsert(
       {
         marketplace: "ebay",
@@ -221,13 +375,30 @@ export async function POST() {
       { onConflict: "marketplace" }
     );
 
+    const reconcileParts: string[] = [];
+    if (reconciledSoldCount > 0) {
+      reconcileParts.push(
+        `marked ${reconciledSoldCount} already-sold item${reconciledSoldCount === 1 ? "" : "s"} as Sold`
+      );
+    }
+    if (reconciledEndedCount > 0) {
+      reconcileParts.push(
+        `removed ${reconciledEndedCount} ended/delisted listing${reconciledEndedCount === 1 ? "" : "s"}`
+      );
+    }
+    const reconcileSuffix =
+      reconcileParts.length > 0 ? ` · ${reconcileParts.join(" & ")}` : "";
+
     const response: EbaySyncResponse = {
       mode: "live",
       syncedCount: offers.length,
       createdCount: newOffers.length,
       updatedCount: existingOffers.length,
+      reconciledSoldCount,
+      reconciledEndedCount,
+      crossListedSoldWarnings,
       syncedAt,
-      message: `Live eBay sync complete: ${offers.length} total listings (${newOffers.length} new, ${existingOffers.length} updated).`,
+      message: `Live eBay sync complete: ${offers.length} active listings (${newOffers.length} new, ${existingOffers.length} updated)${reconcileSuffix}.`,
     };
 
     return NextResponse.json(response);

@@ -642,10 +642,13 @@ async function fetchActiveTradingListings(
       const rawQtyTotal = Number(extractXmlTag(block, "Quantity") || 1) || 1;
       const rawQtySold =
         Number(extractXmlTag(sellingStatusBlock, "QuantitySold") || 0) || 0;
-      const quantityAvailable =
+      const computedQtyAvail =
         rawQtyAvail !== null && rawQtyAvail !== "" && Number.isFinite(Number(rawQtyAvail))
-          ? Math.max(1, Math.floor(Number(rawQtyAvail)))
-          : Math.max(1, Math.floor(rawQtyTotal - rawQtySold));
+          ? Math.floor(Number(rawQtyAvail))
+          : Math.floor(rawQtyTotal - rawQtySold);
+      // Skip sold-out / Out-Of-Stock (0 available qty) listings so eBay OOS listings never stay active
+      if (computedQtyAvail <= 0) continue;
+      const quantityAvailable = Math.max(1, computedQtyAvail);
 
       const picBlock = extractXmlTag(block, "PictureDetails") || "";
       const picUrls = extractAllXmlTags(picBlock, "PictureURL")
@@ -699,21 +702,112 @@ async function fetchActiveTradingListings(
 }
 
 /**
+ * Lightweight Trading API `GetMyeBaySelling` check returning ONLY live active
+ * ItemIDs, SKUs, and remaining QuantityAvailable (strictly > 0).
+ * Used by sales sync to distinguish truly sold-out listings from multi-quantity
+ * listings that still have units live on eBay. Returns null if eBay fails.
+ */
+export async function fetchLiveActiveEbayIds(limit = 2000): Promise<{
+  listingIds: Set<string>;
+  skus: Set<string>;
+  qtyByListingId: Map<string, number>;
+  qtyBySku: Map<string, number>;
+} | null> {
+  if (!isEbayConfigured()) return null;
+  try {
+    const listingIds = new Set<string>();
+    const skus = new Set<string>();
+    const qtyByListingId = new Map<string, number>();
+    const qtyBySku = new Map<string, number>();
+    const entriesPerPage = Math.min(limit, 200);
+    const maxPages = Math.max(1, Math.ceil(limit / entriesPerPage));
+    let seen = 0;
+
+    for (let page = 1; page <= maxPages; page++) {
+      const xml = await ebayTradingRequest(
+        "GetMyeBaySelling",
+        `<ActiveList>
+          <Include>true</Include>
+          <Pagination>
+            <EntriesPerPage>${entriesPerPage}</EntriesPerPage>
+            <PageNumber>${page}</PageNumber>
+          </Pagination>
+        </ActiveList>
+        <OutputSelector>ActiveList.ItemArray.Item.ItemID</OutputSelector>
+        <OutputSelector>ActiveList.ItemArray.Item.SKU</OutputSelector>
+        <OutputSelector>ActiveList.ItemArray.Item.Quantity</OutputSelector>
+        <OutputSelector>ActiveList.ItemArray.Item.QuantityAvailable</OutputSelector>
+        <OutputSelector>ActiveList.ItemArray.Item.SellingStatus.QuantitySold</OutputSelector>
+        <OutputSelector>ActiveList.PaginationResult</OutputSelector>`
+      );
+
+      const activeListBlock = extractXmlTag(xml, "ActiveList") || xml;
+      const itemBlocks = extractAllXmlTags(activeListBlock, "Item");
+      if (itemBlocks.length === 0) break;
+
+      for (const block of itemBlocks) {
+        const itemId = extractXmlTag(block, "ItemID")?.trim();
+        if (!itemId) continue;
+        const rawSku = extractXmlTag(block, "SKU")?.trim() || "";
+        const sellingStatusBlock = extractXmlTag(block, "SellingStatus") || "";
+        const rawQtyAvail = extractXmlTag(block, "QuantityAvailable");
+        const rawQtyTotal = Number(extractXmlTag(block, "Quantity") || 1) || 1;
+        const rawQtySold =
+          Number(extractXmlTag(sellingStatusBlock, "QuantitySold") || 0) || 0;
+        const computedQtyAvail =
+          rawQtyAvail !== null && rawQtyAvail !== "" && Number.isFinite(Number(rawQtyAvail))
+            ? Math.floor(Number(rawQtyAvail))
+            : Math.floor(rawQtyTotal - rawQtySold);
+
+        if (computedQtyAvail <= 0) continue;
+
+        listingIds.add(itemId);
+        qtyByListingId.set(itemId, computedQtyAvail);
+        if (rawSku) {
+          const skuKey = rawSku.toLowerCase();
+          skus.add(skuKey);
+          qtyBySku.set(skuKey, computedQtyAvail);
+        }
+        seen += 1;
+      }
+
+      const totalPages =
+        Number(
+          extractXmlTag(
+            extractXmlTag(activeListBlock, "PaginationResult") || "",
+            "TotalNumberOfPages"
+          ) || 1
+        ) || 1;
+      if (page >= totalPages || seen >= limit) break;
+    }
+
+    return { listingIds, skus, qtyByListingId, qtyBySku };
+  } catch (err) {
+    console.warn("[ebay] fetchLiveActiveEbayIds warning:", err);
+    return null;
+  }
+}
+
+/**
  * Pulls active eBay listings from BOTH Trading API (Seller Hub / Mobile App,
  * with real WatchCount, HitCount & StartTime) AND Sell Inventory API, merging
  * them without duplicates so 100% of active eBay listings sync cleanly.
+ * Also reports `tradingSucceeded` so callers know it is safe to reconcile
+ * disappeared/sold listings against the full active catalog.
  */
-export async function fetchActiveEbayOffers(
+export async function fetchActiveEbayOffersWithMeta(
   limit = 2000
-): Promise<NormalizedEbayOffer[]> {
+): Promise<{ offers: NormalizedEbayOffer[]; tradingSucceeded: boolean }> {
   const { webBase } = getEbayBaseUrls();
   const byListingId = new Map<string, NormalizedEbayOffer>();
   const bySku = new Map<string, NormalizedEbayOffer>();
   let tradingError: Error | null = null;
+  let tradingSucceeded = false;
 
   // 1. Primary pull: Trading API GetMyeBaySelling (covers Seller Hub + App + real Watchers/Views)
   try {
     const tradingItems = await fetchActiveTradingListings(limit);
+    tradingSucceeded = true;
     for (const item of tradingItems) {
       if (bySku.has(item.sku) && item.externalListingId) {
         item.sku = `${item.sku}-${item.externalListingId.slice(-5)}`;
@@ -741,7 +835,8 @@ export async function fetchActiveEbayOffers(
 
         const publishedOffers = (offerRes.offers ?? []).filter(
           (o) =>
-            o.status === "PUBLISHED" || o.listing?.listingStatus === "ACTIVE"
+            (o.status === "PUBLISHED" || o.listing?.listingStatus === "ACTIVE") &&
+            (typeof o.availableQuantity !== "number" || o.availableQuantity > 0)
         );
 
         for (const offer of publishedOffers) {
@@ -822,7 +917,14 @@ export async function fetchActiveEbayOffers(
     }
   }
 
-  return Array.from(bySku.values());
+  return { offers: Array.from(bySku.values()), tradingSucceeded };
+}
+
+export async function fetchActiveEbayOffers(
+  limit = 2000
+): Promise<NormalizedEbayOffer[]> {
+  const { offers } = await fetchActiveEbayOffersWithMeta(limit);
+  return offers;
 }
 
 /**

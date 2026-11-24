@@ -444,6 +444,44 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
         };
       });
 
+      // Flag any active single-qty item that ALREADY has a paid/shipped sale in sales_orders
+      // so ghost-active sold listings are immediately visible & 1-click reconcilable
+      const paidSalesByItem = new Map<
+        string,
+        Array<{
+          id: string;
+          marketplace: MarketplaceType;
+          external_order_id: string | null;
+          sold_at: string;
+          gross_sale_price: number;
+        }>
+      >();
+      for (const ord of salesOrders) {
+        if (
+          ord.fulfillment_status === "unpaid" ||
+          ord.fulfillment_status === "returned" ||
+          ord.restocked
+        ) {
+          continue;
+        }
+        const list = paidSalesByItem.get(ord.item_id) ?? [];
+        list.push({
+          id: ord.id,
+          marketplace: ord.marketplace,
+          external_order_id: ord.external_order_id,
+          sold_at: ord.sold_at,
+          gross_sale_price: ord.gross_sale_price,
+        });
+        paidSalesByItem.set(ord.item_id, list);
+      }
+      for (const item of items) {
+        if ((item.quantity_available ?? 1) > 1) continue;
+        const conflicts = paidSalesByItem.get(item.item_id);
+        if (conflicts && conflicts.length > 0) {
+          item.sold_conflict_orders = conflicts;
+        }
+      }
+
       const lastSyncedAt =
         items
           .map((i) => i.last_synced_at)
