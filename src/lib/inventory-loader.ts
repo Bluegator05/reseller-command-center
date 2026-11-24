@@ -475,9 +475,27 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
         paidSalesByItem.set(ord.item_id, list);
       }
       for (const item of items) {
-        if ((item.quantity_available ?? 1) > 1) continue;
-        const conflicts = paidSalesByItem.get(item.item_id);
-        if (conflicts && conflicts.length > 0) {
+        if ((item.quantity_available ?? 1) > 1 || (item.quantity_purchased ?? 1) > 1) {
+          continue;
+        }
+        const rawConflicts = paidSalesByItem.get(item.item_id);
+        if (!rawConflicts || rawConflicts.length === 0) continue;
+
+        const syncedMs = item.last_synced_at ? Date.parse(item.last_synced_at) : NaN;
+        const conflicts = rawConflicts.filter((ord) => {
+          // If this sale was on eBay and we ALREADY synced live eBay AFTER the sale
+          // timestamp, eBay itself confirmed this listing is still live with qty >= 1
+          // (e.g. a multi-qty listing with 1 unit left, or restocked/relisted on eBay).
+          if (ord.marketplace === "ebay" && !Number.isNaN(syncedMs)) {
+            const soldMs = Date.parse(ord.sold_at);
+            if (!Number.isNaN(soldMs) && syncedMs > soldMs + 5 * 60_000) {
+              return false;
+            }
+          }
+          return true;
+        });
+
+        if (conflicts.length > 0) {
           item.sold_conflict_orders = conflicts;
         }
       }

@@ -124,6 +124,10 @@ export async function POST() {
         item_specifics: {
           ...offer.itemSpecifics,
           quantity_available: String(Math.max(1, offer.quantityAvailable || 1)),
+          quantity_total: String(
+            Math.max(1, offer.quantityTotal || offer.quantityAvailable || 1)
+          ),
+          quantity_sold: String(Math.max(0, offer.quantitySold || 0)),
         },
         image_urls: offer.imageUrls,
         status: "active",
@@ -161,12 +165,23 @@ export async function POST() {
           if (offer.weightOz !== null) patch.weight_oz = offer.weightOz;
 
           const qtyStr = String(Math.max(1, offer.quantityAvailable || 1));
+          const qtyTotalStr = String(
+            Math.max(1, offer.quantityTotal || offer.quantityAvailable || 1)
+          );
+          const qtySoldStr = String(Math.max(0, offer.quantitySold || 0));
           const hasIncomingSpecs = Object.keys(offer.itemSpecifics).length > 0;
-          if (hasIncomingSpecs || existingSpecs.quantity_available !== qtyStr) {
+          if (
+            hasIncomingSpecs ||
+            existingSpecs.quantity_available !== qtyStr ||
+            existingSpecs.quantity_total !== qtyTotalStr ||
+            existingSpecs.quantity_sold !== qtySoldStr
+          ) {
             patch.item_specifics = {
               ...existingSpecs,
               ...offer.itemSpecifics,
               quantity_available: qtyStr,
+              quantity_total: qtyTotalStr,
+              quantity_sold: qtySoldStr,
             };
           }
 

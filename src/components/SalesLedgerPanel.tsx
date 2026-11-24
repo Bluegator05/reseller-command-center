@@ -14,6 +14,7 @@ import {
   Printer,
   RefreshCw,
   RotateCcw,
+  Search,
   Send,
   ShieldCheck,
   TrendingUp,
@@ -126,6 +127,7 @@ export function SalesLedgerPanel({
     "all"
   );
   const [missingDataOnly, setMissingDataOnly] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const delistJobs = useMemo(
     () => recentJobs.filter((j) => j.action === "delist"),
@@ -262,12 +264,39 @@ export function SalesLedgerPanel({
         ? Date.parse(`${customEnd}T23:59:59.999`)
         : null;
 
+    const searchTokens = searchQuery
+      .trim()
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean);
+
     return salesOrders.filter((o) => {
       if (channelFilter !== "all" && o.marketplace !== channelFilter) {
         return false;
       }
       if (missingDataOnly && !isOrderMissingData(o)) {
         return false;
+      }
+      if (searchTokens.length > 0) {
+        const haystack = [
+          o.title,
+          o.sku,
+          o.external_order_id,
+          o.tracking_number,
+          o.buyer_city,
+          o.buyer_state,
+          o.buyer_postal,
+          o.bin_location,
+          o.source_location,
+          o.marketplace,
+          o.sold_at.slice(0, 10),
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        if (!searchTokens.every((t) => haystack.includes(t))) {
+          return false;
+        }
       }
       const soldMs = Date.parse(o.sold_at);
       if (Number.isNaN(soldMs)) return true;
@@ -286,6 +315,7 @@ export function SalesLedgerPanel({
     customEnd,
     channelFilter,
     missingDataOnly,
+    searchQuery,
     mountNow,
   ]);
 
@@ -789,6 +819,28 @@ export function SalesLedgerPanel({
             >
               Missing Data ({missingDataCount})
             </button>
+          </div>
+
+          <div className="relative w-full sm:w-80">
+            <Search className="w-3.5 h-3.5 text-[#8A929A] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              id="input-sales-search"
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search solds by title, SKU, order #, city, bin..."
+              className="w-full pl-8 pr-8 py-1.5 text-xs rounded-lg border border-[#DCE1DE] bg-[#F8FAF9] text-[#171A1D] placeholder:text-[#8A929A] focus:bg-white focus:outline-none focus:border-[#0F766E] transition"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                aria-label="Clear sales search"
+                onClick={() => setSearchQuery("")}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded text-[#8A929A] hover:text-[#171A1D] hover:bg-[#ECEFE9] cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
 
           {timeRange === "custom" && (

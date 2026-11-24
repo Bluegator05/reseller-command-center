@@ -49,6 +49,8 @@ export interface NormalizedEbayOffer {
   promotedAdRatePct?: number;
   weightOz: number | null;
   quantityAvailable: number;
+  quantityTotal?: number;
+  quantitySold?: number;
 }
 
 export function isEbayConfigured(): boolean {
@@ -685,6 +687,8 @@ async function fetchActiveTradingListings(
         impressionsCount: hitCount,
         weightOz: null,
         quantityAvailable,
+        quantityTotal: Math.max(quantityAvailable, Math.floor(rawQtyTotal), quantityAvailable + Math.max(0, Math.floor(rawQtySold))),
+        quantitySold: Math.max(0, Math.floor(rawQtySold)),
       });
     }
 
@@ -870,7 +874,13 @@ export async function fetchActiveEbayOffersWithMeta(
             if (inv.product?.brand) existing.brand = inv.product.brand;
             if (weightOz !== null) existing.weightOz = weightOz;
             if (inv.product?.aspects) existing.itemSpecifics = inv.product.aspects;
+            const invSoldQty = Math.max(0, Math.floor(Number(offer.listing?.soldQuantity || 0)));
             if (offerQty > 1) existing.quantityAvailable = offerQty;
+            existing.quantitySold = Math.max(existing.quantitySold ?? 0, invSoldQty);
+            existing.quantityTotal = Math.max(
+              existing.quantityTotal ?? 1,
+              existing.quantityAvailable + (existing.quantitySold ?? 0)
+            );
             if (
               existing.imageUrls.length === 0 &&
               inv.product?.imageUrls?.length
@@ -878,6 +888,7 @@ export async function fetchActiveEbayOffersWithMeta(
               existing.imageUrls = inv.product.imageUrls;
             }
           } else {
+            const invSoldQty = Math.max(0, Math.floor(Number(offer.listing?.soldQuantity || 0)));
             const record: NormalizedEbayOffer = {
               sku: inv.sku,
               title: inv.product?.title || `SKU ${inv.sku}`,
@@ -899,6 +910,8 @@ export async function fetchActiveEbayOffersWithMeta(
               impressionsCount: 0,
               weightOz,
               quantityAvailable: offerQty,
+              quantityTotal: offerQty + invSoldQty,
+              quantitySold: invSoldQty,
             };
             if (record.externalListingId) {
               byListingId.set(record.externalListingId, record);

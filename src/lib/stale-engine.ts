@@ -251,14 +251,18 @@ export function enrichStaleRadarRow(
       Number(specs.quantity_available) >= 1
         ? Math.floor(Number(specs.quantity_available))
         : 1,
-    quantity_purchased:
-      Number.isFinite(Number(specs.quantity_purchased)) &&
-      Number(specs.quantity_purchased) >= 1
+    quantity_purchased: Math.max(
+      1,
+      Number.isFinite(Number(specs.quantity_purchased))
         ? Math.floor(Number(specs.quantity_purchased))
-        : Number.isFinite(Number(specs.quantity_available)) &&
-            Number(specs.quantity_available) >= 1
-          ? Math.floor(Number(specs.quantity_available))
-          : 1,
+        : 0,
+      Number.isFinite(Number(specs.quantity_total))
+        ? Math.floor(Number(specs.quantity_total))
+        : 0,
+      Number.isFinite(Number(specs.quantity_available))
+        ? Math.floor(Number(specs.quantity_available))
+        : 0
+    ),
     bulk_buy_id:
       typeof specs.bulk_buy_id === "string" && specs.bulk_buy_id.trim()
         ? specs.bulk_buy_id.trim()
