@@ -695,10 +695,10 @@ export function inferStructuredCategory(
         sizeLabel: null,
       };
     }
-    if (/\b(jacket|coat|fleece|jeans|shirt|shoe|sneaker|handbag|purse|dress)\b/.test(hay)) {
+    if (/\b(jacket|coat|fleece|jeans|pants|shorts|leggings|shirt|top|blouse|hoodie|sweater|shoe|sneaker|boot|sandal|cleat|heel|flat|loafer|jordan|handbag|purse|dress)\b/.test(hay)) {
       return {
         department: isKids ? "Kids" : isMens ? "Men" : "Women",
-        category: /\b(shoe|sneaker|boot)\b/.test(hay)
+        category: /\b(shoe|sneaker|boot|sandal|cleat|heel|flat|loafer|jordan)\b/.test(hay)
           ? "Shoes"
           : /\b(handbag|purse|bag|tote)\b/.test(hay)
             ? "Women's handbags"

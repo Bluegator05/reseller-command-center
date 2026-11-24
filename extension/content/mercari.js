@@ -420,11 +420,334 @@
   }
 
   /**
+   * Closes Mercari's "Templates" popup modal ("Use a listing template" / "Search for template" /
+   * "Create a template") if it opens on /sell/ so it never blocks form fields or List submission.
+   */
+  async function dismissMercariTemplatesModal(sleep, debugLog) {
+    const isTemplatesOpen = () => {
+      const txt = document.body?.innerText || "";
+      if (!/create a template/i.test(txt) && !/search for template/i.test(txt)) {
+        return null;
+      }
+      const header = Array.from(
+        document.querySelectorAll("h1, h2, h3, h4, div, p, span")
+      ).find((el) => {
+        if (el.closest("#rcc-companion-hud") || el.children.length > 0) return false;
+        const r = el.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) return false;
+        return /^templates$/i.test((el.textContent || "").trim());
+      });
+      if (!header) return null;
+      let dialog =
+        header.closest('[role="dialog"], [aria-modal="true"]') ||
+        header.parentElement;
+      for (let up = 0; up < 6 && dialog && dialog.getBoundingClientRect().height < 260; up++) {
+        dialog = dialog.parentElement;
+      }
+      return dialog || document.body;
+    };
+
+    const modal = isTemplatesOpen();
+    if (!modal) return false;
+
+    // Find the top-right X close button inside the Templates modal (never "Use template" / "Create a template")
+    const btns = Array.from(modal.querySelectorAll('button, [role="button"]')).filter((b) => {
+      if (b.closest("#rcc-companion-hud") || b.disabled) return false;
+      const r = b.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) return false;
+      const t = (b.textContent || "").trim();
+      if (/use template|create a template|edit/i.test(t)) return false;
+      const aria = (b.getAttribute("aria-label") || "").toLowerCase();
+      return (
+        aria.includes("close") ||
+        aria.includes("dismiss") ||
+        (r.width <= 56 && r.height <= 56 && (t === "" || t === "×" || t === "✕" || t.toLowerCase() === "x"))
+      );
+    });
+
+    // Prefer the highest-up, rightmost small button (the X icon)
+    btns.sort((a, b) => {
+      const ra = a.getBoundingClientRect();
+      const rb = b.getBoundingClientRect();
+      return ra.top - rb.top || rb.right - ra.right;
+    });
+
+    if (btns[0]) {
+      btns[0].click();
+      await sleep(350);
+    }
+    if (isTemplatesOpen()) {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+      await sleep(300);
+    }
+    debugLog.push("Dismissed Mercari Templates modal");
+    return true;
+  }
+
+  function extractSizeFallback(rawSize, titleText, itemSpecifics) {
+    const direct = String(rawSize || "").trim();
+    if (direct) return direct;
+
+    if (itemSpecifics && typeof itemSpecifics === "object") {
+      for (const [k, v] of Object.entries(itemSpecifics)) {
+        if (/^(us\s*shoe\s*size|shoe\s*size|size)$/i.test(k.trim())) {
+          const val = Array.isArray(v) ? v[0] : v;
+          if (val && String(val).trim()) return String(val).trim();
+        }
+      }
+    }
+
+    const t = String(titleText || "");
+    const patterns = [
+      /\b(\d{1,2}(?:\.\d)?\s*[cy])\b/i, // 11C, 5Y, 10.5C
+      /\b([2-5]t)\b/i, // 4T, 5T
+      /\b(size|sz)\.?\s*([0-9]{1,2}(?:\.\d)?[a-z]?|xxs|xs|s|m|l|xl|xxl|2xl|3xl|small|medium|large)\b/i,
+      /\b(xxs|xs|xxl|2xl|3xl|small|medium|large)\b/i,
+      /\bw\s*(\d{2})\b/i, // W27
+    ];
+    for (const pat of patterns) {
+      const m = t.match(pat);
+      if (m) return (m[2] || m[1] || "").trim();
+    }
+    return "";
+  }
+
+  function buildMercariSizeCandidates(rawSize) {
+    const clean = String(rawSize || "").trim();
+    if (!clean) return [];
+    const list = [clean];
+    const upper = clean.toUpperCase();
+
+    const apparelMap = {
+      XS: ["XS (0-2)", "XS", "Extra Small"],
+      "EXTRA SMALL": ["XS (0-2)", "XS"],
+      S: ["S (4-6)", "S", "Small", "S (34-36)"],
+      SMALL: ["S (4-6)", "S", "Small"],
+      M: ["M (8-10)", "M", "Medium", "M (38-40)"],
+      MEDIUM: ["M (8-10)", "M", "Medium"],
+      L: ["L (12-14)", "L", "Large", "L (42-44)"],
+      LARGE: ["L (12-14)", "L", "Large"],
+      XL: ["XL (16-18)", "XL", "Extra Large", "XL (46-48)"],
+      XXL: ["XXL (20-22)", "XXL", "2XL"],
+      "2XL": ["XXL (20-22)", "2XL", "XXL"],
+      "3XL": ["3XL", "XXXL"],
+      OS: ["One Size", "OS", "One size"],
+    };
+    if (apparelMap[upper]) {
+      list.push(...apparelMap[upper]);
+    }
+
+    // Numeric kids/adult shoe & waist sizes: "11C" -> 11, 11 (Little Kid), 11c; "5Y" -> 5, 5 (Big Kid), 5Y
+    const m = clean.match(/^(\d+(?:\.\d+)?)\s*([cytwmder]|big\s*kid|little\s*kid|toddler|youth)?\b/i);
+    if (m) {
+      const num = m[1];
+      const suf = (m[2] || "").toLowerCase();
+      if (suf === "c") {
+        list.push(`${num} (Little Kid)`, `${num} (Toddler)`, `${num}c`, num);
+      } else if (suf === "y" || suf.includes("youth") || suf.includes("big")) {
+        list.push(`${num} (Big Kid)`, `${num} (Youth)`, `${num}Y`, num);
+      } else if (suf === "t" || suf.includes("toddler")) {
+        list.push(`${num}T`, `${num} (Toddler)`, num);
+      } else {
+        list.push(num, `${num} in.`, `${num} (${num})`);
+      }
+    }
+
+    return Array.from(new Set(list.filter(Boolean)));
+  }
+
+  /**
+   * Selects Mercari's Size dropdown ("Select size") when required by the category
+   * (Shoes, Clothing, Kids, etc.). Strictly avoids clicking "Use a listing template".
+   */
+  async function selectMercariSize(rawSize, titleText, itemSpecifics, helpers, debugLog) {
+    const { sleep, selectNativeOption } = helpers;
+
+    const findSizeControl = () => {
+      const direct = document.querySelector(
+        '[data-testid="SizeDropdown"], select[data-testid="Size"], select[name="size"], button[aria-label*="Size" i], [data-testid="Size"]'
+      );
+      if (direct && !/template/i.test(direct.textContent || "")) {
+        const r = direct.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) return direct;
+      }
+
+      // Find the exact "Size" field label and look inside its immediate field container
+      const sizeLabel = Array.from(
+        document.querySelectorAll("label, p, span, div, h3, h4")
+      ).find((el) => {
+        if (el.closest("#rcc-companion-hud") || el.children.length > 0) return false;
+        const r = el.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) return false;
+        return /^size$/i.test((el.textContent || "").trim());
+      });
+      if (sizeLabel) {
+        let box = sizeLabel.parentElement;
+        for (let d = 0; d < 3 && box; d++) {
+          const ctrl = Array.from(
+            box.querySelectorAll('select, button, input, [role="button"], [role="combobox"], div[tabindex]')
+          ).find((c) => {
+            if (c === sizeLabel || c.contains(sizeLabel) || c.closest("#rcc-companion-hud")) return false;
+            const r = c.getBoundingClientRect();
+            if (r.width < 100 || r.height < 28 || r.height > 80) return false;
+            const t = (c.textContent || c.value || "").replace(/\s+/g, " ").trim();
+            if (/template/i.test(t)) return false;
+            return /^select size$/i.test(t) || c.tagName === "SELECT" || (t.length > 0 && t.length < 40);
+          });
+          if (ctrl) return ctrl;
+          box = box.parentElement;
+        }
+      }
+
+      // Fallback: visible control whose exact text is "Select size"
+      return (
+        Array.from(document.querySelectorAll('button, [role="button"], [role="combobox"], div')).find((el) => {
+          if (el.closest("#rcc-companion-hud") || el.children.length > 3) return false;
+          const r = el.getBoundingClientRect();
+          if (r.width < 120 || r.height < 28 || r.height > 80) return false;
+          return /^select size$/i.test((el.textContent || "").replace(/\s+/g, " ").trim());
+        }) || null
+      );
+    };
+
+    const ctrl = findSizeControl();
+    if (!ctrl) {
+      return true; // Size field not shown for this category
+    }
+
+    const currentTxt = (ctrl.value || ctrl.textContent || "").replace(/\s+/g, " ").trim();
+    if (currentTxt && !/^select size$/i.test(currentTxt)) {
+      debugLog.push(`Size: already "${currentTxt}"`);
+      return true;
+    }
+
+    const resolvedSize = extractSizeFallback(rawSize, titleText, itemSpecifics);
+    const candidates = buildMercariSizeCandidates(resolvedSize);
+    if (candidates.length === 0) {
+      debugLog.push("Size: no size value available to pick");
+      return false;
+    }
+
+    const normDec = (s) =>
+      String(s || "")
+        .toLowerCase()
+        .replace(/(?<=\d)\.(?=\d)/g, "__dot__")
+        .replace(/[^a-z0-9_]+/g, " ")
+        .replace(/__dot__/g, ".")
+        .trim();
+
+    const scoreSizeOption = (optText) => {
+      const a = normDec(optText);
+      if (!a || /select size|template/i.test(a)) return 0;
+      let best = 0;
+      for (let idx = 0; idx < candidates.length; idx++) {
+        const b = normDec(candidates[idx]);
+        if (!b) continue;
+        const prioBonus = Math.max(0, 0.04 - idx * 0.008);
+        if (a === b) return 1.0 + prioBonus;
+        const aTokens = a.split(" ");
+        if (b.length <= 4) {
+          if (aTokens.includes(b)) best = Math.max(best, 0.92 + prioBonus);
+        } else if (a.startsWith(b) || b.startsWith(a)) {
+          best = Math.max(best, 0.88 + prioBonus);
+        } else if (a.includes(b)) {
+          best = Math.max(best, 0.82 + prioBonus);
+        }
+      }
+      return best;
+    };
+
+    if (ctrl.tagName === "SELECT") {
+      let bestOpt = null;
+      let bestScore = 0;
+      for (const opt of Array.from(ctrl.options)) {
+        const s = scoreSizeOption(opt.textContent || opt.label || opt.value);
+        if (s > bestScore) {
+          bestScore = s;
+          bestOpt = opt;
+        }
+      }
+      if (bestOpt && bestScore >= 0.82) {
+        ctrl.value = bestOpt.value;
+        ctrl.dispatchEvent(new Event("input", { bubbles: true }));
+        ctrl.dispatchEvent(new Event("change", { bubbles: true }));
+        await sleep(300);
+        debugLog.push(`Size: OK <select> ("${bestOpt.textContent.trim()}")`);
+        return true;
+      }
+      if (selectNativeOption && selectNativeOption(ctrl, candidates)) {
+        await sleep(300);
+        debugLog.push(`Size: OK <select> fallback`);
+        return true;
+      }
+      debugLog.push(`Size: <select> missed ${JSON.stringify(candidates)}`);
+      return false;
+    }
+
+    // Custom Mercari dropdown / modal
+    const beforeSet = new Set(Array.from(document.querySelectorAll("li, button, [role='option'], div")));
+    ctrl.scrollIntoView({ block: "center" });
+    await sleep(150);
+    ctrl.click();
+    await sleep(500);
+
+    // If Mercari somehow opened Templates instead of Size, dismiss it and abort cleanly
+    if (await dismissMercariTemplatesModal(sleep, debugLog)) {
+      return false;
+    }
+
+    const start = Date.now();
+    const isYouth = /\b(\d+(?:\.\d+)?\s*y|big\s*kid|youth)\b/i.test(resolvedSize);
+    while (Date.now() - start < 2400) {
+      const allNodes = Array.from(
+        document.querySelectorAll('[role="option"], [role="listbox"] li, [role="dialog"] button, [role="dialog"] li, li, button, div')
+      ).filter((el) => {
+        if (el === ctrl || ctrl.contains(el) || el.closest("#rcc-companion-hud")) return false;
+        if (el.children.length > 3) return false;
+        const r = el.getBoundingClientRect();
+        if (r.width < 32 || r.height < 20 || r.height > 84) return false;
+        const cs = window.getComputedStyle(el);
+        if (cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0") return false;
+        const txt = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+        if (!txt || txt.length > 48 || /template/i.test(txt)) return false;
+        return !beforeSet.has(el) || el.getAttribute("role") === "option" || Boolean(el.closest('[role="listbox"], [role="dialog"]'));
+      });
+
+      const scored = [];
+      for (const el of allNodes) {
+        const txt = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+        const s = scoreSizeOption(txt);
+        if (s >= 0.85) {
+          scored.push({ el, s, txt });
+        }
+      }
+
+      if (scored.length > 0) {
+        const bestScore = Math.max(...scored.map((x) => x.s));
+        const top = scored.filter((x) => x.s >= bestScore - 0.02);
+        const chosen = isYouth ? top[top.length - 1] : top[0];
+        chosen.el.scrollIntoView({ block: "nearest" });
+        chosen.el.click();
+        await sleep(350);
+        debugLog.push(`Size: OK ("${chosen.txt}")`);
+        return true;
+      }
+      await sleep(220);
+    }
+
+    // Close open size popover if nothing matched
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+    await sleep(200);
+    debugLog.push(`Size: missed ${JSON.stringify(candidates)}`);
+    return false;
+  }
+
+  /**
    * Detects visible red inline validation messages on Mercari /sell/
    */
   function detectMercariValidationError() {
     const knownErrorRe =
-      /floor price needs to be|please select|please enter|is required|must be at least|select a condition|add at least one photo|select a category|enter a valid/i;
+      /can not be empty|cannot be empty|floor price needs to be|please select|please enter|is required|must be at least|select a condition|select a size|add at least one photo|select a category|enter a valid/i;
     const nodes = Array.from(document.querySelectorAll("p, span, div"));
     for (const el of nodes) {
       if (el.closest("#rcc-companion-hud") || el.children.length > 1) continue;
@@ -550,6 +873,7 @@
         sleep,
         clickButtonByText,
         clickMatchingOption,
+        selectNativeOption,
         selectDropdownSequence,
         showRccHud,
       } = window.__rccHelpers;
@@ -848,6 +1172,9 @@
           await sleep(600);
         }
 
+        // Dismiss Mercari "Templates" popup if it opened
+        await dismissMercariTemplatesModal(sleep, debugLog);
+
         // 4. Brand (select real brand or Mercari's "No brand / Not sure" unbranded pill)
         const mercariHelpers = {
           waitForSelector,
@@ -855,6 +1182,7 @@
           sleep,
           clickMatchingOption,
           clickButtonByText,
+          selectNativeOption,
         };
         await selectMercariBrand(payload.brand || "", mercariHelpers, debugLog, false);
 
@@ -866,7 +1194,18 @@
           debugLog
         );
 
+        // 5.2 Size (required for Shoes, Clothing, Kids, etc. — skips automatically if not shown)
+        await dismissMercariTemplatesModal(sleep, debugLog);
+        const sizeMatched = await selectMercariSize(
+          sc.sizeLabel || "",
+          payload.mappedTitle || "",
+          payload.itemSpecifics || {},
+          mercariHelpers,
+          debugLog
+        );
+
         // 5.5 Shipping Carrier (ensure non-Priority Buyer-Pays prepaid carrier is selected)
+        await dismissMercariTemplatesModal(sleep, debugLog);
         await ensureMercariShippingSelected(payload, mercariHelpers, debugLog, false);
 
         // 6. Whole-dollar Price ($5+) + Disable Mercari Smart Pricing
@@ -889,11 +1228,14 @@
         const fieldSummary = [
           `${uploadedCount} photos`,
           conditionMatched ? `Condition ✓ (${targetCond})` : `Condition: pick "${targetCond}"`,
+          sizeMatched ? null : `Size: pick size`,
           `$${Math.max(5, Math.round(Number(payload.suggestedPrice || 0)))}`,
-        ].join(" · ");
+        ]
+          .filter(Boolean)
+          .join(" · ");
 
         if (debugLog.length > 0) {
-          console.log("[RCC Mercari v1.1.1]", debugLog.join(" | "));
+          console.log("[RCC Mercari v1.1.8]", debugLog.join(" | "));
         }
 
         // 7. Auto-Publish: If Condition was selected, wait for photos to settle & click the purple "List" button!
@@ -907,15 +1249,26 @@
 
           await sleep(Math.min(6000, Math.max(1800, uploadedCount * 350)));
 
-          // Double-check Brand, Shipping & Smart pricing right before submitting
+          // Double-check Templates modal, Brand, Size, Shipping & Smart pricing right before submitting
+          await dismissMercariTemplatesModal(sleep, debugLog);
           const brandCheck = document.querySelector(
             'input[data-testid="Brand"], input[placeholder*="brand" i], input[aria-label*="brand" i], input[name="brand"]'
           );
           if (brandCheck && !brandCheck.value.trim()) {
             await selectMercariBrand("", mercariHelpers, debugLog, true);
           }
+          if (!sizeMatched) {
+            await selectMercariSize(
+              sc.sizeLabel || "",
+              payload.mappedTitle || "",
+              payload.itemSpecifics || {},
+              mercariHelpers,
+              debugLog
+            );
+          }
           await ensureMercariShippingSelected(payload, mercariHelpers, debugLog, false);
           await disableMercariSmartPricing(sleep, debugLog);
+          await dismissMercariTemplatesModal(sleep, debugLog);
 
           const findListBtn = () =>
             document.querySelector('button[data-testid="ListButton"]') ||
@@ -933,7 +1286,8 @@
 
             // Handle any optional confirmation modal ("List anyway" / "Confirm" / "List item")
             await sleep(1200);
-            await clickButtonByText([/^list anyway$/i, /^confirm$/i, /^list item$/i], 2000);
+            await dismissMercariTemplatesModal(sleep, debugLog);
+            await clickButtonByText([/^list anyway$/i, /^confirm$/i, /^list item$/i], 1500);
 
             const isOnMercariConfirmationOrItem = () =>
               /\/sell\/confirmation\/m\d{8,14}/i.test(window.location.pathname) ||
@@ -946,10 +1300,22 @@
                 validationError = null;
                 break;
               }
+              await dismissMercariTemplatesModal(sleep, debugLog);
               validationError = detectMercariValidationError();
               if (!validationError) break;
 
               let fixedSomething = false;
+              if (/size/i.test(validationError)) {
+                debugLog.push(`Auto-fix size after error: ${validationError}`);
+                const fixedSize = await selectMercariSize(
+                  sc.sizeLabel || "",
+                  payload.mappedTitle || "",
+                  payload.itemSpecifics || {},
+                  mercariHelpers,
+                  debugLog
+                );
+                if (fixedSize) fixedSomething = true;
+              }
               if (/brand/i.test(validationError)) {
                 debugLog.push(`Auto-fix brand after error: ${validationError}`);
                 await selectMercariBrand("", mercariHelpers, debugLog, true);
@@ -968,6 +1334,7 @@
               if (!fixedSomething) break;
 
               await sleep(400);
+              await dismissMercariTemplatesModal(sleep, debugLog);
               const retryBtn = findListBtn();
               if (!retryBtn) break;
               retryBtn.scrollIntoView({ block: "center" });
@@ -981,12 +1348,18 @@
             }
 
             if (!validationError) {
-              // Wait briefly for SPA redirect to /sell/confirmation/m... or /us/item/m... so we can sync directly too
+              // Wait briefly for SPA redirect to /sell/confirmation/m... or /us/item/m... so we can verify publish!
               let confirmedId = null;
-              for (let w = 0; w < 8; w++) {
+              for (let w = 0; w < 10; w++) {
                 const m = window.location.href.match(/(?:^|[^a-z0-9])(m\d{8,14})(?:$|[^a-z0-9])/i);
                 if (m) {
                   confirmedId = m[1];
+                  break;
+                }
+                if (isOnMercariConfirmationOrItem()) break;
+                const lateErr = detectMercariValidationError();
+                if (lateErr) {
+                  validationError = lateErr;
                   break;
                 }
                 await sleep(500);
@@ -1018,15 +1391,26 @@
                   await sleep(1800);
                   chrome.runtime.sendMessage({ type: "RCC_CLOSE_SENDER_TAB" });
                 }
-              } else {
+                sendResponse({ ok: true, autoPublished: true, externalListingId: confirmedId });
+                return;
+              }
+
+              if (isOnMercariConfirmationOrItem() && !validationError) {
                 showRccHud({
                   title: `Listed on Mercari! (${payload.sku || "SKU"})`,
                   message: `Submitted to Mercari — automatically syncing live link back to Command Center...`,
                   tone: "success",
                 });
+                sendResponse({ ok: true, autoPublished: true });
+                return;
               }
-              sendResponse({ ok: true, autoPublished: true, externalListingId: confirmedId });
-              return;
+
+              // Still on /sell/ with no redirect — fall through to Draft / Quick Fix HUD instead of falsely saying Listed!
+              if (!validationError) {
+                validationError =
+                  detectMercariValidationError() ||
+                  "Mercari stayed on /sell/ — check highlighted field (e.g. Size or Shipping) & click List";
+              }
             }
           }
         }
