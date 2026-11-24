@@ -3069,73 +3069,133 @@ function escapeXml(raw: string): string {
     .replace(/'/g, "&apos;");
 }
 
+function detectImageMime(buf: Buffer, fileName: string): string {
+  if (buf.length >= 4) {
+    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+      return "image/png";
+    }
+    if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) {
+      return "image/gif";
+    }
+    if (
+      buf.length >= 12 &&
+      buf.subarray(0, 4).toString("ascii") === "RIFF" &&
+      buf.subarray(8, 12).toString("ascii") === "WEBP"
+    ) {
+      return "image/webp";
+    }
+  }
+  const lower = fileName.toLowerCase();
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".gif")) return "image/gif";
+  return "image/jpeg";
+}
+
 /**
- * Uploads a JPEG/PNG image binary directly to eBay Picture Services (EPS) via
- * Trading API `UploadSiteHostedPictures` and returns the permanent `i.ebayimg.com` URL.
+ * Uploads a JPEG/PNG/WEBP image binary directly to eBay Picture Services (EPS)
+ * via eBay's modern Commerce Media API (`createImageFromFile` on `apim.ebay.com`)
+ * using the existing `sell.inventory` OAuth scope, returning the permanent
+ * `i.ebayimg.com` HTTPS URL.
+ *
+ * (Replaces legacy Trading API `UploadSiteHostedPictures`, which eBay
+ * decommissioned with HTTP 404 in late 2026.)
  */
 export async function uploadEbayHostedPicture(
   imageBuffer: Buffer,
   fileName = "listing-photo.jpg"
 ): Promise<string> {
   const token = await getEbayAccessToken();
-  const { apiBase } = getEbayBaseUrls();
-  const boundary = `----RCCEbayBoundary${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-
-  const xmlPart = `<?xml version="1.0" encoding="utf-8"?>
-<UploadSiteHostedPicturesRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-  <ErrorLanguage>en_US</ErrorLanguage>
-  <WarningLevel>High</WarningLevel>
-  <PictureSet>Supersize</PictureSet>
-</UploadSiteHostedPicturesRequest>`;
+  const { env } = getEbayBaseUrls();
+  const mediaBase =
+    env === "SANDBOX" ? "https://apim.sandbox.ebay.com" : "https://apim.ebay.com";
+  const endpoint = `${mediaBase}/commerce/media/v1_beta/image/create_image_from_file`;
 
   const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, "_") || "photo.jpg";
-  const headerPart1 = Buffer.from(
-    `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="XML Payload"\r\n` +
-      `Content-Type: text/xml; charset=utf-8\r\n\r\n` +
-      `${xmlPart}\r\n` +
-      `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="image"; filename="${safeName}"\r\n` +
-      `Content-Type: application/octet-stream\r\n\r\n`,
-    "utf8"
-  );
-  const footerPart = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
-  const body = Buffer.concat([headerPart1, imageBuffer, footerPart]);
+  const mimeType = detectImageMime(imageBuffer, safeName);
 
-  const response = await fetch(`${apiBase}/ws/api.dll`, {
-    method: "POST",
-    headers: {
-      "X-EBAY-API-SITEID": "0",
-      "X-EBAY-API-COMPATIBILITY-LEVEL": "1355",
-      "X-EBAY-API-CALL-NAME": "UploadSiteHostedPictures",
-      "X-EBAY-API-IAF-TOKEN": token,
-      "Content-Type": `multipart/form-data; boundary=${boundary}`,
-    },
-    body,
-    cache: "no-store",
-  });
+  const attemptUpload = async (fieldName: "image" | "file") => {
+    const form = new FormData();
+    const blob = new Blob([new Uint8Array(imageBuffer)], { type: mimeType });
+    form.append(fieldName, blob, safeName);
 
-  const text = await response.text();
-  if (!response.ok) {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+      },
+      body: form,
+      cache: "no-store",
+    });
+
+    const text = await response.text();
+    const locationHeader = response.headers.get("location") || "";
+    return { response, text, locationHeader };
+  };
+
+  let attempt = await attemptUpload("image");
+  if (!attempt.response.ok && attempt.response.status === 400) {
+    // Fallback in case eBay's multipart parser expects field name "file"
+    const fallback = await attemptUpload("file");
+    if (fallback.response.ok) {
+      attempt = fallback;
+    }
+  }
+
+  if (!attempt.response.ok) {
+    let errDetail = attempt.text.slice(0, 260);
+    try {
+      const parsed = JSON.parse(attempt.text) as {
+        errors?: Array<{ longMessage?: string; message?: string }>;
+      };
+      const first = parsed.errors?.[0];
+      if (first?.longMessage || first?.message) {
+        errDetail = first.longMessage || first.message || errDetail;
+      }
+    } catch {
+      // keep raw snippet
+    }
     throw new Error(
-      `eBay UploadSiteHostedPictures failed (${response.status}): ${text.slice(0, 220)}`
+      `eBay Media API photo upload failed (${attempt.response.status}): ${errDetail}`
     );
   }
 
-  const ack = extractXmlTag(text, "Ack");
-  if (ack && ack !== "Success" && ack !== "Warning") {
-    const msg =
-      extractXmlTag(text, "LongMessage") ||
-      extractXmlTag(text, "ShortMessage") ||
-      "Picture upload rejected by eBay";
-    throw new Error(`eBay photo upload error: ${decodeXmlEntities(msg)}`);
+  let imageUrl: string | null = null;
+  if (attempt.text.trim()) {
+    try {
+      const parsed = JSON.parse(attempt.text) as { imageUrl?: string };
+      if (parsed.imageUrl) imageUrl = parsed.imageUrl;
+    } catch {
+      // check Location header below
+    }
   }
 
-  const fullUrl = extractXmlTag(text, "FullURL");
-  if (!fullUrl) {
-    throw new Error("eBay UploadSiteHostedPictures did not return a FullURL.");
+  // Some Media API responses return the getImage URI in the Location header
+  if (!imageUrl && attempt.locationHeader) {
+    const getRes = await fetch(attempt.locationHeader, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+      },
+      cache: "no-store",
+    });
+    if (getRes.ok) {
+      const getData = (await getRes.json().catch(() => ({}))) as {
+        imageUrl?: string;
+      };
+      if (getData.imageUrl) imageUrl = getData.imageUrl;
+    }
   }
-  return upgradeEbayImageUrl(fullUrl) || fullUrl;
+
+  if (!imageUrl) {
+    throw new Error(
+      "eBay Media API createImageFromFile succeeded but did not return an imageUrl."
+    );
+  }
+
+  return upgradeEbayImageUrl(imageUrl) || imageUrl;
 }
 
 export interface SuggestedEbayCategory {

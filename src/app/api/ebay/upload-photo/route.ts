@@ -5,9 +5,9 @@ export const maxDuration = 30;
 
 /**
  * POST /api/ebay/upload-photo
- * Uploads a single resized, EXIF-stripped JPEG photo directly to eBay Picture
- * Services (EPS) via `UploadSiteHostedPictures` and returns its permanent
- * `i.ebayimg.com` HTTPS URL.
+ * Uploads a single resized, EXIF-stripped JPEG/PNG photo directly to eBay Picture
+ * Services (EPS) via Commerce Media API (`createImageFromFile`) and returns its
+ * permanent `i.ebayimg.com` HTTPS URL.
  */
 export async function POST(request: Request) {
   try {
