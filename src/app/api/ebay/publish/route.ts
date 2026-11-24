@@ -34,6 +34,7 @@ interface PublishStudioRequest {
   brand?: string | null;
   categoryId?: string | null;
   categoryPath?: string | null;
+  categorySearchQuery?: string | null;
   conditionChoice: StudioConditionChoice;
   conditionDescription?: string | null;
   descriptionPlain: string;
@@ -95,6 +96,8 @@ export async function POST(request: Request) {
   const envReadiness = getEnvReadiness();
   const supabase = getSupabaseServerClient();
 
+  let resolvedCategoryPath = body.categoryPath?.trim() || "";
+
   let ebayResult: {
     itemId: string;
     listingUrl: string;
@@ -104,16 +107,58 @@ export async function POST(request: Request) {
 
   // 1. Publish directly to eBay Production if requested & configured
   if (shouldPublishEbay && isEbayConfigured()) {
-    let categoryId = (body.categoryId || "").trim();
+    const rawCategoryInput = (body.categoryId || "").replace(/^#/, "").trim();
+    let categoryId = /^\d+$/.test(rawCategoryInput) ? rawCategoryInput : "";
+
     if (!categoryId) {
-      const suggestions = await suggestEbayCategories(title);
-      categoryId = suggestions[0]?.categoryId || "";
+      const specsList = Array.isArray(body.itemSpecifics)
+        ? body.itemSpecifics
+        : [];
+      const typeSpec = specsList
+        .find((s) =>
+          /^(type|product\s*type|style|item\s*type)$/i.test(
+            (s?.name || "").trim()
+          )
+        )
+        ?.value?.trim();
+      const cleanBrand = body.brand?.trim() || "";
+      const leafFromPath = resolvedCategoryPath
+        ? resolvedCategoryPath.split(">").pop()?.trim() || ""
+        : "";
+
+      const primaryLookupQuery =
+        (rawCategoryInput && !/^\d+$/.test(rawCategoryInput)
+          ? rawCategoryInput
+          : "") ||
+        body.categorySearchQuery?.trim() ||
+        title;
+
+      const fallbackHints = [
+        title,
+        body.categorySearchQuery?.trim(),
+        leafFromPath,
+        typeSpec && cleanBrand && !/^unbranded$/i.test(cleanBrand)
+          ? `${cleanBrand} ${typeSpec}`
+          : null,
+        typeSpec,
+      ].filter((q): q is string => Boolean(q && q.trim()));
+
+      const suggestions = await suggestEbayCategories(
+        primaryLookupQuery,
+        fallbackHints
+      );
+      if (suggestions[0]) {
+        categoryId = suggestions[0].categoryId;
+        if (!resolvedCategoryPath) {
+          resolvedCategoryPath = suggestions[0].categoryPath;
+        }
+      }
     }
     if (!categoryId) {
       return NextResponse.json(
         {
           error:
-            "Could not auto-detect an eBay Category ID for this title. Try picking a category from the dropdown or refining the title.",
+            "Could not auto-detect an eBay Category ID for this title. Search for a category or enter a numeric eBay Category ID in the eBay Leaf Category field, then try again.",
         },
         { status: 400 }
       );
@@ -205,7 +250,7 @@ export async function POST(request: Request) {
         ebayResult?.conditionName ||
         CONDITION_DISPLAY[body.conditionChoice || "pre_owned"],
       brand: body.brand?.trim() || null,
-      category_hint: body.categoryPath?.trim() || null,
+      category_hint: resolvedCategoryPath || null,
       cogs,
       prep_cost: 0,
       target_price: price,

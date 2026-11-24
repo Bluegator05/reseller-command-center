@@ -337,17 +337,6 @@ Important rules for itemSpecifics:
   const isLocalPickupRecommended =
     Boolean(ai.isLocalPickupRecommended) || weightOz >= 320 || longestSide >= 30;
 
-  const categorySearchQuery = (
-    ai.ebayCategoryQuery ||
-    ai.compSearchQuery ||
-    title
-  ).trim();
-  const compQuery = (ai.compSearchQuery || title).trim();
-
-  // Fetch real leaf eBay categories from eBay Trading API!
-  const suggestedCategories = await suggestEbayCategories(categorySearchQuery);
-  const primaryCat = suggestedCategories[0];
-
   const rawSpecs = Array.isArray(ai.itemSpecifics) ? ai.itemSpecifics : [];
   const itemSpecifics: Array<{ name: string; value: string }> = [];
   const seenNames = new Set<string>();
@@ -363,6 +352,33 @@ Important rules for itemSpecifics:
   if (!seenNames.has("brand") && brand) {
     itemSpecifics.unshift({ name: "Brand", value: brand });
   }
+
+  const categorySearchQuery = (
+    ai.ebayCategoryQuery ||
+    ai.compSearchQuery ||
+    body.whatIsIt ||
+    title
+  ).trim();
+  const compQuery = (ai.compSearchQuery || title).trim();
+  const typeSpec = itemSpecifics.find((s) =>
+    /^(type|product\s*type|style|item\s*type)$/i.test(s.name)
+  )?.value;
+  const extraCategoryQueries = [
+    ai.compSearchQuery,
+    body.whatIsIt,
+    typeSpec && brand && !/^unbranded$/i.test(brand)
+      ? `${brand} ${typeSpec}`
+      : null,
+    typeSpec,
+    title,
+  ].filter((q): q is string => Boolean(q && q.trim()));
+
+  // Fetch real leaf eBay categories from eBay Commerce Taxonomy API (with shorter keyword fallbacks)
+  const suggestedCategories = await suggestEbayCategories(
+    categorySearchQuery,
+    extraCategoryQueries
+  );
+  const primaryCat = suggestedCategories[0];
 
   const facebookCopy = (
     ai.facebookCopy?.trim() ||

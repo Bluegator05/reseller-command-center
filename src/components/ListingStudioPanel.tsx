@@ -16,6 +16,7 @@ import {
   Printer,
   RotateCw,
   Rocket,
+  Search,
   Sparkles,
   Square,
   Trash2,
@@ -25,7 +26,10 @@ import {
   Zap,
 } from "lucide-react";
 import type { ListingStudioDraftResponse } from "@/app/api/ai/listing-studio/route";
-import type { StudioConditionChoice } from "@/lib/ebay";
+import type {
+  StudioConditionChoice,
+  SuggestedEbayCategory,
+} from "@/lib/ebay";
 import { printThermalSkuLabels } from "@/lib/thermal-label";
 import type { InventoryItem, MarketplaceType } from "@/lib/types";
 import { generateSubjectCutoutPng } from "@/lib/white-bg-ai";
@@ -489,6 +493,14 @@ export function ListingStudioPanel({
   const [editBrand, setEditBrand] = useState("");
   const [editCategoryId, setEditCategoryId] = useState("");
   const [editCategoryPath, setEditCategoryPath] = useState("");
+  const [categoryOptions, setCategoryOptions] = useState<
+    SuggestedEbayCategory[]
+  >([]);
+  const [categorySearchQuery, setCategorySearchQuery] = useState("");
+  const [isSearchingCategories, setIsSearchingCategories] = useState(false);
+  const [categorySearchNote, setCategorySearchNote] = useState<string | null>(
+    null
+  );
   const [editCondition, setEditCondition] =
     useState<StudioConditionChoice>("pre_owned");
   const [editCondDesc, setEditCondDesc] = useState("");
@@ -717,6 +729,13 @@ export function ListingStudioPanel({
     setEditBrand(d.brand);
     setEditCategoryId(d.selectedCategoryId);
     setEditCategoryPath(d.selectedCategoryPath);
+    setCategoryOptions(d.suggestedCategories || []);
+    setCategorySearchQuery(d.categorySearchQuery || d.title || "");
+    setCategorySearchNote(
+      d.suggestedCategories.length === 0
+        ? "No eBay category auto-matched yet — search keywords below or enter a numeric Category ID."
+        : null
+    );
     setEditCondition(d.conditionChoice);
     setEditCondDesc(d.conditionDescription);
     setEditDescPlain(d.descriptionPlain);
@@ -735,12 +754,68 @@ export function ListingStudioPanel({
     }
   };
 
+  const handleSearchCategories = async (queryOverride?: string) => {
+    const q = (queryOverride ?? categorySearchQuery).trim() || editTitle.trim();
+    if (!q) {
+      setCategorySearchNote(
+        "Enter 2–4 keywords (e.g. Men T-Shirt) or type a numeric eBay Category ID."
+      );
+      return;
+    }
+
+    setIsSearchingCategories(true);
+    setCategorySearchNote(null);
+    try {
+      const res = await fetch(
+        `/api/ebay/categories?q=${encodeURIComponent(q)}`,
+        { cache: "no-store" }
+      );
+      const data = (await res.json()) as {
+        categories?: SuggestedEbayCategory[];
+        configured?: boolean;
+        error?: string;
+      };
+      if (!res.ok) {
+        throw new Error(data.error || "Category lookup failed");
+      }
+      const next = Array.isArray(data.categories) ? data.categories : [];
+      if (next.length > 0) {
+        setCategoryOptions(next);
+        setEditCategoryId(next[0].categoryId);
+        setEditCategoryPath(next[0].categoryPath);
+        setCategorySearchNote(null);
+      } else {
+        setCategorySearchNote(
+          data.configured === false
+            ? "eBay API credentials not configured — enter a numeric Category ID manually."
+            : `No eBay categories matched "${q}". Try 2–3 broader words or enter a numeric Category ID.`
+        );
+      }
+    } catch (err) {
+      setCategorySearchNote(
+        err instanceof Error
+          ? err.message
+          : "Category lookup failed — enter a numeric Category ID manually."
+      );
+    } finally {
+      setIsSearchingCategories(false);
+    }
+  };
+
   const executePublish = async (overrideDraft?: ListingStudioDraftResponse) => {
     const activeTitle = (overrideDraft?.title ?? editTitle).trim();
     const activePrice = Number(overrideDraft?.suggestedPrice ?? editPrice) || 0;
     const activeFloor = Number(overrideDraft?.floorPrice ?? editFloorPrice) || 0;
-    const activeCatId = (overrideDraft?.selectedCategoryId ?? editCategoryId).trim();
+    const activeCatId = (overrideDraft?.selectedCategoryId ?? editCategoryId)
+      .replace(/^#/, "")
+      .trim();
     const activeCatPath = (overrideDraft?.selectedCategoryPath ?? editCategoryPath).trim();
+    const activeCatQuery = (
+      overrideDraft?.categorySearchQuery ??
+      categorySearchQuery ??
+      draft?.categorySearchQuery ??
+      ""
+    ).trim();
     const activeCond = overrideDraft?.conditionChoice ?? editCondition;
     const activeCondDesc = overrideDraft?.conditionDescription ?? editCondDesc;
     const activeDescPlain = overrideDraft?.descriptionPlain ?? editDescPlain;
@@ -858,6 +933,7 @@ export function ListingStudioPanel({
           brand: activeBrand,
           categoryId: activeCatId,
           categoryPath: activeCatPath,
+          categorySearchQuery: activeCatQuery || null,
           conditionChoice: activeCond,
           conditionDescription: activeCondDesc,
           descriptionPlain: activeDescPlain,
@@ -1008,6 +1084,11 @@ export function ListingStudioPanel({
     setLowestPrice("");
     setFreeShipping(false);
     setDraft(null);
+    setEditCategoryId("");
+    setEditCategoryPath("");
+    setCategoryOptions([]);
+    setCategorySearchQuery("");
+    setCategorySearchNote(null);
     setPublishedResult(null);
     setErrorBanner(null);
     setStatusBanner(null);
@@ -1898,41 +1979,124 @@ export function ListingStudioPanel({
             />
           </div>
 
-          {/* Category + Condition + Price Row */}
-          <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-            <div className="md:col-span-6">
-              <label className="block text-[11px] font-semibold text-[#444B52] mb-1">
-                EBAY LEAF CATEGORY
-              </label>
-              {draft.suggestedCategories.length > 0 ? (
+          {/* Category + Condition + Brand Row */}
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-start">
+            <div className="md:col-span-6 space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <label className="block text-[11px] font-semibold text-[#444B52]">
+                  EBAY LEAF CATEGORY
+                </label>
+                {editCategoryId && /^\d+$/.test(editCategoryId.replace(/^#/, "").trim()) ? (
+                  <span className="px-1.5 py-0.5 rounded bg-[#ECFDF5] text-[#0F766E] border border-[#A7F3D0] text-[10px] font-mono font-semibold">
+                    #{editCategoryId.replace(/^#/, "").trim()}
+                  </span>
+                ) : sellOn !== "facebook" ? (
+                  <span className="px-1.5 py-0.5 rounded bg-[#FFFBEB] text-[#B45309] border border-[#FDE68A] text-[10px] font-semibold">
+                    Pick or enter ID
+                  </span>
+                ) : null}
+              </div>
+
+              {categoryOptions.length > 0 && (
                 <select
+                  aria-label="Suggested eBay leaf categories"
                   value={editCategoryId}
                   onChange={(e) => {
                     const id = e.target.value;
                     setEditCategoryId(id);
-                    const hit = draft.suggestedCategories.find(
+                    const hit = categoryOptions.find(
                       (c) => c.categoryId === id
                     );
-                    if (hit) setEditCategoryPath(hit.categoryPath);
+                    setEditCategoryPath(hit ? hit.categoryPath : "");
+                    setCategorySearchNote(null);
                   }}
                   className="w-full px-3 py-2 text-xs rounded-lg border border-[#DDE2DF] bg-white focus:border-[#0F766E] focus:outline-none cursor-pointer"
                 >
-                  {draft.suggestedCategories.map((c) => (
+                  {!editCategoryId && (
+                    <option value="">Select a suggested eBay category…</option>
+                  )}
+                  {editCategoryId &&
+                    !categoryOptions.some(
+                      (c) => c.categoryId === editCategoryId
+                    ) && (
+                      <option value={editCategoryId}>
+                        Custom eBay Category (#{editCategoryId.replace(/^#/, "")})
+                      </option>
+                    )}
+                  {categoryOptions.map((c) => (
                     <option key={c.categoryId} value={c.categoryId}>
                       {c.categoryPath} (#{c.categoryId}
                       {c.percentItemFound > 0 ? ` · ${c.percentItemFound}%` : ""})
                     </option>
                   ))}
                 </select>
-              ) : (
+              )}
+
+              <div className="flex items-center gap-1.5">
+                <div className="flex-1 flex items-center gap-1">
+                  <input
+                    type="text"
+                    value={categorySearchQuery}
+                    onChange={(e) => setCategorySearchQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        handleSearchCategories();
+                      }
+                    }}
+                    placeholder="Search eBay categories (e.g. Men T-Shirt)…"
+                    aria-label="Search eBay categories"
+                    className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-[#DDE2DF] bg-[#FAFBF9] focus:bg-white focus:border-[#0F766E] focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    disabled={isSearchingCategories}
+                    onClick={() => handleSearchCategories()}
+                    title="Search eBay leaf categories"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[#DDE2DF] bg-white text-[11px] font-semibold text-[#14151A] hover:border-[#0F766E] hover:text-[#0F766E] disabled:opacity-50 shrink-0 cursor-pointer"
+                  >
+                    {isSearchingCategories ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-[#0F766E]" />
+                    ) : (
+                      <Search className="w-3.5 h-3.5" />
+                    )}
+                    <span>Find</span>
+                  </button>
+                </div>
+
                 <input
                   type="text"
+                  inputMode="numeric"
                   value={editCategoryId}
-                  onChange={(e) => setEditCategoryId(e.target.value)}
-                  placeholder="eBay Category ID (auto-detected on publish)"
-                  className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-[#DDE2DF]"
+                  onChange={(e) => {
+                    const cleaned = e.target.value.replace(/[^0-9]/g, "");
+                    setEditCategoryId(cleaned);
+                    const hit = categoryOptions.find(
+                      (c) => c.categoryId === cleaned
+                    );
+                    setEditCategoryPath(hit ? hit.categoryPath : "");
+                    if (cleaned) setCategorySearchNote(null);
+                  }}
+                  placeholder="ID #"
+                  aria-label="eBay Category ID"
+                  title="Enter or paste a numeric eBay Category ID directly"
+                  className="w-[96px] px-2.5 py-1.5 text-xs font-mono rounded-lg border border-[#DDE2DF] bg-white focus:border-[#0F766E] focus:outline-none shrink-0"
                 />
-              )}
+              </div>
+
+              {categorySearchNote ? (
+                <p className="text-[11px] text-[#B45309] leading-snug">
+                  {categorySearchNote}
+                </p>
+              ) : editCategoryId &&
+                !categoryOptions.some((c) => c.categoryId === editCategoryId) ? (
+                <p className="text-[11px] text-[#5C606B] leading-snug">
+                  Using manual eBay Category ID{" "}
+                  <span className="font-mono font-semibold">
+                    #{editCategoryId}
+                  </span>
+                </p>
+              ) : null}
             </div>
 
             <div className="md:col-span-3">

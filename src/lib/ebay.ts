@@ -26,6 +26,9 @@ interface CachedEbayToken {
 }
 
 let cachedToken: CachedEbayToken | null = null;
+let cachedAppToken: CachedEbayToken | null = null;
+
+const EBAY_APP_OAUTH_SCOPE = "https://api.ebay.com/oauth/api_scope";
 
 export interface NormalizedEbayOffer {
   sku: string;
@@ -58,6 +61,13 @@ export function isEbayConfigured(): boolean {
   return getEnvReadiness().isEbayReady;
 }
 
+export function hasEbayAppCredentials(): boolean {
+  return Boolean(
+    process.env.EBAY_CLIENT_ID?.trim() &&
+      process.env.EBAY_CLIENT_SECRET?.trim()
+  );
+}
+
 export function getEbayBaseUrls() {
   const env =
     (process.env.EBAY_ENV || "PRODUCTION").toUpperCase() === "SANDBOX"
@@ -68,6 +78,68 @@ export function getEbayBaseUrls() {
     apiBase: EBAY_API_BASE[env],
     webBase: EBAY_WEB_BASE[env],
   };
+}
+
+/**
+ * Mints an app-only OAuth2 Application Access Token (`client_credentials` grant
+ * with `https://api.ebay.com/oauth/api_scope`), caching it in memory until
+ * 60 seconds before expiry. Required for public Commerce Taxonomy API calls.
+ */
+export async function getEbayAppAccessToken(
+  forceRefresh = false
+): Promise<string> {
+  const now = Date.now();
+  if (!forceRefresh && cachedAppToken && cachedAppToken.expiresAtMs - 60_000 > now) {
+    return cachedAppToken.accessToken;
+  }
+
+  const clientId = process.env.EBAY_CLIENT_ID?.trim();
+  const clientSecret = process.env.EBAY_CLIENT_SECRET?.trim();
+
+  if (!clientId || !clientSecret) {
+    throw new Error(
+      "Missing eBay application credentials (EBAY_CLIENT_ID, EBAY_CLIENT_SECRET)."
+    );
+  }
+
+  const { apiBase } = getEbayBaseUrls();
+  const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString(
+    "base64"
+  );
+
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    scope: EBAY_APP_OAUTH_SCOPE,
+  });
+
+  const response = await fetch(`${apiBase}/identity/v1/oauth2/token`, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${basicAuth}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: body.toString(),
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(
+      `eBay app OAuth client_credentials token failed (${response.status}): ${errText}`
+    );
+  }
+
+  const data = (await response.json()) as {
+    access_token: string;
+    expires_in: number;
+  };
+
+  cachedAppToken = {
+    accessToken: data.access_token,
+    expiresAtMs: now + (data.expires_in || 7200) * 1000,
+  };
+
+  return cachedAppToken.accessToken;
 }
 
 /**
@@ -3221,45 +3293,357 @@ export interface SuggestedEbayCategory {
   percentItemFound: number;
 }
 
-/**
- * Fetches top real leaf eBay categories for a search query via Trading API
- * `GetSuggestedCategories` (falls back gracefully to empty array if offline).
- */
-export async function suggestEbayCategories(
-  query: string
-): Promise<SuggestedEbayCategory[]> {
-  const cleanQuery = query.trim().slice(0, 120);
-  if (!cleanQuery || !isEbayConfigured()) return [];
+interface EbayTaxonomyCategorySuggestion {
+  category?: {
+    categoryId?: string;
+    categoryName?: string;
+  };
+  categoryTreeNodeAncestors?: Array<{
+    categoryId?: string;
+    categoryName?: string;
+    categoryTreeNodeLevel?: number;
+  }>;
+  categoryTreeNodeLevel?: number;
+  relevancy?: string;
+}
 
-  try {
-    const xml = await ebayTradingRequest(
-      "GetSuggestedCategories",
-      `<Query>${escapeXml(cleanQuery)}</Query>`
-    );
+interface EbayCategorySuggestionsResponse {
+  categorySuggestions?: EbayTaxonomyCategorySuggestion[];
+  categoryTreeId?: string;
+  categoryTreeVersion?: string;
+}
 
-    const blocks = extractAllXmlTags(xml, "SuggestedCategory");
-    const out: SuggestedEbayCategory[] = [];
-    for (const block of blocks.slice(0, 6)) {
-      const catBlock = extractXmlTag(block, "Category") || block;
-      const categoryId = extractXmlTag(catBlock, "CategoryID");
-      const categoryName = extractXmlTag(catBlock, "CategoryName");
-      const parents = extractAllXmlTags(catBlock, "CategoryParentName").map((p) =>
-        decodeXmlEntities(p)
-      );
-      const pct = Number(extractXmlTag(block, "PercentItemFound") || 0);
-      if (!categoryId || !categoryName) continue;
-      out.push({
-        categoryId,
-        categoryName,
-        categoryPath: [...parents, categoryName].join(" > "),
-        percentItemFound: pct,
-      });
+const CATEGORY_QUERY_NOISE_WORDS = new Set([
+  "nwt",
+  "nwot",
+  "nib",
+  "bnib",
+  "bnwt",
+  "euc",
+  "guc",
+  "vguc",
+  "pre-owned",
+  "preowned",
+  "used",
+  "new",
+  "sealed",
+  "open",
+  "opened",
+  "box",
+  "tested",
+  "works",
+  "working",
+  "untested",
+  "mint",
+  "excellent",
+  "good",
+  "great",
+  "clean",
+  "nice",
+  "rare",
+  "htf",
+  "vintage",
+  "vtg",
+  "retro",
+  "lot",
+  "bundle",
+  "free",
+  "ship",
+  "shipping",
+  "fast",
+  "read",
+  "see",
+  "photos",
+  "pics",
+  "as",
+  "is",
+  "for",
+  "parts",
+  "repair",
+  "only",
+  "w",
+  "with",
+  "without",
+  "no",
+  "the",
+  "and",
+  "or",
+  "of",
+  "in",
+  "on",
+  "by",
+  "to",
+  "a",
+  "an",
+  "size",
+  "sz",
+  "xs",
+  "sm",
+  "md",
+  "lg",
+  "xl",
+  "xxl",
+  "xxxl",
+  "2xl",
+  "3xl",
+  "4xl",
+  "small",
+  "medium",
+  "large",
+  "black",
+  "white",
+  "blue",
+  "red",
+  "green",
+  "pink",
+  "purple",
+  "yellow",
+  "orange",
+  "brown",
+  "gray",
+  "grey",
+  "beige",
+  "tan",
+  "navy",
+  "silver",
+  "gold",
+  "cream",
+  "ivory",
+  "multicolor",
+  "multi",
+]);
+
+function cleanTaxonomyQueryText(raw: string): string {
+  return raw
+    .replace(/['’]/g, "")
+    .replace(/[|\\/()[\]{}"`,;:•–—!?*#@$%+=~^]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractMeaningfulKeywords(raw: string): string[] {
+  const cleaned = cleanTaxonomyQueryText(raw);
+  if (!cleaned) return [];
+  return cleaned
+    .split(" ")
+    .map((w) => w.replace(/^-+|-+$/g, ""))
+    .filter((w) => {
+      if (w.length < 2) return false;
+      // Drop pure numbers, dimensions (e.g. 9x9, 12oz), and alphanumeric model codes containing digits
+      if (/\d/.test(w)) return false;
+      const lower = w.toLowerCase();
+      if (CATEGORY_QUERY_NOISE_WORDS.has(lower)) return false;
+      return true;
+    });
+}
+
+function buildCategoryFallbackQueries(
+  primaryQuery: string,
+  extraQueries?: string[]
+): string[] {
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+
+  const pushCandidate = (q?: string | null) => {
+    if (!q) return;
+    const normalized = q.replace(/\s+/g, " ").trim().slice(0, 100);
+    if (normalized.length < 2) return;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push(normalized);
+  };
+
+  // 1. Exact primary query first
+  pushCandidate(primaryQuery);
+
+  // 2. Explicit extra hints provided by caller (e.g. AI category query, seller's "what is it", item specific Type)
+  for (const extra of extraQueries || []) {
+    pushCandidate(extra);
+  }
+
+  // 3. Punctuation-cleaned primary query (when concise) + progressively shorter keyword slices
+  const cleanedPrimary = cleanTaxonomyQueryText(primaryQuery);
+  if (cleanedPrimary.split(" ").length <= 7) {
+    pushCandidate(cleanedPrimary);
+  }
+
+  const meaningful = extractMeaningfulKeywords(primaryQuery);
+  if (meaningful.length > 0) {
+    if (meaningful.length > 5) {
+      pushCandidate(meaningful.slice(0, 5).join(" "));
     }
-    return out;
-  } catch (err) {
-    console.warn("[ebay] GetSuggestedCategories warning:", err);
+    if (meaningful.length >= 4) {
+      pushCandidate(meaningful.slice(-4).join(" "));
+    }
+    if (meaningful.length >= 3) {
+      pushCandidate(meaningful.slice(-3).join(" "));
+      pushCandidate(meaningful.slice(0, 3).join(" "));
+    }
+    if (meaningful.length >= 2) {
+      pushCandidate(meaningful.slice(-2).join(" "));
+      pushCandidate(meaningful.slice(0, 2).join(" "));
+    }
+    // Last-resort single product noun (often the final word in an English title)
+    const lastWord = meaningful[meaningful.length - 1];
+    if (lastWord && lastWord.length >= 3) {
+      pushCandidate(lastWord);
+    }
+  } else {
+    const rawWords = cleanedPrimary.split(" ").filter((w) => w.length >= 2);
+    if (rawWords.length > 4) pushCandidate(rawWords.slice(0, 4).join(" "));
+    if (rawWords.length >= 2) pushCandidate(rawWords.slice(-2).join(" "));
+  }
+
+  // Also add short fallback slices from extraQueries if primary had few meaningful words
+  if (candidates.length < 4 && extraQueries?.length) {
+    for (const extra of extraQueries) {
+      const words = extractMeaningfulKeywords(extra);
+      if (words.length >= 2) pushCandidate(words.slice(-2).join(" "));
+      if (words.length >= 1 && words[words.length - 1].length >= 3) {
+        pushCandidate(words[words.length - 1]);
+      }
+    }
+  }
+
+  return candidates.slice(0, 8);
+}
+
+function parseTaxonomySuggestions(
+  data: EbayCategorySuggestionsResponse
+): SuggestedEbayCategory[] {
+  const rawList = Array.isArray(data.categorySuggestions)
+    ? data.categorySuggestions
+    : [];
+  const out: SuggestedEbayCategory[] = [];
+  const seenIds = new Set<string>();
+
+  for (const item of rawList) {
+    const categoryId = item.category?.categoryId?.trim();
+    const categoryName = item.category?.categoryName?.trim();
+    if (!categoryId || !categoryName || seenIds.has(categoryId)) continue;
+    seenIds.add(categoryId);
+
+    const rawAncestors = Array.isArray(item.categoryTreeNodeAncestors)
+      ? item.categoryTreeNodeAncestors
+      : [];
+    const hasLevels = rawAncestors.some(
+      (a) => typeof a.categoryTreeNodeLevel === "number"
+    );
+    const orderedAncestors = hasLevels
+      ? [...rawAncestors].sort(
+          (a, b) =>
+            (a.categoryTreeNodeLevel ?? 999) - (b.categoryTreeNodeLevel ?? 999)
+        )
+      : [...rawAncestors].reverse();
+
+    const parentNames = orderedAncestors
+      .filter((a) => {
+        const name = a.categoryName?.trim();
+        if (!name || name.toLowerCase() === "root") return false;
+        if (a.categoryTreeNodeLevel === 0) return false;
+        return true;
+      })
+      .map((a) => a.categoryName!.trim());
+
+    out.push({
+      categoryId,
+      categoryName,
+      categoryPath: [...parentNames, categoryName].join(" > "),
+      percentItemFound: 0,
+    });
+
+    if (out.length >= 8) break;
+  }
+
+  return out;
+}
+
+async function fetchTaxonomyCategorySuggestionsOnce(
+  query: string,
+  categoryTreeId = "0"
+): Promise<SuggestedEbayCategory[]> {
+  const { apiBase } = getEbayBaseUrls();
+  const url = `${apiBase}/commerce/taxonomy/v1/category_tree/${encodeURIComponent(
+    categoryTreeId
+  )}/get_category_suggestions?q=${encodeURIComponent(query)}`;
+
+  const sendRequest = async (forceRefreshToken: boolean): Promise<Response> => {
+    const appToken = await getEbayAppAccessToken(forceRefreshToken);
+    return fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${appToken}`,
+        Accept: "application/json",
+        "Content-Language": "en-US",
+      },
+      cache: "no-store",
+    });
+  };
+
+  let response = await sendRequest(false);
+  if (response.status === 401) {
+    // Refresh cached app token once in case it was invalidated early
+    response = await sendRequest(true);
+  }
+
+  if (response.status === 204 || response.status === 404) {
     return [];
   }
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => "");
+    throw new Error(
+      `eBay Commerce Taxonomy get_category_suggestions failed (${response.status}): ${errText.slice(0, 240)}`
+    );
+  }
+
+  const rawText = await response.text();
+  if (!rawText.trim()) return [];
+
+  const data = JSON.parse(rawText) as EbayCategorySuggestionsResponse;
+  return parseTaxonomySuggestions(data);
+}
+
+/**
+ * Fetches top real leaf eBay categories for a search query via eBay's Commerce
+ * Taxonomy API (`GET /commerce/taxonomy/v1/category_tree/0/get_category_suggestions`)
+ * authenticated with an app-only `client_credentials` OAuth token
+ * (`https://api.ebay.com/oauth/api_scope`). Automatically falls back to shorter,
+ * cleaner keyword queries if a full 80-char listing title returns no suggestions.
+ */
+export async function suggestEbayCategories(
+  query: string,
+  extraQueries?: string[]
+): Promise<SuggestedEbayCategory[]> {
+  if (!hasEbayAppCredentials()) return [];
+
+  const candidates = buildCategoryFallbackQueries(query, extraQueries);
+  if (candidates.length === 0) return [];
+
+  for (const candidate of candidates) {
+    try {
+      const suggestions = await fetchTaxonomyCategorySuggestionsOnce(
+        candidate,
+        "0"
+      );
+      if (suggestions.length > 0) {
+        return suggestions;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err || "");
+      console.warn(
+        `[ebay] Commerce Taxonomy get_category_suggestions("${candidate}") warning:`,
+        msg
+      );
+      // Stop immediately if OAuth app token minting itself failed
+      if (/client_credentials|Missing eBay application credentials/i.test(msg)) {
+        return [];
+      }
+    }
+  }
+
+  return [];
 }
 
 export type StudioConditionChoice =
