@@ -34,6 +34,7 @@ import type {
 } from "@/lib/types";
 
 type TimeRangePreset = "all" | "7d" | "30d" | "90d" | "365d" | "custom";
+type FulfillmentViewFilter = "to_ship" | "all" | "shipped" | "returns";
 
 interface SalesLedgerPanelProps {
   activeItems: StaleRadarRow[];
@@ -128,6 +129,8 @@ export function SalesLedgerPanel({
   );
   const [missingDataOnly, setMissingDataOnly] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [fulfillmentFilter, setFulfillmentFilter] =
+    useState<FulfillmentViewFilter>("to_ship");
 
   const delistJobs = useMemo(
     () => recentJobs.filter((j) => j.action === "delist"),
@@ -245,6 +248,26 @@ export function SalesLedgerPanel({
     [salesOrders]
   );
 
+  const fulfillmentCounts = useMemo(() => {
+    let toShip = 0;
+    let shipped = 0;
+    let returns = 0;
+    for (const o of salesOrders) {
+      if (o.fulfillment_status === "to_ship" || o.fulfillment_status === "picked") {
+        toShip += 1;
+      } else if (
+        o.fulfillment_status === "returned" ||
+        o.fulfillment_status === "partial_refund" ||
+        o.fulfillment_status === "unpaid"
+      ) {
+        returns += 1;
+      } else {
+        shipped += 1;
+      }
+    }
+    return { toShip, shipped, returns, all: salesOrders.length };
+  }, [salesOrders]);
+
   const filteredOrders = useMemo(() => {
     const dayMs = 24 * 60 * 60 * 1000;
     const startMs =
@@ -270,7 +293,41 @@ export function SalesLedgerPanel({
       .split(/\s+/)
       .filter(Boolean);
 
+    // When actively typing a search query while on default "Needs Shipping",
+    // search across ALL sales so looking up past orders works in one step.
+    const effectiveFulfillmentFilter: FulfillmentViewFilter =
+      searchTokens.length > 0 && fulfillmentFilter === "to_ship"
+        ? "all"
+        : fulfillmentFilter;
+
     return salesOrders.filter((o) => {
+      if (effectiveFulfillmentFilter === "to_ship") {
+        if (
+          o.fulfillment_status !== "to_ship" &&
+          o.fulfillment_status !== "picked"
+        ) {
+          return false;
+        }
+      } else if (effectiveFulfillmentFilter === "shipped") {
+        if (
+          o.fulfillment_status === "to_ship" ||
+          o.fulfillment_status === "picked" ||
+          o.fulfillment_status === "returned" ||
+          o.fulfillment_status === "partial_refund" ||
+          o.fulfillment_status === "unpaid"
+        ) {
+          return false;
+        }
+      } else if (effectiveFulfillmentFilter === "returns") {
+        if (
+          o.fulfillment_status !== "returned" &&
+          o.fulfillment_status !== "partial_refund" &&
+          o.fulfillment_status !== "unpaid"
+        ) {
+          return false;
+        }
+      }
+
       if (channelFilter !== "all" && o.marketplace !== channelFilter) {
         return false;
       }
@@ -315,6 +372,7 @@ export function SalesLedgerPanel({
     customEnd,
     channelFilter,
     missingDataOnly,
+    fulfillmentFilter,
     searchQuery,
     mountNow,
   ]);
@@ -753,26 +811,77 @@ export function SalesLedgerPanel({
         <>
       {/* Sales Date & Marketplace Filter Toolbar */}
       <div className="bg-white border border-[#E4E4DD] rounded-xl p-3.5 shadow-[0_1px_2px_rgba(20,21,26,0.03)] space-y-3">
+        {/* Status / Fulfillment View Row (Default: Needs Shipping) */}
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#5C606B] mr-1">
-              <Calendar className="w-3.5 h-3.5 text-[#0F766E]" />
-              Period:
+              <Truck className="w-3.5 h-3.5 text-[#0F766E]" />
+              Show:
             </span>
-            {rangeButtons.map((btn) => (
-              <button
-                key={btn.key}
-                type="button"
-                onClick={() => setTimeRange(btn.key)}
-                className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition cursor-pointer ${
-                  timeRange === btn.key
-                    ? "bg-[#0F766E] text-white"
-                    : "bg-[#F2F4F3] text-[#444B52] hover:bg-[#E7ECEA]"
-                }`}
-              >
-                {btn.label}
-              </button>
-            ))}
+            {(
+              [
+                {
+                  key: "to_ship" as const,
+                  label: "Needs Shipping",
+                  count: fulfillmentCounts.toShip,
+                  accent: true,
+                },
+                {
+                  key: "all" as const,
+                  label: "All Sales",
+                  count: fulfillmentCounts.all,
+                  accent: false,
+                },
+                {
+                  key: "shipped" as const,
+                  label: "Shipped",
+                  count: fulfillmentCounts.shipped,
+                  accent: false,
+                },
+                {
+                  key: "returns" as const,
+                  label: "Returns / Refunds",
+                  count: fulfillmentCounts.returns,
+                  accent: false,
+                },
+              ] as const
+            ).map((opt) => {
+              const isActive = fulfillmentFilter === opt.key;
+              return (
+                <button
+                  key={opt.key}
+                  type="button"
+                  onClick={() => setFulfillmentFilter(opt.key)}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer border ${
+                    isActive
+                      ? opt.accent
+                        ? "bg-[#B45309] text-white border-[#B45309]"
+                        : "bg-[#0F766E] text-white border-[#0F766E]"
+                      : opt.accent && opt.count > 0
+                        ? "bg-[#FFFBEB] text-[#B45309] border-[#FDE68A] hover:bg-[#FEF3C7]"
+                        : "bg-[#F2F4F3] text-[#444B52] border-transparent hover:bg-[#E7ECEA]"
+                  }`}
+                >
+                  <span>{opt.label}</span>
+                  <span
+                    className={`font-mono text-[11px] px-1.5 rounded ${
+                      isActive
+                        ? "bg-white/20 text-white"
+                        : opt.accent && opt.count > 0
+                          ? "bg-white text-[#B45309]"
+                          : "bg-white text-[#5C606B]"
+                    }`}
+                  >
+                    {opt.count}
+                  </span>
+                </button>
+              );
+            })}
+            {searchQuery.trim().length > 0 && fulfillmentFilter === "to_ship" && (
+              <span className="text-[11px] font-medium text-[#0F766E] bg-[#ECFDF5] border border-[#A7F3D0] px-2 py-0.5 rounded-md">
+                Searching all sales
+              </span>
+            )}
           </div>
 
           <button
@@ -784,6 +893,34 @@ export function SalesLedgerPanel({
             <Download className="w-3.5 h-3.5" />
             Export Schedule C CSV ({filteredOrders.length})
           </button>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-[#F1F1EC]">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#5C606B] mr-1">
+              <Calendar className="w-3.5 h-3.5 text-[#0F766E]" />
+              Period:
+            </span>
+            {rangeButtons.map((btn) => (
+              <button
+                key={btn.key}
+                type="button"
+                onClick={() => {
+                  setTimeRange(btn.key);
+                  if (fulfillmentFilter === "to_ship") {
+                    setFulfillmentFilter("all");
+                  }
+                }}
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition cursor-pointer ${
+                  timeRange === btn.key
+                    ? "bg-[#0F766E] text-white"
+                    : "bg-[#F2F4F3] text-[#444B52] hover:bg-[#E7ECEA]"
+                }`}
+              >
+                {btn.label}
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-[#F1F1EC]">
@@ -809,7 +946,13 @@ export function SalesLedgerPanel({
             ))}
             <button
               type="button"
-              onClick={() => setMissingDataOnly((v) => !v)}
+              onClick={() => {
+                const next = !missingDataOnly;
+                setMissingDataOnly(next);
+                if (next && fulfillmentFilter === "to_ship") {
+                  setFulfillmentFilter("all");
+                }
+              }}
               title="Show sold orders missing COGS ($0) or shipping cost ($0)"
               className={`ml-1 px-2.5 py-1 rounded-md text-[11px] font-semibold transition cursor-pointer border ${
                 missingDataOnly
@@ -1231,10 +1374,27 @@ export function SalesLedgerPanel({
 
       {/* Sales Orders Ledger Table */}
       <div className="bg-white border border-[#E4E4DD] rounded-xl shadow-[0_1px_2px_rgba(20,21,26,0.03)] overflow-hidden">
-        <div className="px-4 py-3 border-b border-[#ECECE6] bg-[#FAF9F6] flex items-center justify-between">
-          <h2 className="text-xs font-semibold uppercase tracking-[0.06em] text-[#14151A]">
-            Sales Ledger (sales_orders)
-          </h2>
+        <div className="px-4 py-3 border-b border-[#ECECE6] bg-[#FAF9F6] flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <h2 className="text-xs font-semibold uppercase tracking-[0.06em] text-[#14151A]">
+              {fulfillmentFilter === "to_ship" && !searchQuery.trim()
+                ? "Orders Awaiting Shipment"
+                : fulfillmentFilter === "shipped"
+                  ? "Shipped Sales Ledger"
+                  : fulfillmentFilter === "returns"
+                    ? "Returns & Refunds"
+                    : "Sales Ledger (All Orders)"}
+            </h2>
+            {fulfillmentFilter === "to_ship" && !searchQuery.trim() && (
+              <button
+                type="button"
+                onClick={() => setFulfillmentFilter("all")}
+                className="px-2 py-0.5 rounded-md text-[11px] font-semibold text-[#0F766E] bg-[#ECFDF5] border border-[#A7F3D0] hover:bg-[#D1FAE5] transition cursor-pointer"
+              >
+                Show All {salesOrders.length} Sales
+              </button>
+            )}
+          </div>
           <span className="font-mono text-xs text-[#5C606B]">
             Showing {filteredOrders.length} of {salesOrders.length} sales
           </span>
@@ -1250,7 +1410,7 @@ export function SalesLedgerPanel({
                 <th className="py-2.5 px-3">Fees / Ship / COGS</th>
                 <th className="py-2.5 px-3">True Net Profit</th>
                 <th className="py-2.5 pl-3 pr-4 text-right">
-                  Auto-Delisted Channels
+                  Actions / Delists
                 </th>
               </tr>
             </thead>
@@ -1261,7 +1421,24 @@ export function SalesLedgerPanel({
                     colSpan={6}
                     className="py-10 text-center text-xs text-[#5C606B]"
                   >
-                    No sales match the selected date range and channel filter.
+                    {fulfillmentFilter === "to_ship" &&
+                    !searchQuery.trim() &&
+                    salesOrders.length > 0 ? (
+                      <div className="flex flex-col items-center gap-2.5">
+                        <span className="text-sm font-semibold text-[#14151A]">
+                          All caught up — no orders waiting to be shipped!
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setFulfillmentFilter("all")}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#0F766E] text-white hover:bg-[#0B5B55] transition cursor-pointer"
+                        >
+                          View All {salesOrders.length} Past Sales
+                        </button>
+                      </div>
+                    ) : (
+                      "No sales match the selected filters."
+                    )}
                   </td>
                 </tr>
               ) : (
@@ -1389,6 +1566,23 @@ export function SalesLedgerPanel({
                     <td className="py-3 pl-3 pr-4 text-right whitespace-nowrap">
                       <div className="inline-flex items-center gap-1.5">
                         {order.delisted_channels.map((ch) => channelPill(ch))}
+                        {(order.fulfillment_status === "to_ship" ||
+                          order.fulfillment_status === "picked") && (
+                          <button
+                            type="button"
+                            disabled={busyOrderId === order.id}
+                            onClick={() => handlePickStatus(order, "shipped")}
+                            title="Mark order as shipped"
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold bg-[#0F766E] text-white hover:bg-[#0B5B55] disabled:opacity-50 transition cursor-pointer"
+                          >
+                            {busyOrderId === order.id ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Truck className="w-3 h-3" />
+                            )}
+                            Mark Shipped
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => openReturnModal(order)}
