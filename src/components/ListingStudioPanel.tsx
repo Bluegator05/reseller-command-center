@@ -28,10 +28,13 @@ import type { ListingStudioDraftResponse } from "@/app/api/ai/listing-studio/rou
 import type { StudioConditionChoice } from "@/lib/ebay";
 import { printThermalSkuLabels } from "@/lib/thermal-label";
 import type { InventoryItem, MarketplaceType } from "@/lib/types";
+import { generateSubjectCutoutPng } from "@/lib/white-bg-ai";
 import {
   PhotoCropModal,
   type NormalizedCropRect,
 } from "./PhotoCropModal";
+
+const MAX_STUDIO_PHOTOS = 24;
 
 interface ListingStudioPanelProps {
   draftItems: InventoryItem[];
@@ -48,6 +51,7 @@ interface StudioPhoto {
   name: string;
   originalDataUrl: string; // EXIF-stripped resized <= 1600px JPEG
   processedDataUrl: string; // after rotation + crop + enhance + whiteBg
+  cutoutDataUrl?: string | null; // cached AI transparent PNG cutout of originalDataUrl
   rotation: number; // 0 | 90 | 180 | 270
   crop: NormalizedCropRect | null;
   enhanced: boolean;
@@ -170,8 +174,9 @@ async function normalizeUploadedPhoto(file: File): Promise<string> {
 
 /**
  * Applies optional Rotation, Crop, Auto-Enhance (brightness/contrast/saturation boost),
- * and White Studio Background (edge-flood corner-color removal onto a crisp #FFFFFF
- * 1:1 studio canvas) cleanly in the browser without modifying the original photo.
+ * and White Studio Background (using the neural AI transparent PNG cutout centered
+ * onto a crisp #FFFFFF 1:1 studio canvas) cleanly in the browser without modifying
+ * the original photo.
  */
 async function renderProcessedPhoto(
   originalDataUrl: string,
@@ -180,17 +185,21 @@ async function renderProcessedPhoto(
     crop: NormalizedCropRect | null;
     enhanced: boolean;
     whiteBg: boolean;
+    cutoutDataUrl?: string | null;
   }
 ): Promise<string> {
   if (opts.rotation === 0 && !opts.crop && !opts.enhanced && !opts.whiteBg) {
     return originalDataUrl;
   }
 
+  const useCutout = Boolean(opts.whiteBg && opts.cutoutDataUrl);
+  const sourceUrl = useCutout ? opts.cutoutDataUrl! : originalDataUrl;
+
   const img = await new Promise<HTMLImageElement>((resolve, reject) => {
     const el = new Image();
     el.onload = () => resolve(el);
     el.onerror = () => reject(new Error("Image processing failed"));
-    el.src = originalDataUrl;
+    el.src = sourceUrl;
   });
 
   const rad = ((opts.rotation % 360) * Math.PI) / 180;
@@ -198,20 +207,24 @@ async function renderProcessedPhoto(
   const rotW = rotated ? img.naturalHeight : img.naturalWidth;
   const rotH = rotated ? img.naturalWidth : img.naturalHeight;
 
-  // Step 1: Draw rotated image onto intermediate canvas
+  // Step 1: Draw rotated image onto intermediate canvas (transparent when compositing cutout)
   const rotCanvas = document.createElement("canvas");
   rotCanvas.width = rotW;
   rotCanvas.height = rotH;
-  const rotCtx = rotCanvas.getContext("2d");
+  const rotCtx = rotCanvas.getContext("2d", { willReadFrequently: true });
   if (!rotCtx) return originalDataUrl;
 
-  rotCtx.fillStyle = "#FFFFFF";
-  rotCtx.fillRect(0, 0, rotW, rotH);
+  if (!useCutout) {
+    rotCtx.fillStyle = "#FFFFFF";
+    rotCtx.fillRect(0, 0, rotW, rotH);
+  }
   rotCtx.save();
   rotCtx.translate(rotW / 2, rotH / 2);
   rotCtx.rotate(rad);
   if (opts.enhanced) {
-    rotCtx.filter = "brightness(1.08) contrast(1.09) saturate(1.07)";
+    rotCtx.filter = useCutout
+      ? "brightness(1.06) contrast(1.07) saturate(1.06)"
+      : "brightness(1.08) contrast(1.09) saturate(1.07)";
   }
   rotCtx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
   rotCtx.restore();
@@ -226,86 +239,51 @@ async function renderProcessedPhoto(
     ? Math.max(16, Math.round(opts.crop.h * rotH))
     : rotH;
 
-  const canvas = document.createElement("canvas");
-  canvas.width = srcW;
-  canvas.height = srcH;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  if (!ctx) return originalDataUrl;
+  if (useCutout) {
+    // Extract cropped transparent subject
+    const subCanvas = document.createElement("canvas");
+    subCanvas.width = srcW;
+    subCanvas.height = srcH;
+    const subCtx = subCanvas.getContext("2d", { willReadFrequently: true });
+    if (!subCtx) return originalDataUrl;
+    subCtx.drawImage(rotCanvas, cropX, cropY, srcW, srcH, 0, 0, srcW, srcH);
 
-  ctx.fillStyle = "#FFFFFF";
-  ctx.fillRect(0, 0, srcW, srcH);
-  ctx.drawImage(rotCanvas, cropX, cropY, srcW, srcH, 0, 0, srcW, srcH);
+    // Auto-trim transparent border around subject when no manual crop was specified
+    let trimX = 0;
+    let trimY = 0;
+    let trimW = srcW;
+    let trimH = srcH;
 
-  if (opts.whiteBg) {
-    const imgData = ctx.getImageData(0, 0, srcW, srcH);
-    const data = imgData.data;
-
-    // Sample the 4 corners to detect the backdrop color
-    const samplePx = (x: number, y: number) => {
-      const idx = (y * srcW + x) * 4;
-      return [data[idx], data[idx + 1], data[idx + 2]];
-    };
-    const m = Math.max(2, Math.min(12, Math.floor(Math.min(srcW, srcH) * 0.02)));
-    const corners = [
-      samplePx(m, m),
-      samplePx(srcW - 1 - m, m),
-      samplePx(m, srcH - 1 - m),
-      samplePx(srcW - 1 - m, srcH - 1 - m),
-    ];
-    const bgR = Math.round(corners.reduce((s, c) => s + c[0], 0) / 4);
-    const bgG = Math.round(corners.reduce((s, c) => s + c[1], 0) / 4);
-    const bgB = Math.round(corners.reduce((s, c) => s + c[2], 0) / 4);
-
-    // Flood-fill from the outer border only so interior light areas of the item are never erased
-    const visited = new Uint8Array(srcW * srcH);
-    const queue = new Int32Array(srcW * srcH);
-    let head = 0;
-    let tail = 0;
-    const tol = 46;
-
-    const matchesBg = (idx4: number) => {
-      const dr = data[idx4] - bgR;
-      const dg = data[idx4 + 1] - bgG;
-      const db = data[idx4 + 2] - bgB;
-      return Math.abs(dr) + Math.abs(dg) + Math.abs(db) <= tol * 2.2;
-    };
-
-    const enqueue = (x: number, y: number) => {
-      const pos = y * srcW + x;
-      if (visited[pos]) return;
-      const idx4 = pos * 4;
-      if (!matchesBg(idx4)) return;
-      visited[pos] = 1;
-      queue[tail++] = pos;
-    };
-
-    for (let x = 0; x < srcW; x++) {
-      enqueue(x, 0);
-      enqueue(x, srcH - 1);
-    }
-    for (let y = 0; y < srcH; y++) {
-      enqueue(0, y);
-      enqueue(srcW - 1, y);
+    if (!opts.crop) {
+      const alphaData = subCtx.getImageData(0, 0, srcW, srcH).data;
+      let minX = srcW;
+      let minY = srcH;
+      let maxX = -1;
+      let maxY = -1;
+      for (let y = 0; y < srcH; y++) {
+        const rowOffset = y * srcW;
+        for (let x = 0; x < srcW; x++) {
+          if (alphaData[(rowOffset + x) * 4 + 3] > 20) {
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+          }
+        }
+      }
+      if (maxX > minX + 16 && maxY > minY + 16) {
+        trimX = minX;
+        trimY = minY;
+        trimW = maxX - minX + 1;
+        trimH = maxY - minY + 1;
+      }
     }
 
-    while (head < tail) {
-      const pos = queue[head++];
-      const idx4 = pos * 4;
-      data[idx4] = 255;
-      data[idx4 + 1] = 255;
-      data[idx4 + 2] = 255;
-      const x = pos % srcW;
-      const y = (pos - x) / srcW;
-      if (x > 0) enqueue(x - 1, y);
-      if (x + 1 < srcW) enqueue(x + 1, y);
-      if (y > 0) enqueue(x, y - 1);
-      if (y + 1 < srcH) enqueue(x, y + 1);
-    }
-
-    ctx.putImageData(imgData, 0, 0);
-
-    // Center onto crisp 1:1 white studio square (up to 1600px)
-    const side = Math.min(1600, Math.max(srcW, srcH));
+    // Center subject onto crisp pure #FFFFFF 1:1 studio square with ~6% clean margin
+    const side = Math.min(
+      1600,
+      Math.max(1000, Math.round(Math.max(trimW, trimH) / 0.88))
+    );
     const sq = document.createElement("canvas");
     sq.width = side;
     sq.height = side;
@@ -313,24 +291,40 @@ async function renderProcessedPhoto(
     if (sctx) {
       sctx.fillStyle = "#FFFFFF";
       sctx.fillRect(0, 0, side, side);
-      const scale = Math.min(side / srcW, side / srcH) * 0.94;
-      const dw = Math.round(srcW * scale);
-      const dh = Math.round(srcH * scale);
+      const scale = Math.min(side / trimW, side / trimH) * 0.88;
+      const dw = Math.max(1, Math.round(trimW * scale));
+      const dh = Math.max(1, Math.round(trimH * scale));
+      sctx.imageSmoothingEnabled = true;
+      sctx.imageSmoothingQuality = "high";
       sctx.drawImage(
-        canvas,
+        subCanvas,
+        trimX,
+        trimY,
+        trimW,
+        trimH,
         Math.round((side - dw) / 2),
         Math.round((side - dh) / 2),
         dw,
         dh
       );
-      return sq.toDataURL("image/jpeg", 0.91);
+      return sq.toDataURL("image/jpeg", 0.92);
     }
   }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = srcW;
+  canvas.height = srcH;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return originalDataUrl;
+
+  ctx.fillStyle = "#FFFFFF";
+  ctx.fillRect(0, 0, srcW, srcH);
+  ctx.drawImage(rotCanvas, cropX, cropY, srcW, srcH, 0, 0, srcW, srcH);
 
   return canvas.toDataURL("image/jpeg", 0.91);
 }
 
-/** Resize down to <= 900px JPEG 0.78 solely for fast Gemini Vision analysis payload */
+/** Resize down to <= 800px JPEG 0.74 solely for fast Gemini Vision analysis payload */
 async function shrinkForAiVision(dataUrl: string): Promise<string> {
   const img = await new Promise<HTMLImageElement>((resolve, reject) => {
     const el = new Image();
@@ -338,7 +332,7 @@ async function shrinkForAiVision(dataUrl: string): Promise<string> {
     el.onerror = () => reject(new Error("Shrink failed"));
     el.src = dataUrl;
   });
-  const maxDim = 900;
+  const maxDim = 800;
   let w = img.naturalWidth || img.width;
   let h = img.naturalHeight || img.height;
   if (w > maxDim || h > maxDim) {
@@ -354,7 +348,39 @@ async function shrinkForAiVision(dataUrl: string): Promise<string> {
   ctx.fillStyle = "#FFFFFF";
   ctx.fillRect(0, 0, w, h);
   ctx.drawImage(img, 0, 0, w, h);
-  return c.toDataURL("image/jpeg", 0.78);
+  return c.toDataURL("image/jpeg", 0.74);
+}
+
+/**
+ * Samples up to `limit` representative photos across a large gallery (up to 24 photos)
+ * so Gemini Vision always inspects the main cover, hero angle, middle angles, AND the
+ * last 3 shots where brand/size tags, model plates, bottoms, and flaws usually live.
+ */
+function selectRepresentativeVisionPhotos<T>(list: T[], limit = 8): T[] {
+  if (list.length <= limit) return list;
+  const indices = new Set<number>();
+  indices.add(0);
+  indices.add(1);
+  indices.add(list.length - 1);
+  indices.add(list.length - 2);
+  indices.add(list.length - 3);
+
+  const slotsLeft = limit - indices.size;
+  const midStart = 2;
+  const midEnd = list.length - 4;
+  if (slotsLeft > 0 && midEnd >= midStart) {
+    for (let k = 1; k <= slotsLeft; k++) {
+      const idx = Math.round(
+        midStart + ((midEnd - midStart) * k) / (slotsLeft + 1)
+      );
+      indices.add(Math.min(midEnd, Math.max(midStart, idx)));
+    }
+  }
+
+  return Array.from(indices)
+    .sort((a, b) => a - b)
+    .slice(0, limit)
+    .map((i) => list[i]);
 }
 
 function buildHtmlFromPlain(plain: string): string {
@@ -393,6 +419,9 @@ export function ListingStudioPanel({
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const [dragPhotoIdx, setDragPhotoIdx] = useState<number | null>(null);
   const [processingPhotoId, setProcessingPhotoId] = useState<string | null>(null);
+  const [processingPhotoLabel, setProcessingPhotoLabel] = useState<string | null>(
+    null
+  );
 
   const loadSavedSkuPrefs = (): {
     source?: string;
@@ -541,6 +570,7 @@ export function ListingStudioPanel({
           name: file.name || "photo.jpg",
           originalDataUrl: normalized,
           processedDataUrl: normalized,
+          cutoutDataUrl: null,
           rotation: 0,
           crop: null,
           enhanced: false,
@@ -552,7 +582,15 @@ export function ListingStudioPanel({
       }
     }
 
-    setPhotos((prev) => [...prev, ...added].slice(0, 12));
+    setPhotos((prev) => {
+      const combined = [...prev, ...added];
+      if (combined.length > MAX_STUDIO_PHOTOS) {
+        setErrorBanner(
+          `Kept the first ${MAX_STUDIO_PHOTOS} photos (eBay's maximum). Extra photos were skipped.`
+        );
+      }
+      return combined.slice(0, MAX_STUDIO_PHOTOS);
+    });
   }, []);
 
   const updatePhotoTransform = async (
@@ -577,26 +615,46 @@ export function ListingStudioPanel({
       enhanced: patch.enhanced !== undefined ? patch.enhanced : target.enhanced,
       whiteBg: patch.whiteBg !== undefined ? patch.whiteBg : target.whiteBg,
     };
+    setErrorBanner(null);
     setProcessingPhotoId(photoId);
+    setProcessingPhotoLabel(
+      nextOpts.whiteBg && !target.cutoutDataUrl ? "Loading AI cutout…" : null
+    );
     try {
-      const processed = await renderProcessedPhoto(
-        target.originalDataUrl,
-        nextOpts
-      );
+      let cutoutDataUrl = target.cutoutDataUrl ?? null;
+      if (nextOpts.whiteBg && !cutoutDataUrl) {
+        cutoutDataUrl = await generateSubjectCutoutPng(
+          target.originalDataUrl,
+          (label) => setProcessingPhotoLabel(label)
+        );
+      }
+      const processed = await renderProcessedPhoto(target.originalDataUrl, {
+        ...nextOpts,
+        cutoutDataUrl,
+      });
       setPhotos((prev) =>
         prev.map((p) =>
           p.id === photoId
             ? {
                 ...p,
                 ...nextOpts,
+                cutoutDataUrl,
                 processedDataUrl: processed,
                 hostedUrl: null, // Re-upload since pixels changed
               }
             : p
         )
       );
+    } catch (err) {
+      console.error("[ListingStudio] Photo edit failed:", err);
+      setErrorBanner(
+        err instanceof Error
+          ? `White BG AI cutout failed: ${err.message}`
+          : "White BG AI cutout failed. Please try again."
+      );
     } finally {
       setProcessingPhotoId(null);
+      setProcessingPhotoLabel(null);
     }
   };
 
@@ -714,18 +772,18 @@ export function ListingStudioPanel({
     setErrorBanner(null);
 
     try {
-      // 1. Upload each photo directly to eBay Picture Services (EPS) one-by-one (keeps well under 4.5MB)
-      const uploadedUrls: string[] = [];
+      // 1. Upload photos to eBay Commerce Media in 3-at-a-time batches (fast for up to 24 photos, preserves order)
       const updatedPhotos = [...photos];
-      for (let i = 0; i < updatedPhotos.length; i++) {
-        const p = updatedPhotos[i];
+      const uploadedUrls: string[] = new Array(updatedPhotos.length).fill("");
+      let completedCount = 0;
+
+      const uploadOne = async (idx: number) => {
+        const p = updatedPhotos[idx];
         if (p.hostedUrl && /^https?:\/\//i.test(p.hostedUrl)) {
-          uploadedUrls.push(p.hostedUrl);
-          continue;
+          uploadedUrls[idx] = p.hostedUrl;
+          completedCount += 1;
+          return;
         }
-        setStatusBanner(
-          `Uploading photo ${i + 1} of ${updatedPhotos.length} to eBay…`
-        );
         const upRes = await fetch("/api/ebay/upload-photo", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -737,11 +795,37 @@ export function ListingStudioPanel({
         const upData = (await upRes.json()) as { url?: string; error?: string };
         if (!upRes.ok || !upData.url) {
           throw new Error(
-            upData.error || `Failed uploading photo #${i + 1} to eBay`
+            upData.error || `Failed uploading photo #${idx + 1} to eBay`
           );
         }
-        uploadedUrls.push(upData.url);
-        updatedPhotos[i] = { ...p, hostedUrl: upData.url };
+        uploadedUrls[idx] = upData.url;
+        updatedPhotos[idx] = { ...p, hostedUrl: upData.url };
+        completedCount += 1;
+        setStatusBanner(
+          `Uploading photos to eBay (${completedCount}/${updatedPhotos.length})…`
+        );
+      };
+
+      const pendingCount = updatedPhotos.filter(
+        (p) => !(p.hostedUrl && /^https?:\/\//i.test(p.hostedUrl))
+      ).length;
+      if (pendingCount > 0) {
+        setStatusBanner(
+          `Uploading ${pendingCount} photo${pendingCount === 1 ? "" : "s"} to eBay…`
+        );
+      }
+
+      const BATCH_SIZE = 3;
+      for (let start = 0; start < updatedPhotos.length; start += BATCH_SIZE) {
+        const batchIndices: number[] = [];
+        for (
+          let idx = start;
+          idx < Math.min(start + BATCH_SIZE, updatedPhotos.length);
+          idx++
+        ) {
+          batchIndices.push(idx);
+        }
+        await Promise.all(batchIndices.map((idx) => uploadOne(idx)));
       }
       setPhotos(updatedPhotos);
 
@@ -756,7 +840,9 @@ export function ListingStudioPanel({
       setStatusBanner(
         sellOn === "facebook"
           ? "Saving Facebook Local-Only item to Command Center…"
-          : "Publishing live to eBay & syncing Command Center…"
+          : crossListTargets.length > 0 && uploadedUrls.length > 12
+            ? "Publishing to eBay & curating best photos for Poshmark/Mercari…"
+            : "Publishing live to eBay & syncing Command Center…"
       );
 
       const pubRes = await fetch("/api/ebay/publish", {
@@ -844,8 +930,9 @@ export function ListingStudioPanel({
     setStatusBanner("Analyzing photos & looking up live eBay category…");
 
     try {
+      const sampledPhotos = selectRepresentativeVisionPhotos(photos, 8);
       const visionImages = await Promise.all(
-        photos.slice(0, 6).map(async (p) => ({
+        sampledPhotos.map(async (p) => ({
           base64: await shrinkForAiVision(p.processedDataUrl),
           mimeType: "image/jpeg",
         }))
@@ -1089,10 +1176,17 @@ export function ListingStudioPanel({
       {/* SECTION 1: PHOTOS */}
       <section className="bg-white border border-[#E4E4DD] rounded-xl p-4 sm:p-5 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="text-[11px] font-bold uppercase tracking-[0.07em] text-[#5C606B]">
-              1. Photos ({photos.length}/12)
+              1. Photos ({photos.length}/{MAX_STUDIO_PHOTOS})
             </span>
+            {photos.length > 12 && (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#EFF6FF] text-[#1D4ED8] border border-[#BFDBFE]">
+                {photos.length > 16
+                  ? `eBay gets all ${photos.length} · AI picks best 16 for Poshmark & 12 for Mercari`
+                  : `eBay & Poshmark get all ${photos.length} · AI picks best 12 for Mercari`}
+              </span>
+            )}
           </div>
           <span className="text-[11px] text-[#7C858D]">
             Drag to arrange · First photo is the main photo · Auto-resized &amp;
@@ -1161,9 +1255,9 @@ export function ListingStudioPanel({
             </button>
           </div>
           <p className="text-[11px] text-[#6B7280] mt-2">
-            or drag &amp; drop photos here. Photos go up crisp as shot — click{" "}
-            <strong>Enhance</strong> or <strong>White BG</strong> on any photo
-            to polish it in 1 click.
+            or drag &amp; drop up to {MAX_STUDIO_PHOTOS} photos (eBay max). Click{" "}
+            <strong>Enhance</strong> or AI <strong>White</strong> on any photo
+            for a clean studio cutout.
           </p>
         </div>
 
@@ -1199,8 +1293,13 @@ export function ListingStudioPanel({
                       className="w-full h-full object-contain"
                     />
                     {busy && (
-                      <div className="absolute inset-0 bg-white/75 flex items-center justify-center">
+                      <div className="absolute inset-0 bg-white/85 flex flex-col items-center justify-center gap-1.5 px-2 text-center">
                         <Loader2 className="w-5 h-5 animate-spin text-[#0F766E]" />
+                        {processingPhotoLabel && (
+                          <span className="text-[10px] font-semibold text-[#0F766E]">
+                            {processingPhotoLabel}
+                          </span>
+                        )}
                       </div>
                     )}
                     <div className="absolute top-1.5 left-1.5 flex items-center gap-1">

@@ -10,6 +10,10 @@ import {
   MARKETPLACE_LIMITS,
   sanitizeMarketplaceCopy,
 } from "@/lib/marketplace-compliance";
+import {
+  selectBestPhotosForChannel,
+  serializePhotoRankOrder,
+} from "@/lib/photo-selector";
 import { roundCurrency } from "@/lib/stale-engine";
 import { getEnvReadiness, getSupabaseServerClient } from "@/lib/supabase";
 import type {
@@ -301,6 +305,9 @@ export async function POST(request: Request) {
           .from("marketplace_accounts")
           .select("*");
         const accounts = (accts ?? []) as MarketplaceAccount[];
+        let cachedRankOrder: number[] | null = null;
+        let rankPersisted = false;
+        const curationNotes: string[] = [];
 
         for (const target of targets) {
           try {
@@ -329,6 +336,34 @@ export async function POST(request: Request) {
               targetMarketplace: target,
             });
 
+            const allPhotos = savedItem.image_urls || [];
+            const photoSelection = await selectBestPhotosForChannel({
+              imageUrls: allPhotos,
+              maxPhotos: limits.maxPhotos,
+              title: savedItem.title,
+              channel: target,
+              cachedRankOrder,
+            });
+            if (photoSelection.curated) {
+              cachedRankOrder = photoSelection.rankOrder;
+              curationNotes.push(
+                `${target.toUpperCase()} (${photoSelection.selectedUrls.length}/${allPhotos.length})`
+              );
+              if (!rankPersisted) {
+                rankPersisted = true;
+                const nextSpecs = {
+                  ...(savedItem.item_specifics || {}),
+                  photo_rank_order: serializePhotoRankOrder(
+                    photoSelection.rankOrder
+                  ),
+                };
+                await supabase
+                  .from("inventory_items")
+                  .update({ item_specifics: nextSpecs })
+                  .eq("id", savedItem.id);
+              }
+            }
+
             const { error: jobErr } = await supabase.from("channel_jobs").insert({
               item_id: savedItem.id,
               marketplace: target,
@@ -347,10 +382,7 @@ export async function POST(request: Request) {
                 targetPrice: Math.ceil(price),
                 suggestedPrice: targetPrice,
                 weightOz: savedItem.weight_oz ?? null,
-                imageUrls: (savedItem.image_urls || []).slice(
-                  0,
-                  limits.maxPhotos
-                ),
+                imageUrls: photoSelection.selectedUrls,
                 requiresUserConfirm: target === "facebook",
               },
               status: "pending",
@@ -366,6 +398,12 @@ export async function POST(request: Request) {
             );
           }
         }
+
+        if (curationNotes.length > 0) {
+          console.info(
+            `[/api/ebay/publish] Smart photo selection for ${savedItem.sku}: ${curationNotes.join(", ")}`
+          );
+        }
       }
     }
   }
@@ -378,7 +416,7 @@ export async function POST(request: Request) {
     ebayUrl: ebayResult?.listingUrl || null,
     queuedCrossLists,
     message: ebayResult
-      ? `Published LIVE to eBay (#${ebayResult.itemId})!${queuedCrossLists.length > 0 ? ` Queued ${queuedCrossLists.map((c) => c.toUpperCase()).join(", ")} for Mac Mini Auto-Pilot.` : ""}`
+      ? `Published LIVE to eBay (#${ebayResult.itemId}) with ${Math.min(imageUrls.length, 24)} photo${imageUrls.length === 1 ? "" : "s"}!${queuedCrossLists.length > 0 ? ` Queued ${queuedCrossLists.map((c) => c.toUpperCase()).join(", ")} for Mac Mini Auto-Pilot.` : ""}`
       : `Saved ${sku} for Facebook Marketplace Local Pickup!`,
   });
 }

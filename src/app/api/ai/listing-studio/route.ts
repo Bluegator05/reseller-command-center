@@ -113,7 +113,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON payload" }, { status: 400 });
   }
 
-  const rawImages = Array.isArray(body.images) ? body.images.slice(0, 6) : [];
+  const rawImages = Array.isArray(body.images) ? body.images.slice(0, 8) : [];
   if (rawImages.length === 0 && !body.whatIsIt?.trim()) {
     return NextResponse.json(
       { error: "Add at least 1 photo or describe what the item is." },

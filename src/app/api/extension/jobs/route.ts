@@ -11,6 +11,11 @@ import {
   MARKETPLACE_LIMITS,
   sanitizeMarketplaceCopy,
 } from "@/lib/marketplace-compliance";
+import {
+  parseCachedPhotoRankOrder,
+  selectBestPhotosForChannel,
+  serializePhotoRankOrder,
+} from "@/lib/photo-selector";
 import { roundCurrency } from "@/lib/stale-engine";
 import { getSupabaseServerClient, isSupabaseConfigured } from "@/lib/supabase";
 import type {
@@ -21,6 +26,8 @@ import type {
   MarketplaceAccount,
   MarketplaceType,
 } from "@/lib/types";
+
+export const maxDuration = 60;
 
 const EXTENSION_CHANNELS: MarketplaceType[] = [
   "poshmark",
@@ -337,6 +344,38 @@ export async function POST(request: Request) {
       }
     }
 
+    const allItemPhotos = item.image_urls || [];
+    let selectedImageUrls = allItemPhotos.slice(0, limits.maxPhotos);
+
+    if (action === "create" && allItemPhotos.length > limits.maxPhotos) {
+      const cachedRank = parseCachedPhotoRankOrder(
+        item.item_specifics,
+        allItemPhotos.length
+      );
+      const selection = await selectBestPhotosForChannel({
+        imageUrls: allItemPhotos,
+        maxPhotos: limits.maxPhotos,
+        title: item.title,
+        channel: marketplace,
+        cachedRankOrder: cachedRank,
+      });
+      selectedImageUrls = selection.selectedUrls;
+
+      if (!cachedRank && useLive && supabase) {
+        const nextSpecifics = {
+          ...(item.item_specifics || {}),
+          photo_rank_order: serializePhotoRankOrder(selection.rankOrder),
+        };
+        await supabase
+          .from("inventory_items")
+          .update({
+            item_specifics: nextSpecifics,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", item.id);
+      }
+    }
+
     const jobPayload = {
       sku: item.sku,
       mappedTitle: sanitized.title,
@@ -348,7 +387,7 @@ export async function POST(request: Request) {
       targetPrice: Math.ceil(Number(item.target_price)),
       suggestedPrice,
       weightOz: item.weight_oz ?? null,
-      imageUrls: (item.image_urls || []).slice(0, limits.maxPhotos),
+      imageUrls: selectedImageUrls,
       requiresUserConfirm: marketplace === "facebook",
     };
 
