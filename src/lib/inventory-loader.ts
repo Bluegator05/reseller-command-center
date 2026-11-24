@@ -474,6 +474,18 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
         });
         paidSalesByItem.set(ord.item_id, list);
       }
+      const dismissedAtByItem = new Map<string, number>();
+      for (const row of joinedRows) {
+        const inv = Array.isArray(row.inventory_items)
+          ? row.inventory_items[0]
+          : row.inventory_items;
+        const sp = (inv?.item_specifics || {}) as Record<string, unknown>;
+        if (typeof sp.sold_conflict_dismissed_at === "string") {
+          const ms = Date.parse(sp.sold_conflict_dismissed_at);
+          if (!Number.isNaN(ms)) dismissedAtByItem.set(row.item_id, ms);
+        }
+      }
+
       for (const item of items) {
         if ((item.quantity_available ?? 1) > 1 || (item.quantity_purchased ?? 1) > 1) {
           continue;
@@ -482,12 +494,17 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
         if (!rawConflicts || rawConflicts.length === 0) continue;
 
         const syncedMs = item.last_synced_at ? Date.parse(item.last_synced_at) : NaN;
+        const dismissedMs = dismissedAtByItem.get(item.item_id) ?? NaN;
         const conflicts = rawConflicts.filter((ord) => {
+          const soldMs = Date.parse(ord.sold_at);
+          // If the user explicitly dismissed this conflict ("Keep Active"), ignore older sales
+          if (!Number.isNaN(dismissedMs) && !Number.isNaN(soldMs) && soldMs <= dismissedMs) {
+            return false;
+          }
           // If this sale was on eBay and we ALREADY synced live eBay AFTER the sale
           // timestamp, eBay itself confirmed this listing is still live with qty >= 1
           // (e.g. a multi-qty listing with 1 unit left, or restocked/relisted on eBay).
           if (ord.marketplace === "ebay" && !Number.isNaN(syncedMs)) {
-            const soldMs = Date.parse(ord.sold_at);
             if (!Number.isNaN(soldMs) && syncedMs > soldMs + 5 * 60_000) {
               return false;
             }

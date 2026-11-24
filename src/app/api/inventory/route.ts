@@ -64,6 +64,14 @@ export async function POST(request: Request) {
       | {
           action: "restore_disposed";
           itemId: string;
+        }
+      | {
+          action: "resolve_sold_end_everywhere";
+          itemId: string;
+        }
+      | {
+          action: "dismiss_sold_conflict";
+          itemId: string;
         };
 
     const envReadiness = getEnvReadiness();
@@ -482,6 +490,214 @@ export async function POST(request: Request) {
         });
       }
       return NextResponse.json({ mode: "demo", message: "Restored in demo mode." });
+    }
+
+    if (body.action === "resolve_sold_end_everywhere") {
+      if (!body.itemId) {
+        return NextResponse.json({ error: "Missing itemId" }, { status: 400 });
+      }
+      const nowIso = new Date().toISOString();
+
+      if (supabase && envReadiness.isSupabaseReady) {
+        const { data: item, error: itemErr } = await supabase
+          .from("inventory_items")
+          .select("*")
+          .eq("id", body.itemId)
+          .single();
+        if (itemErr || !item) {
+          return NextResponse.json({ error: "Item not found" }, { status: 404 });
+        }
+
+        const { data: listingsData } = await supabase
+          .from("marketplace_listings")
+          .select("*")
+          .eq("item_id", item.id)
+          .in("status", ["active", "draft"]);
+
+        const activeListings = (listingsData ?? []) as MarketplaceListing[];
+
+        const { data: existingDelists } = await supabase
+          .from("channel_jobs")
+          .select("marketplace, status")
+          .eq("item_id", item.id)
+          .eq("action", "delist")
+          .in("status", ["pending", "processing"]);
+        const alreadyQueued = new Set(
+          (existingDelists ?? []).map((j) => String(j.marketplace))
+        );
+
+        const endedChannels: string[] = [];
+        const queuedDelists: string[] = [];
+        const errors: string[] = [];
+
+        for (const lst of activeListings) {
+          const isApi = lst.marketplace === "ebay" || lst.marketplace === "etsy";
+          if (isApi) {
+            try {
+              if (
+                lst.marketplace === "ebay" &&
+                lst.external_listing_id &&
+                isEbayConfigured()
+              ) {
+                await withdrawEbayOffer(lst.external_listing_id, item.sku);
+              } else if (
+                lst.marketplace === "etsy" &&
+                lst.external_listing_id &&
+                isEtsyConfigured()
+              ) {
+                await deactivateEtsyListing(lst.external_listing_id);
+              }
+              endedChannels.push(lst.marketplace.toUpperCase());
+            } catch (err) {
+              const errMsg = err instanceof Error ? err.message : "Failed to end";
+              if (/closed|already ended|not active|does not exist/i.test(errMsg)) {
+                endedChannels.push(lst.marketplace.toUpperCase());
+              } else {
+                errors.push(`${lst.marketplace.toUpperCase()}: ${errMsg}`);
+              }
+            }
+            await supabase
+              .from("marketplace_listings")
+              .update({ status: "ended", last_synced_at: nowIso })
+              .eq("id", lst.id);
+          } else {
+            if (!alreadyQueued.has(lst.marketplace)) {
+              await supabase.from("channel_jobs").insert({
+                item_id: item.id,
+                listing_id: lst.id,
+                marketplace: lst.marketplace,
+                action: "delist",
+                execution_mode: "extension",
+                payload: {
+                  sku: item.sku,
+                  title: item.title,
+                  externalListingId: lst.external_listing_id,
+                  externalUrl: lst.external_url,
+                  reason: "ALREADY_SOLD_CONFLICT",
+                },
+                status: "pending",
+                attempts: 0,
+              });
+              queuedDelists.push(lst.marketplace.toUpperCase());
+            } else {
+              queuedDelists.push(`${lst.marketplace.toUpperCase()} (already queued)`);
+            }
+            await supabase
+              .from("marketplace_listings")
+              .update({ status: "ended", last_synced_at: nowIso })
+              .eq("id", lst.id);
+          }
+        }
+
+        const existingSpecs = (item.item_specifics || {}) as Record<
+          string,
+          unknown
+        >;
+        const prevLog = Array.isArray(existingSpecs.activity_log)
+          ? existingSpecs.activity_log
+          : [];
+        const detailParts: string[] = [];
+        if (endedChannels.length > 0) {
+          detailParts.push(`Ended on ${endedChannels.join(", ")}`);
+        }
+        if (queuedDelists.length > 0) {
+          detailParts.push(`Queued delist on ${queuedDelists.join(", ")}`);
+        }
+
+        const nextSpecs: Record<string, unknown> = {
+          ...existingSpecs,
+          activity_log: [
+            {
+              id: `evt-${Date.now()}`,
+              type: "delisted",
+              timestamp: nowIso,
+              title: "Ended & Delisted Everywhere (Already Sold)",
+              detail:
+                detailParts.length > 0
+                  ? detailParts.join(" · ")
+                  : "Marked item Sold and removed from Active Inventory",
+            },
+            ...prevLog.slice(0, 49),
+          ],
+        };
+
+        await supabase
+          .from("inventory_items")
+          .update({
+            status: "sold",
+            item_specifics: nextSpecs,
+            updated_at: nowIso,
+          })
+          .eq("id", item.id);
+
+        const msgParts: string[] = [];
+        if (endedChannels.length > 0) {
+          msgParts.push(`ended on ${endedChannels.join(", ")} via API`);
+        }
+        if (queuedDelists.length > 0) {
+          msgParts.push(`queued Auto-Pilot delist on ${queuedDelists.join(", ")}`);
+        }
+        if (errors.length > 0) {
+          msgParts.push(`warning: ${errors.join("; ")}`);
+        }
+
+        return NextResponse.json({
+          mode: "live",
+          sku: item.sku,
+          endedChannels,
+          queuedDelists,
+          errors,
+          message: `Marked ${item.sku} Sold${msgParts.length > 0 ? ` — ${msgParts.join(" · ")}` : ""}.`,
+        });
+      }
+
+      deleteDemoInventoryItem(body.itemId);
+      return NextResponse.json({
+        mode: "demo",
+        endedChannels: ["EBAY"],
+        queuedDelists: [],
+        message: "Ended & marked sold in demo store.",
+      });
+    }
+
+    if (body.action === "dismiss_sold_conflict") {
+      if (!body.itemId) {
+        return NextResponse.json({ error: "Missing itemId" }, { status: 400 });
+      }
+      const nowIso = new Date().toISOString();
+      if (supabase && envReadiness.isSupabaseReady) {
+        const { data: item, error: itemErr } = await supabase
+          .from("inventory_items")
+          .select("id, sku, item_specifics")
+          .eq("id", body.itemId)
+          .single();
+        if (itemErr || !item) {
+          return NextResponse.json({ error: "Item not found" }, { status: 404 });
+        }
+        const existingSpecs = (item.item_specifics || {}) as Record<
+          string,
+          unknown
+        >;
+        const nextSpecs: Record<string, unknown> = {
+          ...existingSpecs,
+          sold_conflict_dismissed_at: nowIso,
+        };
+        const { error: updErr } = await supabase
+          .from("inventory_items")
+          .update({ item_specifics: nextSpecs, updated_at: nowIso })
+          .eq("id", item.id);
+        if (updErr) {
+          return NextResponse.json({ error: updErr.message }, { status: 400 });
+        }
+        return NextResponse.json({
+          mode: "live",
+          message: `Kept ${item.sku} active and cleared the sold-conflict alert.`,
+        });
+      }
+      return NextResponse.json({
+        mode: "demo",
+        message: "Cleared sold-conflict alert in demo mode.",
+      });
     }
 
     if (body.action === "promote_draft") {

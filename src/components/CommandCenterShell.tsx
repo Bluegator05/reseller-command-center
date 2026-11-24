@@ -1213,6 +1213,40 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
             isLive={isLiveMode}
             onReconcileEbay={handleSyncEbay}
             isSyncingEbay={isSyncingEbay}
+            onResolveSoldConflict={async ({ itemId, mode }) => {
+              const res = await fetch("/api/inventory", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  action:
+                    mode === "end_everywhere"
+                      ? "resolve_sold_end_everywhere"
+                      : "dismiss_sold_conflict",
+                  itemId,
+                }),
+              });
+              const payload = (await res.json()) as {
+                message?: string;
+                errors?: string[];
+                error?: string;
+              };
+              if (!res.ok) {
+                pushToast(
+                  "error",
+                  "Action Failed",
+                  payload.error || "Could not update item."
+                );
+                return;
+              }
+              await refreshInventory();
+              pushToast(
+                payload.errors && payload.errors.length > 0 ? "info" : "success",
+                mode === "end_everywhere"
+                  ? "Ended & Delisted Everywhere"
+                  : "Kept Active",
+                payload.message || "Updated item status."
+              );
+            }}
             onExecuteAction={handleExecuteAction}
             onOpenCrossList={(row, target = "etsy") =>
               setCrossListState({ row, target })

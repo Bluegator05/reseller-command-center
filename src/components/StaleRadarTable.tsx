@@ -83,6 +83,10 @@ interface StaleRadarTableProps {
   }) => Promise<void>;
   onReconcileEbay?: () => Promise<void>;
   isSyncingEbay?: boolean;
+  onResolveSoldConflict?: (params: {
+    itemId: string;
+    mode: "end_everywhere" | "dismiss";
+  }) => Promise<void>;
 }
 
 type FilterKey =
@@ -257,12 +261,16 @@ export function StaleRadarTable({
   onToggleStaleExempt,
   onReconcileEbay,
   isSyncingEbay = false,
+  onResolveSoldConflict,
 }: StaleRadarTableProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeFilter, setActiveFilter] = useState<FilterKey>("all");
   const [sortBy, setSortBy] = useState<SortKey>("days_desc");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [listingAllItemId, setListingAllItemId] = useState<string | null>(null);
+  const [resolvingConflictItemId, setResolvingConflictItemId] = useState<
+    string | null
+  >(null);
   const [density, setDensity] = useState<"gallery" | "compact">("gallery");
   const [autoPromoteEnabled, setAutoPromoteEnabled] = useState(true);
   const [isPromoting, setIsPromoting] = useState(false);
@@ -1012,9 +1020,10 @@ export function StaleRadarTable({
                 {metrics.soldConflictCount === 1 ? "" : "s"} already appear
                 {metrics.soldConflictCount === 1 ? "s" : ""} in your Sales tab
               </strong>{" "}
-              — click <strong>Reconcile with eBay</strong> to verify live eBay
-              inventory and automatically clear out any sold or ended listings
-              (multi-quantity listings still live on eBay stay active).
+              — it is still live on at least one channel (double-sell risk!).
+              Click <strong>End &amp; Delist Everywhere</strong> on the item
+              below to pull it off eBay &amp; other channels immediately, or{" "}
+              <strong>Reconcile with eBay</strong> if it already ended on eBay.
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -1358,14 +1367,64 @@ export function StaleRadarTable({
                               </div>
                               {row.sold_conflict_orders &&
                                 row.sold_conflict_orders.length > 0 && (
-                                  <span
-                                    title={`Recorded sold on ${row.sold_conflict_orders[0].marketplace.toUpperCase()} (${row.sold_conflict_orders[0].sold_at.slice(0, 10)}) for $${row.sold_conflict_orders[0].gross_sale_price.toFixed(2)}. Click Reconcile with eBay above to clear sold/ended items.`}
-                                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-[#FEE2E2] text-[#B91C1C] border border-[#FCA5A5]"
-                                  >
-                                    <AlertTriangle className="w-2.5 h-2.5" />
-                                    Already Sold ({row.sold_conflict_orders[0].marketplace.toUpperCase()}{" "}
-                                    {row.sold_conflict_orders[0].sold_at.slice(0, 10)})
-                                  </span>
+                                  <div className="w-full flex flex-wrap items-center gap-1.5 p-2 rounded-lg bg-[#FEF2F2] border border-[#FECACA]">
+                                    <span
+                                      title={`Recorded sold on ${row.sold_conflict_orders[0].marketplace.toUpperCase()} (${row.sold_conflict_orders[0].sold_at.slice(0, 10)}) for $${row.sold_conflict_orders[0].gross_sale_price.toFixed(2)}.`}
+                                      className="inline-flex items-center gap-1 text-[10px] font-bold text-[#B91C1C]"
+                                    >
+                                      <AlertTriangle className="w-3 h-3 shrink-0" />
+                                      Sold on{" "}
+                                      {row.sold_conflict_orders[0].marketplace.toUpperCase()}{" "}
+                                      ({row.sold_conflict_orders[0].sold_at.slice(0, 10)}) · still live!
+                                    </span>
+                                    {onResolveSoldConflict && (
+                                      <div className="flex items-center gap-1.5 ml-auto">
+                                        <button
+                                          type="button"
+                                          disabled={resolvingConflictItemId === row.item_id}
+                                          onClick={async () => {
+                                            setResolvingConflictItemId(row.item_id);
+                                            try {
+                                              await onResolveSoldConflict({
+                                                itemId: row.item_id,
+                                                mode: "end_everywhere",
+                                              });
+                                            } finally {
+                                              setResolvingConflictItemId(null);
+                                            }
+                                          }}
+                                          title="Ends live eBay/Etsy listings via API, queues Auto-Pilot delist for Poshmark/Mercari/FB, and removes from Active Inventory"
+                                          className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-bold bg-[#DC2626] hover:bg-[#B91C1C] text-white disabled:opacity-50 cursor-pointer"
+                                        >
+                                          {resolvingConflictItemId === row.item_id ? (
+                                            <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                                          ) : (
+                                            <Trash2 className="w-2.5 h-2.5" />
+                                          )}
+                                          End &amp; Delist Everywhere
+                                        </button>
+                                        <button
+                                          type="button"
+                                          disabled={resolvingConflictItemId === row.item_id}
+                                          onClick={async () => {
+                                            setResolvingConflictItemId(row.item_id);
+                                            try {
+                                              await onResolveSoldConflict({
+                                                itemId: row.item_id,
+                                                mode: "dismiss",
+                                              });
+                                            } finally {
+                                              setResolvingConflictItemId(null);
+                                            }
+                                          }}
+                                          title="Keep this listing active (e.g. you have another one) and clear this alert"
+                                          className="px-2 py-1 rounded-md text-[10px] font-semibold bg-white border border-[#FCA5A5] text-[#7F1D1D] hover:bg-[#FEE2E2] disabled:opacity-50 cursor-pointer"
+                                        >
+                                          Keep Active
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
                                 )}
                               {row.is_newly_listed && (
                                 <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[#EFF6FF] text-[#1D4ED8]">
