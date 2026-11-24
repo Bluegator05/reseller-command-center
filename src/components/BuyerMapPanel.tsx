@@ -598,6 +598,7 @@ export function BuyerMapPanel({
           <div className="flex items-center gap-2 flex-wrap">
             <div className="inline-flex rounded-lg border border-[#DDE2DF] bg-[#F8FAF9] p-0.5">
               {[
+                { label: "7d", days: 7 },
                 { label: "30d", days: 30 },
                 { label: "90d", days: 90 },
                 { label: "1 Yr", days: 365 },
@@ -781,10 +782,18 @@ export function BuyerMapPanel({
             <div className="absolute inset-0 z-[420] bg-white/80 backdrop-blur-[1px] flex flex-col items-center justify-center p-6 text-center">
               <Globe className="w-8 h-8 text-[#0F766E] mb-2" />
               <div className="text-sm font-bold text-[#14151A]">
-                No Buyer Cities Synced Yet
+                {validOrders.length === 0 && salesOrders.length > 0
+                  ? `No Orders in the Last ${rangeDays} Days`
+                  : "No Buyer Cities Synced Yet"}
               </div>
               <p className="text-xs text-[#475569] max-w-sm mt-1">
-                Click <strong>Sync Buyer Locations from eBay</strong> above to pull real buyer cities, ZIP codes, and states for all your past eBay orders.
+                {validOrders.length === 0 && salesOrders.length > 0 ? (
+                  "Try switching to 30d, 90d, 1 Yr, or All above — or click Sync Buyer Locations from eBay to pull the latest sales."
+                ) : (
+                  <>
+                    Click <strong>Sync Buyer Locations from eBay</strong> above to pull real buyer cities, ZIP codes, and states for all your past eBay orders.
+                  </>
+                )}
               </p>
             </div>
           )}
