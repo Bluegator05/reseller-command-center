@@ -3,6 +3,8 @@ import type {
   InventoryItem,
   JobActionType,
   MarketplaceListing,
+  PriceWatcherDecision,
+  PriceWatcherStage,
   StaleRadarRow,
   StaleSeverity,
 } from "./types";
@@ -12,6 +14,149 @@ export const NEWLY_LISTED_DAYS_THRESHOLD = 14;
 export const STALE_DAYS_THRESHOLD = 45;
 export const CRITICAL_DAYS_THRESHOLD = 75;
 export const LOW_VIEWS_THRESHOLD = 25;
+
+export const PRICE_WATCHER_TIERS = [
+  {
+    stage: 30 as const,
+    minDays: 30,
+    dropPct: 10,
+    shortLabel: "30d · -10%",
+    label: "30d+ Drop (-10%)",
+    kind: "markdown" as const,
+  },
+  {
+    stage: 45 as const,
+    minDays: 45,
+    dropPct: 15,
+    shortLabel: "45d · -15%",
+    label: "45d+ Drop (-15%)",
+    kind: "markdown" as const,
+  },
+  {
+    stage: 60 as const,
+    minDays: 60,
+    dropPct: 20,
+    shortLabel: "60d · -20%",
+    label: "60d+ Drop (-20%)",
+    kind: "markdown" as const,
+  },
+  {
+    stage: 90 as const,
+    minDays: 90,
+    dropPct: 0,
+    shortLabel: "90d+ Decision",
+    label: "90d+ Delist / Donate",
+    kind: "decision" as const,
+  },
+] as const;
+
+export function evaluatePriceWatcher(params: {
+  daysListed: number;
+  listedPrice: number;
+  floorPrice: number;
+  staleRadarExempt: boolean;
+  itemSpecifics: Record<string, unknown>;
+}): {
+  stage: PriceWatcherStage | null;
+  due: boolean;
+  dropPct: number;
+  targetPrice: number;
+  wouldClamp: boolean;
+  completedStage: number;
+  decision: PriceWatcherDecision | null;
+  decisionAt: string | null;
+} {
+  const {
+    daysListed,
+    listedPrice,
+    floorPrice,
+    staleRadarExempt,
+    itemSpecifics,
+  } = params;
+
+  const rawCompleted = Number(itemSpecifics.price_watcher_stage);
+  const completedStage =
+    Number.isFinite(rawCompleted) && rawCompleted > 0
+      ? Math.floor(rawCompleted)
+      : 0;
+  const decision: PriceWatcherDecision | null =
+    itemSpecifics.price_watcher_decision === "keep" ? "keep" : null;
+  const decisionAt =
+    typeof itemSpecifics.price_watcher_decision_at === "string" &&
+    itemSpecifics.price_watcher_decision_at
+      ? itemSpecifics.price_watcher_decision_at
+      : null;
+
+  if (staleRadarExempt || daysListed < 30) {
+    return {
+      stage: null,
+      due: false,
+      dropPct: 0,
+      targetPrice: roundCurrency(listedPrice),
+      wouldClamp: false,
+      completedStage,
+      decision,
+      decisionAt,
+    };
+  }
+
+  let bracket: PriceWatcherStage = 30;
+  if (daysListed >= 90) bracket = 90;
+  else if (daysListed >= 60) bracket = 60;
+  else if (daysListed >= 45) bracket = 45;
+
+  if (bracket === 90) {
+    if (decision === "keep") {
+      return {
+        stage: null,
+        due: false,
+        dropPct: 0,
+        targetPrice: roundCurrency(listedPrice),
+        wouldClamp: false,
+        completedStage,
+        decision,
+        decisionAt,
+      };
+    }
+    return {
+      stage: 90,
+      due: true,
+      dropPct: 0,
+      targetPrice: roundCurrency(listedPrice),
+      wouldClamp: false,
+      completedStage,
+      decision,
+      decisionAt,
+    };
+  }
+
+  if (completedStage >= bracket) {
+    return {
+      stage: null,
+      due: false,
+      dropPct: 0,
+      targetPrice: roundCurrency(listedPrice),
+      wouldClamp: false,
+      completedStage,
+      decision,
+      decisionAt,
+    };
+  }
+
+  const dropPct = bracket === 60 ? 20 : bracket === 45 ? 15 : 10;
+  const calc = computeClampedPriceDrop(listedPrice, floorPrice, dropPct);
+
+  return {
+    stage: bracket,
+    due: true,
+    dropPct,
+    targetPrice: calc.nextPrice,
+    wouldClamp: calc.wasClamped,
+    completedStage,
+    decision,
+    decisionAt,
+  };
+}
 
 export function roundCurrency(value: number): number {
   return Math.round((value + Number.EPSILON) * 100) / 100;
@@ -164,6 +309,14 @@ export function enrichStaleRadarRow(
   const specs = (item.item_specifics || {}) as Record<string, unknown>;
   const staleRadarExempt = specs.stale_radar_exempt === "true";
 
+  const priceWatcher = evaluatePriceWatcher({
+    daysListed,
+    listedPrice,
+    floorPrice,
+    staleRadarExempt,
+    itemSpecifics: specs,
+  });
+
   const finalIsStale = staleRadarExempt ? false : isStale;
   const finalSeverity: StaleSeverity = staleRadarExempt
     ? "healthy"
@@ -287,6 +440,14 @@ export function enrichStaleRadarRow(
     stale_reason: finalStaleReason,
     projected_drop_price: dropCalc.nextPrice,
     drop_would_clamp: dropCalc.wasClamped,
+    price_watcher_stage: priceWatcher.stage,
+    price_watcher_due: priceWatcher.due,
+    price_watcher_drop_pct: priceWatcher.dropPct,
+    price_watcher_target_price: priceWatcher.targetPrice,
+    price_watcher_would_clamp: priceWatcher.wouldClamp,
+    price_watcher_completed_stage: priceWatcher.completedStage,
+    price_watcher_decision: priceWatcher.decision,
+    price_watcher_decision_at: priceWatcher.decisionAt,
     est_fee_amount: estFeeAmount,
     est_net_profit: estNetProfit,
     est_margin_pct: estMarginPct,

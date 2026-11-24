@@ -41,7 +41,20 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON payload" }, { status: 400 });
   }
 
-  const { action, listingIds, dropPct = 10, offerPct = 10, offerMessage } = body;
+  const {
+    action,
+    listingIds,
+    dropPct = 10,
+    priceWatcherStage,
+    offerPct = 10,
+    offerMessage,
+  } = body;
+  const validWatcherStage: 30 | 45 | 60 | undefined =
+    priceWatcherStage === 30 ||
+    priceWatcherStage === 45 ||
+    priceWatcherStage === 60
+      ? priceWatcherStage
+      : undefined;
 
   if (
     !action ||
@@ -70,6 +83,7 @@ export async function POST(request: Request) {
       action,
       listingIds,
       dropPct,
+      priceWatcherStage: validWatcherStage,
       offerPct,
       offerMessage,
     });
@@ -131,6 +145,7 @@ export async function POST(request: Request) {
               newPrice: calc.nextPrice,
               floorPrice,
               dropPct,
+              priceWatcherStage: validWatcherStage ?? null,
               wasClamped: calc.wasClamped,
             },
             status: "processing",
@@ -157,18 +172,30 @@ export async function POST(request: Request) {
           const prevPriceLog = Array.isArray(priceSpecs.activity_log)
             ? priceSpecs.activity_log
             : [];
+          const prevCompletedStage = Number(priceSpecs.price_watcher_stage) || 0;
+          const nextWatcherSpecs: Record<string, unknown> = validWatcherStage
+            ? {
+                price_watcher_stage: String(
+                  Math.max(prevCompletedStage, validWatcherStage)
+                ),
+                price_watcher_last_action_at: nowIso,
+              }
+            : {};
           await supabase!
             .from("inventory_items")
             .update({
               item_specifics: {
                 ...priceSpecs,
+                ...nextWatcherSpecs,
                 activity_log: [
                   {
                     id: `evt-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
                     type: "price_changed",
                     timestamp: nowIso,
-                    title: "Listing price changed",
-                    detail: `eBay list price changed from $${currentPrice.toFixed(2)} to $${calc.nextPrice.toFixed(2)}`,
+                    title: validWatcherStage
+                      ? `Price Watcher (${validWatcherStage}d · -${dropPct}%)`
+                      : "Listing price changed",
+                    detail: `eBay list price changed from $${currentPrice.toFixed(2)} to $${calc.nextPrice.toFixed(2)}${calc.wasClamped ? " (clamped to COGS floor)" : ""}`,
                   },
                   ...prevPriceLog.slice(0, 49),
                 ],
@@ -350,6 +377,10 @@ export async function POST(request: Request) {
             unknown
           >;
           const mergedSpecs: Record<string, unknown> = { ...existingSpecs };
+          delete mergedSpecs.price_watcher_stage;
+          delete mergedSpecs.price_watcher_decision;
+          delete mergedSpecs.price_watcher_decision_at;
+          delete mergedSpecs.price_watcher_last_action_at;
           let updatedBrand: string | null = null;
           for (const s of targetAddSpecs) {
             const cleanName = s.name.trim();
@@ -644,10 +675,11 @@ function handleDemoAction(params: {
   action: EbayActionRequest["action"];
   listingIds: string[];
   dropPct: number;
+  priceWatcherStage?: 30 | 45 | 60;
   offerPct: number;
   offerMessage?: string;
 }) {
-  const { action, listingIds, dropPct, offerPct } = params;
+  const { action, listingIds, dropPct, priceWatcherStage, offerPct } = params;
   const store = getDemoStore();
   const itemMap = new Map(store.items.map((i) => [i.id, i]));
   const results: EbayActionItemResult[] = [];
@@ -683,7 +715,7 @@ function handleDemoAction(params: {
         continue;
       }
 
-      applyDemoListingPrice(listing.id, calc.nextPrice);
+      applyDemoListingPrice(listing.id, calc.nextPrice, priceWatcherStage);
 
       const job = recordDemoJob({
         item_id: item.id,
@@ -696,6 +728,7 @@ function handleDemoAction(params: {
           newPrice: calc.nextPrice,
           floorPrice,
           dropPct,
+          priceWatcherStage: priceWatcherStage ?? null,
           wasClamped: calc.wasClamped,
         },
         status: "completed",

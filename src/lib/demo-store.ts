@@ -1360,7 +1360,11 @@ export function recordDemoJob(job: Omit<ChannelJob, "id">): ChannelJob {
   return created;
 }
 
-export function applyDemoListingPrice(listingId: string, newPrice: number) {
+export function applyDemoListingPrice(
+  listingId: string,
+  newPrice: number,
+  priceWatcherStage?: 30 | 45 | 60
+) {
   const store = getDemoStore();
   const listing = store.listings.find((l) => l.id === listingId);
   if (!listing) return null;
@@ -1368,7 +1372,49 @@ export function applyDemoListingPrice(listingId: string, newPrice: number) {
   listing.listed_price = roundCurrency(newPrice);
   listing.last_price_drop_at = nowIso;
   listing.last_synced_at = nowIso;
+  if (priceWatcherStage) {
+    const item = store.items.find((i) => i.id === listing.item_id);
+    if (item) {
+      item.item_specifics = {
+        ...(item.item_specifics || {}),
+        price_watcher_stage: String(priceWatcherStage),
+        price_watcher_last_action_at: nowIso,
+      };
+      item.updated_at = nowIso;
+    }
+  }
   return listing;
+}
+
+export function applyDemoPriceWatcherAction(params: {
+  itemId: string;
+  mode: "skip_stage" | "keep" | "reopen";
+  stage?: 30 | 45 | 60;
+}) {
+  const store = getDemoStore();
+  const item = store.items.find((i) => i.id === params.itemId);
+  if (!item) return null;
+  const nowIso = new Date().toISOString();
+  const nextSpecs: Record<string, string | string[]> = {
+    ...(item.item_specifics || {}),
+  };
+  if (params.mode === "skip_stage" && params.stage) {
+    nextSpecs.price_watcher_stage = String(params.stage);
+    nextSpecs.price_watcher_last_action_at = nowIso;
+  } else if (params.mode === "keep") {
+    nextSpecs.price_watcher_stage = "90";
+    nextSpecs.price_watcher_decision = "keep";
+    nextSpecs.price_watcher_decision_at = nowIso;
+  } else if (params.mode === "reopen") {
+    delete nextSpecs.price_watcher_decision;
+    delete nextSpecs.price_watcher_decision_at;
+    if (nextSpecs.price_watcher_stage === "90") {
+      nextSpecs.price_watcher_stage = "60";
+    }
+  }
+  item.item_specifics = nextSpecs;
+  item.updated_at = nowIso;
+  return item;
 }
 
 export function applyDemoEndAndSellSimilar(listingId: string) {
@@ -1386,6 +1432,15 @@ export function applyDemoEndAndSellSimilar(listingId: string) {
   listing.watchers_count = 0;
   listing.impressions_count = 0;
   listing.promoted_ad_rate_pct = 0;
+  const item = store.items.find((i) => i.id === listing.item_id);
+  if (item?.item_specifics) {
+    const nextSpecs = { ...item.item_specifics };
+    delete nextSpecs.price_watcher_stage;
+    delete nextSpecs.price_watcher_decision;
+    delete nextSpecs.price_watcher_decision_at;
+    delete nextSpecs.price_watcher_last_action_at;
+    item.item_specifics = nextSpecs;
+  }
   return listing;
 }
 

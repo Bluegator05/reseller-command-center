@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import {
+  applyDemoPriceWatcherAction,
   createDemoInventoryItem,
   deleteDemoInventoryItem,
   promoteDemoDraftToActive,
@@ -47,6 +48,12 @@ export async function POST(request: Request) {
           action: "set_stale_exempt";
           itemId: string;
           exempt: boolean;
+        }
+      | {
+          action: "price_watcher_action";
+          itemId: string;
+          mode: "skip_stage" | "keep" | "reopen";
+          stage?: 30 | 45 | 60;
         }
       | {
           action: "set_bin_audit";
@@ -245,6 +252,97 @@ export async function POST(request: Request) {
         return NextResponse.json({ mode: "live", item: updated, exempt });
       }
       return NextResponse.json({ mode: "demo", exempt });
+    }
+
+    if (body.action === "price_watcher_action") {
+      if (!body.itemId) {
+        return NextResponse.json({ error: "Missing itemId" }, { status: 400 });
+      }
+      const mode = body.mode;
+      const validStage =
+        body.stage === 30 || body.stage === 45 || body.stage === 60
+          ? body.stage
+          : undefined;
+
+      if (mode === "skip_stage" && !validStage) {
+        return NextResponse.json(
+          { error: "Missing valid stage (30, 45, or 60)" },
+          { status: 400 }
+        );
+      }
+
+      if (supabase && envReadiness.isSupabaseReady) {
+        const nowIso = new Date().toISOString();
+        const { data: existing, error: fetchErr } = await supabase
+          .from("inventory_items")
+          .select("id, sku, item_specifics")
+          .eq("id", body.itemId)
+          .single();
+        if (fetchErr || !existing) {
+          return NextResponse.json({ error: "Item not found" }, { status: 404 });
+        }
+
+        const specs = (existing.item_specifics || {}) as Record<string, unknown>;
+        const nextSpecs: Record<string, unknown> = { ...specs };
+        const prevLog = Array.isArray(specs.activity_log) ? specs.activity_log : [];
+
+        let logTitle = "Price Watcher updated";
+        let logDetail = "";
+        if (mode === "skip_stage" && validStage) {
+          const prevStage = Number(specs.price_watcher_stage) || 0;
+          nextSpecs.price_watcher_stage = String(Math.max(prevStage, validStage));
+          nextSpecs.price_watcher_last_action_at = nowIso;
+          logTitle = `Price Watcher: Skipped ${validStage}d drop`;
+          logDetail = `Acknowledged ${validStage}-day markdown without lowering price`;
+        } else if (mode === "keep") {
+          nextSpecs.price_watcher_stage = "90";
+          nextSpecs.price_watcher_decision = "keep";
+          nextSpecs.price_watcher_decision_at = nowIso;
+          logTitle = "Price Watcher: Keep listing (90d+)";
+          logDetail = "Decided to keep active instead of delisting/donating";
+        } else if (mode === "reopen") {
+          delete nextSpecs.price_watcher_decision;
+          delete nextSpecs.price_watcher_decision_at;
+          if (String(nextSpecs.price_watcher_stage) === "90") {
+            nextSpecs.price_watcher_stage = "60";
+          }
+          logTitle = "Price Watcher: Re-opened 90d decision";
+          logDetail = "Moved back into 90-day Keep vs Delist/Donate review queue";
+        }
+
+        nextSpecs.activity_log = [
+          {
+            id: `evt-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+            type: "note",
+            timestamp: nowIso,
+            title: logTitle,
+            detail: logDetail,
+          },
+          ...prevLog.slice(0, 49),
+        ];
+
+        const { data: updated, error: updErr } = await supabase
+          .from("inventory_items")
+          .update({ item_specifics: nextSpecs, updated_at: nowIso })
+          .eq("id", body.itemId)
+          .select("*")
+          .single();
+        if (updErr) {
+          return NextResponse.json({ error: updErr.message }, { status: 400 });
+        }
+        return NextResponse.json({ mode: "live", item: updated, actionMode: mode });
+      }
+
+      const demoItem = applyDemoPriceWatcherAction({
+        itemId: body.itemId,
+        mode,
+        stage: validStage,
+      });
+      return NextResponse.json({
+        mode: "demo",
+        item: demoItem,
+        actionMode: mode,
+      });
     }
 
     if (body.action === "set_relist_count") {

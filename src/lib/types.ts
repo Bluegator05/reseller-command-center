@@ -207,6 +207,9 @@ export interface ChannelJob {
 
 export type StaleSeverity = "healthy" | "watch" | "stale" | "critical";
 
+export type PriceWatcherStage = 30 | 45 | 60 | 90;
+export type PriceWatcherDecision = "keep";
+
 export interface CrossChannelListingSummary {
   listing_id: string;
   marketplace: MarketplaceType;
@@ -284,6 +287,15 @@ export interface StaleRadarRow {
   stale_reason: string;
   projected_drop_price: number;
   drop_would_clamp: boolean;
+  // Price Watcher (30d -10%, 45d -15%, 60d -20%, 90d Keep vs Delist/Donate)
+  price_watcher_stage: PriceWatcherStage | null;
+  price_watcher_due: boolean;
+  price_watcher_drop_pct: number;
+  price_watcher_target_price: number;
+  price_watcher_would_clamp: boolean;
+  price_watcher_completed_stage: number;
+  price_watcher_decision: PriceWatcherDecision | null;
+  price_watcher_decision_at: string | null;
   est_fee_amount: number;
   est_net_profit: number;
   est_margin_pct: number;
@@ -488,6 +500,7 @@ export interface EbayActionRequest {
   action: "update_price" | "end_and_sell_similar" | "send_offer";
   listingIds: string[];
   dropPct?: number;
+  priceWatcherStage?: 30 | 45 | 60;
   offerPct?: number;
   offerMessage?: string;
   newPrice?: number;

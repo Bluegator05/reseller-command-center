@@ -26,6 +26,7 @@ import {
   Zap,
 } from "lucide-react";
 import { MarketplaceIcon } from "./MarketplaceIcons";
+import { PriceWatcherPanel } from "./PriceWatcherPanel";
 import { RelistSanityModal } from "./RelistSanityModal";
 import type {
   ChannelJob,
@@ -80,6 +81,12 @@ interface StaleRadarTableProps {
   onToggleStaleExempt?: (params: {
     itemId: string;
     exempt: boolean;
+  }) => Promise<void>;
+  onPriceWatcherAction?: (params: {
+    itemId: string;
+    sku: string;
+    mode: "skip_stage" | "keep" | "reopen";
+    stage?: 30 | 45 | 60;
   }) => Promise<void>;
   onReconcileEbay?: () => Promise<void>;
   isSyncingEbay?: boolean;
@@ -259,6 +266,7 @@ export function StaleRadarTable({
   onDisposeItem,
   onSetRelistCount,
   onToggleStaleExempt,
+  onPriceWatcherAction,
   onReconcileEbay,
   isSyncingEbay = false,
   onResolveSoldConflict,
@@ -348,6 +356,11 @@ export function StaleRadarTable({
   const metrics = useMemo(() => {
     const newlyListedItems = items.filter((i) => i.is_newly_listed);
     const staleItems = items.filter((i) => i.is_stale);
+    const priceWatcherDueItems = items.filter((i) => i.price_watcher_due);
+    const priceWatcher90Items = items.filter((i) => i.price_watcher_stage === 90);
+    const needsActionItems = items.filter(
+      (i) => i.is_stale || i.price_watcher_due
+    );
     const criticalItems = items.filter((i) => i.stale_severity === "critical");
     const atFloorItems = items.filter((i) => i.is_at_floor);
     const eligible30dUnpromoted = items.filter(
@@ -369,6 +382,9 @@ export function StaleRadarTable({
       totalActive: items.length,
       newlyListedCount: newlyListedItems.length,
       staleCount: staleItems.length,
+      needsActionCount: needsActionItems.length,
+      priceWatcherDueCount: priceWatcherDueItems.length,
+      priceWatcher90Count: priceWatcher90Items.length,
       criticalCount: criticalItems.length,
       atFloorCount: atFloorItems.length,
       eligible30dCount: eligible30dUnpromoted.length,
@@ -403,7 +419,12 @@ export function StaleRadarTable({
         ch === "ebay" || row.cross_listings.some((c) => c.marketplace === ch);
 
       if (activeFilter === "newly_listed" && !row.is_newly_listed) return false;
-      if (activeFilter === "stale" && !row.is_stale) return false;
+      if (
+        activeFilter === "stale" &&
+        !(row.is_stale || row.price_watcher_due)
+      ) {
+        return false;
+      }
       if (activeFilter === "relisted" && row.relist_count <= 0) return false;
       if (
         activeFilter === "donate_toss" &&
@@ -592,7 +613,11 @@ export function StaleRadarTable({
       label: "Newly Listed (≤14d)",
       count: metrics.newlyListedCount,
     },
-    { key: "stale", label: "Needs Action (>45d)", count: metrics.staleCount },
+    {
+      key: "stale",
+      label: "Needs Action (30d+)",
+      count: metrics.needsActionCount,
+    },
     { key: "relisted", label: "Relisted", count: metrics.relistedCount },
     {
       key: "unpromoted_30d",
@@ -1017,6 +1042,57 @@ export function StaleRadarTable({
           </div>
         )}
       </div>
+
+      {/* Price Watcher (30d -10%, 45d -15%, 60d -20%, 90d Delist & Donate vs Keep) inside Needs Action */}
+      {activeFilter === "stale" ? (
+        <PriceWatcherPanel
+          items={items}
+          busyListingIds={busyListingIds}
+          isBulkBusy={isBulkBusy}
+          onExecuteAction={onExecuteAction}
+          onPriceWatcherAction={async (params) => {
+            if (onPriceWatcherAction) {
+              await onPriceWatcherAction(params);
+            }
+          }}
+          onOpenDispose={
+            onDisposeItem
+              ? (row, defaultNote) => {
+                  setDisposeTargetRow(row);
+                  setDisposeNote(defaultNote || "");
+                }
+              : undefined
+          }
+          onOpenRelist={(row) => setRelistCheckRow(row)}
+          onOpenItemDetail={onOpenItemDetail}
+        />
+      ) : (
+        metrics.priceWatcherDueCount > 0 && (
+          <div className="bg-gradient-to-r from-[#FFFBEB] to-[#FEF3C7]/60 border border-[#FDE68A] rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2.5 text-xs text-[#92400E] min-w-0">
+              <TrendingDown className="w-4 h-4 text-[#B45309] shrink-0" />
+              <span>
+                <strong>
+                  Price Watcher: {metrics.priceWatcherDueCount} listing
+                  {metrics.priceWatcherDueCount === 1 ? "" : "s"} due
+                </strong>{" "}
+                for 30d (-10%) / 45d (-15%) / 60d (-20%) price drops
+                {metrics.priceWatcher90Count > 0
+                  ? ` · ${metrics.priceWatcher90Count} at 90d+ Delist/Donate decision`
+                  : ""}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveFilter("stale")}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-[#B45309] text-white hover:bg-[#92400E] transition cursor-pointer shrink-0"
+            >
+              <span>Open Price Watcher</span>
+              <ArrowUpRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )
+      )}
 
       {/* Already-Sold Reconciliation Banner */}
       {metrics.soldConflictCount > 0 && (

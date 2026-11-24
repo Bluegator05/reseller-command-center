@@ -592,7 +592,9 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
     [pushToast, refreshInventory]
   );
 
-  const staleCount = data.items.filter((i) => i.is_stale).length;
+  const staleCount = data.items.filter(
+    (i) => i.is_stale || i.price_watcher_due
+  ).length;
 
   useEffect(() => {
     try {
@@ -1534,6 +1536,47 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
                   ? "Removed from Stale Radar Flagged and locked against accidental End & Sell Similar."
                   : "This listing will be evaluated by Stale Radar again."
               );
+            }}
+            onPriceWatcherAction={async ({ itemId, sku, mode, stage }) => {
+              const res = await fetch("/api/inventory", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  action: "price_watcher_action",
+                  itemId,
+                  mode,
+                  stage,
+                }),
+              });
+              const payload = (await res.json()) as { error?: string };
+              if (!res.ok) {
+                pushToast(
+                  "error",
+                  "Price Watcher Update Failed",
+                  payload.error || "Unknown error"
+                );
+                return;
+              }
+              await refreshInventory();
+              if (mode === "keep") {
+                pushToast(
+                  "success",
+                  `Keeping ${sku}`,
+                  "Cleared from 90-day Delist & Donate review. View under 'Kept 90d+' anytime."
+                );
+              } else if (mode === "reopen") {
+                pushToast(
+                  "info",
+                  `Re-opened 90d Decision · ${sku}`,
+                  "Moved back into the 90-day Price Watcher review queue."
+                );
+              } else {
+                pushToast(
+                  "info",
+                  `Skipped ${stage}d Drop · ${sku}`,
+                  "Price kept as-is until the next age milestone."
+                );
+              }
             }}
             />
           </div>
