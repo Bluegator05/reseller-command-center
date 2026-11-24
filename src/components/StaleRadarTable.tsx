@@ -6,6 +6,7 @@ import {
   ArrowDownRight,
   ArrowUpDown,
   ArrowUpRight,
+  Boxes,
   Eye,
   Heart,
   LayoutGrid,
@@ -29,6 +30,7 @@ import { MarketplaceIcon } from "./MarketplaceIcons";
 import { PriceWatcherPanel } from "./PriceWatcherPanel";
 import { RelistSanityModal } from "./RelistSanityModal";
 import type {
+  BulkBuyRecord,
   ChannelJob,
   EbayActionRequest,
   InventoryItem,
@@ -42,6 +44,7 @@ type CrossListTarget = Exclude<MarketplaceType, "ebay">;
 interface StaleRadarTableProps {
   items: StaleRadarRow[];
   draftItems: InventoryItem[];
+  bulkBuys?: BulkBuyRecord[];
   extensionJobs: ChannelJob[];
   channelCounts: Record<MarketplaceType, number>;
   busyListingIds: Set<string>;
@@ -88,6 +91,10 @@ interface StaleRadarTableProps {
     mode: "skip_stage" | "keep" | "reopen";
     stage?: 30 | 45 | 60;
   }) => Promise<void>;
+  onAssignToBulkBuy?: (params: {
+    bulkBuyId: string;
+    itemIds: string[];
+  }) => Promise<void>;
   onReconcileEbay?: () => Promise<void>;
   isSyncingEbay?: boolean;
   onResolveSoldConflict?: (params: {
@@ -109,6 +116,7 @@ type FilterKey =
   | "missing_mercari"
   | "missing_facebook"
   | "missing_data"
+  | "no_bulk_buy"
   | "sold_conflict"
   | "at_floor";
 
@@ -247,6 +255,7 @@ function resolveMarketplaceUrl(
 export function StaleRadarTable({
   items,
   draftItems,
+  bulkBuys = [],
   extensionJobs,
   channelCounts,
   busyListingIds,
@@ -267,6 +276,7 @@ export function StaleRadarTable({
   onSetRelistCount,
   onToggleStaleExempt,
   onPriceWatcherAction,
+  onAssignToBulkBuy,
   onReconcileEbay,
   isSyncingEbay = false,
   onResolveSoldConflict,
@@ -275,6 +285,8 @@ export function StaleRadarTable({
   const [activeFilter, setActiveFilter] = useState<FilterKey>("all");
   const [sortBy, setSortBy] = useState<SortKey>("days_asc");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [selectedBulkBuyId, setSelectedBulkBuyId] = useState<string>("");
+  const [isAssigningBulkBuy, setIsAssigningBulkBuy] = useState(false);
   const [listingAllItemId, setListingAllItemId] = useState<string | null>(null);
   const [resolvingConflictItemId, setResolvingConflictItemId] = useState<
     string | null
@@ -307,6 +319,14 @@ export function StaleRadarTable({
   );
   const [isRelistingFromModal, setIsRelistingFromModal] = useState(false);
   const [mountNow] = useState(() => Date.now());
+
+  const sortedBulkBuys = useMemo(
+    () =>
+      [...bulkBuys].sort((a, b) =>
+        (b.purchase_date || "").localeCompare(a.purchase_date || "")
+      ),
+    [bulkBuys]
+  );
 
   const [notesMap, setNotesMap] = useStoredMap<Record<string, string>>(
     NOTES_STORAGE_KEY,
@@ -405,6 +425,7 @@ export function StaleRadarTable({
           !i.bin_location?.trim() ||
           !i.source_location?.trim()
       ).length,
+      noBulkBuyCount: items.filter((i) => !i.bulk_buy_id).length,
       soldConflictCount: items.filter(
         (i) => (i.sold_conflict_orders?.length ?? 0) > 0
       ).length,
@@ -445,6 +466,9 @@ export function StaleRadarTable({
           !row.source_location?.trim()
         )
       ) {
+        return false;
+      }
+      if (activeFilter === "no_bulk_buy" && Boolean(row.bulk_buy_id)) {
         return false;
       }
       if (
@@ -842,6 +866,32 @@ export function StaleRadarTable({
             </button>
             <button
               type="button"
+              onClick={() =>
+                setActiveFilter((prev) =>
+                  prev === "no_bulk_buy" ? "all" : "no_bulk_buy"
+                )
+              }
+              title="Active listings not yet assigned to any Bulk Buy lot"
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer border ${
+                activeFilter === "no_bulk_buy"
+                  ? "bg-[#C2410C] text-white border-[#C2410C]"
+                  : "bg-[#FFF7ED] text-[#C2410C] border-[#FED7AA] hover:bg-[#FFEDD5]"
+              }`}
+            >
+              <Boxes className="w-3.5 h-3.5" />
+              <span>No Bulk Buy</span>
+              <span
+                className={`font-mono tabular-nums text-[11px] px-1.5 rounded ${
+                  activeFilter === "no_bulk_buy"
+                    ? "bg-white/20 text-white"
+                    : "bg-white text-[#C2410C]"
+                }`}
+              >
+                {metrics.noBulkBuyCount}
+              </span>
+            </button>
+            <button
+              type="button"
               onClick={() => setShowDeathPile((v) => !v)}
               className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer ${
                 showDeathPile
@@ -962,6 +1012,24 @@ export function StaleRadarTable({
           </div>
         </div>
 
+        {/* Unassigned Bulk Buy Helper Banner */}
+        {activeFilter === "no_bulk_buy" &&
+          validSelectedIds.size === 0 &&
+          sortedBulkBuys.length > 0 &&
+          onAssignToBulkBuy && (
+            <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2 rounded-lg bg-[#FFF7ED] border border-[#FED7AA] text-xs text-[#9A3412]">
+              <div className="flex items-center gap-2">
+                <Boxes className="w-4 h-4 text-[#C2410C] shrink-0" />
+                <span>
+                  Showing <strong>{filteredItems.length}</strong> active listing
+                  {filteredItems.length === 1 ? "" : "s"} not assigned to a Bulk
+                  Buy. Check items below to bulk-assign them to a Bulk Buy (auto
+                  re-splits COGS), or click any item to assign individually.
+                </span>
+              </div>
+            </div>
+          )}
+
         {/* Bulk Action Bar */}
         {validSelectedIds.size > 0 && (
           <div className="flex flex-wrap items-center justify-between gap-3 px-3.5 py-2.5 rounded-lg bg-[#0F766E] text-white">
@@ -977,6 +1045,53 @@ export function StaleRadarTable({
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
+              {onAssignToBulkBuy && sortedBulkBuys.length > 0 && (
+                <div className="inline-flex items-center gap-1 bg-white/15 rounded-md p-0.5 border border-white/25">
+                  <select
+                    aria-label="Bulk Buy to assign selected items"
+                    value={selectedBulkBuyId}
+                    onChange={(e) => setSelectedBulkBuyId(e.target.value)}
+                    className="px-2 py-1 text-xs font-medium rounded bg-white text-[#14151A] max-w-[180px] focus:outline-none cursor-pointer"
+                  >
+                    <option value="">Pick Bulk Buy…</option>
+                    {sortedBulkBuys.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.lot_code ? `${b.lot_code} · ` : ""}
+                        {b.name}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    disabled={
+                      isAssigningBulkBuy ||
+                      !selectedBulkBuyId ||
+                      selectedRows.length === 0
+                    }
+                    onClick={async () => {
+                      if (!selectedBulkBuyId) return;
+                      setIsAssigningBulkBuy(true);
+                      try {
+                        await onAssignToBulkBuy({
+                          bulkBuyId: selectedBulkBuyId,
+                          itemIds: selectedRows.map((r) => r.item_id),
+                        });
+                        setSelectedIds(new Set());
+                      } finally {
+                        setIsAssigningBulkBuy(false);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-xs font-bold bg-[#FFF7ED] text-[#C2410C] hover:bg-[#FFEDD5] disabled:opacity-45 cursor-pointer"
+                  >
+                    {isAssigningBulkBuy ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Boxes className="w-3.5 h-3.5" />
+                    )}
+                    <span>Assign ({selectedRows.length})</span>
+                  </button>
+                </div>
+              )}
               <button
                 type="button"
                 disabled={isBulkBusy || bulkPreview.droppable === 0}

@@ -47,6 +47,10 @@ interface ItemDetailModalProps {
     itemId: string,
     disposition: "donated" | "discarded"
   ) => Promise<void>;
+  onAssignToBulkBuy?: (params: {
+    bulkBuyId: string;
+    itemIds: string[];
+  }) => Promise<void>;
 }
 
 const SOURCE_TYPE_OPTIONS = [
@@ -122,6 +126,7 @@ function ItemDetailModalInner({
   onClose,
   onSave,
   onDispose,
+  onAssignToBulkBuy,
 }: {
   row: StaleRadarRow;
   bulkBuys?: BulkBuyRecord[];
@@ -132,11 +137,19 @@ function ItemDetailModalInner({
     itemId: string,
     disposition: "donated" | "discarded"
   ) => Promise<void>;
+  onAssignToBulkBuy?: (params: {
+    bulkBuyId: string;
+    itemIds: string[];
+  }) => Promise<void>;
 }) {
   const [activeView, setActiveView] = useState<"edit" | "activity">("edit");
   const [disposingAs, setDisposingAs] = useState<"donated" | "discarded" | null>(
     null
   );
+  const [assignBulkBuyId, setAssignBulkBuyId] = useState(
+    row.bulk_buy_id ?? ""
+  );
+  const [isAssigningBulkBuy, setIsAssigningBulkBuy] = useState(false);
   const [title, setTitle] = useState(row.title);
   const [sku, setSku] = useState(row.sku);
   const [condition, setCondition] = useState(row.condition);
@@ -889,6 +902,71 @@ function ItemDetailModalInner({
                 </div>
               </div>
 
+              {onAssignToBulkBuy && bulkBuys.length > 0 && (
+                <div className="rounded-xl border border-[#FED7AA] bg-[#FFF7ED]/70 px-3 py-2.5 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 text-[11px] font-semibold text-[#9A3412]">
+                    <Boxes className="w-3.5 h-3.5 text-[#C2410C]" />
+                    <span>
+                      {linkedBulkBuy
+                        ? `Linked Bulk Buy: ${linkedBulkBuy.name}`
+                        : "Not assigned to a Bulk Buy"}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <select
+                      aria-label="Assign item to Bulk Buy"
+                      value={assignBulkBuyId}
+                      onChange={(e) => setAssignBulkBuyId(e.target.value)}
+                      className="px-2.5 py-1.5 text-xs rounded-lg border border-[#FDBA74] bg-white text-[#171A1D] max-w-[220px] focus:outline-none focus:border-[#C2410C] cursor-pointer"
+                    >
+                      <option value="">Select Bulk Buy…</option>
+                      {[...bulkBuys]
+                        .sort((a, b) =>
+                          (b.purchase_date || "").localeCompare(
+                            a.purchase_date || ""
+                          )
+                        )
+                        .map((b) => (
+                          <option key={b.id} value={b.id}>
+                            {b.lot_code ? `${b.lot_code} · ` : ""}
+                            {b.name}
+                          </option>
+                        ))}
+                    </select>
+                    <button
+                      type="button"
+                      disabled={
+                        isAssigningBulkBuy ||
+                        !assignBulkBuyId ||
+                        assignBulkBuyId === (row.bulk_buy_id ?? "")
+                      }
+                      onClick={async () => {
+                        if (!assignBulkBuyId) return;
+                        setIsAssigningBulkBuy(true);
+                        try {
+                          await onAssignToBulkBuy({
+                            bulkBuyId: assignBulkBuyId,
+                            itemIds: [row.item_id],
+                          });
+                        } finally {
+                          setIsAssigningBulkBuy(false);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-bold bg-[#C2410C] text-white hover:bg-[#9A3412] disabled:opacity-45 transition cursor-pointer"
+                    >
+                      {isAssigningBulkBuy ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Boxes className="w-3.5 h-3.5" />
+                      )}
+                      <span>
+                        {linkedBulkBuy ? "Reassign" : "Assign & Split COGS"}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div>
                   <label className="flex items-center gap-1 text-[11px] font-medium text-[#5F666D] mb-1">
@@ -1237,6 +1315,7 @@ export function ItemDetailModal({
   onClose,
   onSave,
   onDispose,
+  onAssignToBulkBuy,
 }: ItemDetailModalProps) {
   if (!row) return null;
   return (
@@ -1248,6 +1327,7 @@ export function ItemDetailModal({
       onClose={onClose}
       onSave={onSave}
       onDispose={onDispose}
+      onAssignToBulkBuy={onAssignToBulkBuy}
     />
   );
 }
