@@ -673,3 +673,34 @@ export interface AdjustmentLogEntry {
   title: string;
   note: string;
 }
+
+export interface RecordLocalFacebookSaleRequest {
+  mode: "unlisted" | "existing";
+  itemId?: string | null;
+  title?: string;
+  sku?: string | null;
+  salePrice: number;
+  soldAt?: string | null;
+  paymentMethod?: string;
+  buyerName?: string | null;
+  notes?: string | null;
+  bulkBuyId?: string | null;
+  standaloneCogs?: number;
+  marketplaceFees?: number;
+  shippingCost?: number;
+}
+
+export interface RecordLocalFacebookSaleResponse {
+  mode: "live" | "demo";
+  orderId: string;
+  itemId: string;
+  sku: string;
+  title: string;
+  grossSalePrice: number;
+  cogsApplied: number;
+  bulkBuyName?: string | null;
+  rebalancedCount?: number;
+  perShareCost?: number;
+  delistedChannels: MarketplaceType[];
+  message: string;
+}

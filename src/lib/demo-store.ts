@@ -2003,3 +2003,144 @@ export function updateDemoSalesOrder(
 
   return { order, restocked: didRestock };
 }
+
+export function recordDemoLocalFacebookSale(input: {
+  mode: "unlisted" | "existing";
+  itemId?: string | null;
+  title?: string;
+  sku?: string | null;
+  salePrice: number;
+  soldAtIso: string;
+  paymentMethod: string;
+  buyerName?: string | null;
+  notes?: string | null;
+  bulkBuyId?: string | null;
+  standaloneCogs: number;
+  marketplaceFees: number;
+  shippingCost: number;
+}): {
+  orderId: string;
+  itemId: string;
+  sku: string;
+  title: string;
+  grossSalePrice: number;
+  cogsApplied: number;
+  delistedChannels: MarketplaceType[];
+} {
+  const store = getDemoStore();
+  const nowIso = new Date().toISOString();
+  const shortTag = Date.now().toString(36).slice(-5).toUpperCase();
+  const delistedChannels: MarketplaceType[] = [];
+
+  let item =
+    input.mode === "existing" && input.itemId
+      ? store.items.find((i) => i.id === input.itemId) || null
+      : null;
+
+  if (item) {
+    item.status = "sold";
+    item.payment_method = input.paymentMethod;
+    item.updated_at = nowIso;
+    if (input.bulkBuyId) {
+      item.item_specifics = {
+        ...(item.item_specifics || {}),
+        bulk_buy_id: input.bulkBuyId,
+      };
+    }
+    for (const lst of store.listings) {
+      if (lst.item_id !== item.id) continue;
+      if (lst.marketplace === "facebook") {
+        lst.status = "sold";
+      } else if (lst.status === "active" || lst.status === "draft") {
+        lst.status = "ended";
+        delistedChannels.push(lst.marketplace);
+      }
+    }
+  } else {
+    const newItemId = `demo-fb-${Date.now()}-${shortTag}`;
+    const sku = (input.sku || "").trim() || `FB-LOCAL-${shortTag}`;
+    const title = (input.title || "Facebook Marketplace Local Sale").trim();
+    item = {
+      id: newItemId,
+      sku,
+      title,
+      description_html: null,
+      description_plain: input.notes || null,
+      condition: "Used",
+      brand: null,
+      category_hint: "Facebook Local Pickup",
+      cogs: roundCurrency(input.standaloneCogs),
+      prep_cost: 0,
+      target_price: roundCurrency(input.salePrice),
+      floor_price: roundCurrency(input.salePrice),
+      bin_location: "Local Pickup",
+      source_location: "Facebook Local",
+      source_type: "thrift",
+      payment_method: input.paymentMethod,
+      receipt_ref: null,
+      tax_category: "inventory_cogs",
+      notes: input.notes || null,
+      weight_oz: null,
+      length_in: null,
+      width_in: null,
+      height_in: null,
+      item_specifics: {
+        fb_local_only: "true",
+        ...(input.bulkBuyId ? { bulk_buy_id: input.bulkBuyId } : {}),
+      },
+      image_urls: [],
+      status: "sold",
+      acquired_at: input.soldAtIso,
+      created_at: nowIso,
+      updated_at: nowIso,
+    };
+    store.items.unshift(item);
+  }
+
+  const gross = roundCurrency(input.salePrice);
+  const fees = roundCurrency(input.marketplaceFees);
+  const ship = roundCurrency(input.shippingCost);
+  const netProfit = roundCurrency(gross - fees - ship);
+  const cogsApplied = roundCurrency(item.cogs || 0);
+  const orderId = `ord-fb-local-${Date.now()}`;
+
+  store.salesOrders.unshift({
+    id: orderId,
+    item_id: item.id,
+    sku: item.sku,
+    title: item.title,
+    image_url: item.image_urls?.[0] || null,
+    marketplace: "facebook",
+    external_order_id: `FB-LOCAL-${shortTag}`,
+    gross_sale_price: gross,
+    marketplace_fees: fees,
+    shipping_cost: ship,
+    refund_amount: 0,
+    cogs: cogsApplied,
+    prep_cost: item.prep_cost ?? 0,
+    source_location: item.source_location ?? "Facebook Local",
+    source_type: item.source_type ?? "thrift",
+    acquired_at: item.acquired_at,
+    listed_at: item.created_at,
+    bin_location: item.bin_location ?? "Local Pickup",
+    bulk_buy_id: input.bulkBuyId ?? null,
+    fulfillment_status: "shipped",
+    tracking_number: `Local Pickup (${input.paymentMethod}${input.buyerName ? ` · ${input.buyerName}` : ""})`,
+    shipped_at: input.soldAtIso,
+    net_profit: netProfit,
+    true_net_after_cogs: roundCurrency(netProfit - cogsApplied),
+    sold_at: input.soldAtIso,
+    delisted_channels: delistedChannels,
+    source: "manual",
+  });
+
+  return {
+    orderId,
+    itemId: item.id,
+    sku: item.sku,
+    title: item.title,
+    grossSalePrice: gross,
+    cogsApplied,
+    delistedChannels,
+  };
+}

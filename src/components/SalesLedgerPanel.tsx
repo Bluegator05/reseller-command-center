@@ -11,6 +11,7 @@ import {
   Image as ImageIcon,
   Loader2,
   Mail,
+  Plus,
   Printer,
   RefreshCw,
   RotateCcw,
@@ -23,11 +24,15 @@ import {
   X,
   Zap,
 } from "lucide-react";
+import { LogLocalFacebookSaleModal } from "./LogLocalFacebookSaleModal";
 import type {
   AutoDelistCascadeResult,
+  BulkBuyRecord,
   ChannelJob,
+  InventoryItem,
   MarketplaceType,
   OrderFulfillmentStatus,
+  RecordLocalFacebookSaleRequest,
   SalesOrderRecord,
   SalesOrderUpdateRequest,
   StaleRadarRow,
@@ -38,11 +43,16 @@ type FulfillmentViewFilter = "to_ship" | "all" | "shipped" | "returns";
 
 interface SalesLedgerPanelProps {
   activeItems: StaleRadarRow[];
+  draftItems?: InventoryItem[];
+  bulkBuys?: BulkBuyRecord[];
   salesOrders: SalesOrderRecord[];
   recentJobs?: ChannelJob[];
   isLiveMode?: boolean;
   isSyncingEbaySales?: boolean;
   onSyncEbaySales?: (daysBack: number) => Promise<void>;
+  onRecordLocalFacebookSale?: (
+    req: RecordLocalFacebookSaleRequest
+  ) => Promise<void>;
   onTriggerWebhookSale: (params: {
     itemId: string;
     marketplace: "ebay" | "etsy";
@@ -103,17 +113,21 @@ function defaultRangeDate(daysAgo: number): string {
 
 export function SalesLedgerPanel({
   activeItems,
+  draftItems = [],
+  bulkBuys = [],
   salesOrders,
   recentJobs = [],
   isLiveMode = false,
   isSyncingEbaySales = false,
   onSyncEbaySales,
+  onRecordLocalFacebookSale,
   onTriggerWebhookSale,
   onTriggerInboundEmail,
   onUpdateSalesOrder,
   onSelectOrder,
 }: SalesLedgerPanelProps) {
   const [subView, setSubView] = useState<"ledger" | "picklist">("ledger");
+  const [showLocalFbModal, setShowLocalFbModal] = useState(false);
   const [ingestMode, setIngestMode] = useState<"webhook" | "email">("email");
   const [showIngestWorkbench, setShowIngestWorkbench] = useState(!isLiveMode);
   const [showDelistLog, setShowDelistLog] = useState(false);
@@ -600,6 +614,18 @@ export function SalesLedgerPanel({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {onRecordLocalFacebookSale && (
+            <button
+              id="btn-log-local-fb-sale"
+              type="button"
+              onClick={() => setShowLocalFbModal(true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-[#1877F2] text-white hover:bg-[#1565C0] shadow-[0_1px_2px_rgba(24,119,242,0.22)] transition cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Log Local FB Sale</span>
+            </button>
+          )}
+
           {onSyncEbaySales && (
             <div className="inline-flex items-center gap-1.5 bg-white border border-[#DCE1DE] rounded-xl p-1 shadow-[0_1px_2px_rgba(20,21,26,0.03)]">
               <select
@@ -1771,6 +1797,15 @@ export function SalesLedgerPanel({
             </div>
           </div>
         </div>
+      )}
+      {showLocalFbModal && onRecordLocalFacebookSale && (
+        <LogLocalFacebookSaleModal
+          activeItems={activeItems}
+          draftItems={draftItems}
+          bulkBuys={bulkBuys}
+          onClose={() => setShowLocalFbModal(false)}
+          onSubmit={onRecordLocalFacebookSale}
+        />
       )}
     </div>
   );

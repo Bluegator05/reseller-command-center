@@ -51,6 +51,8 @@ import type {
   JobStatusType,
   MarketplaceType,
   QuickAddItemRequest,
+  RecordLocalFacebookSaleRequest,
+  RecordLocalFacebookSaleResponse,
   SalesOrderUpdateRequest,
   StaleRadarRow,
 } from "@/lib/types";
@@ -1622,11 +1624,38 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
         ) : activeTab === "sales" ? (
           <SalesLedgerPanel
             activeItems={data.items}
+            draftItems={data.draftItems}
+            bulkBuys={data.bulkBuys ?? []}
             salesOrders={data.salesOrders}
             recentJobs={data.recentJobs}
             isLiveMode={isLiveMode}
             isSyncingEbaySales={isSyncingEbaySales}
             onSyncEbaySales={handleSyncEbaySales}
+            onRecordLocalFacebookSale={async (
+              req: RecordLocalFacebookSaleRequest
+            ) => {
+              const res = await fetch("/api/sales", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(req),
+              });
+              const payload = (await res.json()) as RecordLocalFacebookSaleResponse & {
+                error?: string;
+              };
+              if (!res.ok) {
+                throw new Error(
+                  payload.error || "Could not record local Facebook sale"
+                );
+              }
+              await refreshInventory();
+              pushToast(
+                "success",
+                payload.bulkBuyName
+                  ? `Local FB Sale Logged · Synced to ${payload.bulkBuyName}`
+                  : "Local FB Sale Logged & Synced",
+                payload.message
+              );
+            }}
             onTriggerWebhookSale={handleTriggerWebhookSale}
             onTriggerInboundEmail={handleTriggerInboundEmail}
             onSelectOrder={(order) => setSelectedOrderIdForDetail(order.id)}
