@@ -614,11 +614,15 @@ export function inferStructuredCategory(
       return {
         department: isKids ? "Kids" : isMens ? "Men" : "Women",
         category: "Shoes",
-        subcategory: /\bsneaker\b/.test(hay)
-          ? "Sneakers"
-          : /\bboot\b/.test(hay)
-            ? "Boots"
-            : "Athletic Shoes",
+        subcategory: /\bboot\b/.test(hay)
+          ? "Boots"
+          : /\bsandal\b/.test(hay)
+            ? isKids
+              ? "Sandals & Flip Flops"
+              : "Sandals"
+            : isKids || /\bsneaker\b/.test(hay)
+              ? "Sneakers"
+              : "Athletic Shoes",
         conditionLabel,
         sizeLabel: rawSize || null,
       };

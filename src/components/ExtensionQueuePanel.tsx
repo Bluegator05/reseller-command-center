@@ -147,11 +147,11 @@ export function ExtensionQueuePanel({
             </div>
             <a
               href="/rcc-companion-extension.zip"
-              download="rcc-companion-extension-v1.1.6.zip"
+              download="rcc-companion-extension-v1.1.7.zip"
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#0F766E] text-white hover:bg-[#0B5B55] transition shrink-0 whitespace-nowrap shadow-xs"
             >
               <Download className="w-3.5 h-3.5" />
-              Download Extension v1.1.6 (.zip)
+              Download Extension v1.1.7 (.zip)
             </a>
           </div>
 

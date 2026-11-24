@@ -10,7 +10,9 @@
     return String(s || "")
       .toLowerCase()
       .replace(/&/g, " and ")
-      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/(?<=\d)\.(?=\d)/g, "__dot__")
+      .replace(/[^a-z0-9_]+/g, " ")
+      .replace(/__dot__/g, ".")
       .trim();
   }
 
@@ -27,7 +29,7 @@
       const b = norm(rawTarget);
       if (!b) continue;
       if (a === b) return 1.0;
-      if (b.length <= 3) {
+      if (b.length <= 4) {
         if (a.split(" ").includes(b)) best = Math.max(best, 0.94);
         continue;
       }
@@ -204,6 +206,263 @@
       debugOut.push(`${labelName}: clicked ${clickedSteps} steps but label stayed "${afterLabel}"`);
     }
     return changed;
+  }
+
+  function buildPoshmarkSizeCandidates(rawSize) {
+    const clean = String(rawSize || "").trim();
+    if (!clean || /^os$|^one size$/i.test(clean)) {
+      return {
+        candidates: ["OS", "One Size", "One Size Fits All"],
+        preferBigKid: false,
+        isBaby: false,
+        raw: clean || "OS",
+      };
+    }
+
+    const candidates = [clean];
+    let preferBigKid = false;
+    let isBaby = /\b(nb|newborn|0-3|3-6|6-9|9-12|12-18|18-24|0m|3m|6m|9m|12m|18m|24m)\b/i.test(clean);
+
+    // Handle kids/adult numeric shoe sizes like "11C", "10.5C", "5Y", "4T", "10.5M", "10.5 D", "11 (Little Kid)"
+    const m = clean.match(/^(\d+(?:\.\d+)?)\s*([cytwmde]|big\s*kid|little\s*kid|toddler|youth|infant|baby)?\b/i);
+    if (m) {
+      const numStr = m[1];
+      const numVal = Number(numStr);
+      const suffix = (m[2] || "").toLowerCase();
+
+      if (suffix === "c") {
+        // US Kids Child/Toddler (e.g. 11C -> 11, 11 (Little Kid), 11 (Toddler))
+        if (numVal <= 3.5) isBaby = true;
+        candidates.push(numStr);
+        if (numVal >= 10.5) {
+          candidates.push(`${numStr} (Little Kid)`, `${numStr} (Toddler)`, `${numStr}c`);
+        } else {
+          candidates.push(`${numStr} (Toddler)`, `${numStr} (Little Kid)`, `${numStr}c`);
+        }
+      } else if (suffix === "y" || suffix.includes("youth") || suffix.includes("big")) {
+        preferBigKid = true;
+        candidates.push(`${numStr} (Big Kid)`, `${numStr} (Youth)`, `${numStr}Y`, numStr);
+      } else if (suffix === "t" || suffix.includes("toddler")) {
+        candidates.push(`${numStr}T`, `${numStr} (Toddler)`, numStr);
+      } else if (suffix === "m" || suffix === "w" || suffix === "d" || suffix === "e") {
+        // Width/month suffix (e.g., 10.5M -> 10.5, or 12M -> 12-18M / 12M)
+        if (suffix === "m" && Number.isInteger(numVal) && [3, 6, 9, 12, 18, 24].includes(numVal)) {
+          isBaby = true;
+          candidates.push(`${numStr}M`, `${numStr} Months`);
+        }
+        candidates.push(numStr);
+      } else {
+        if (numVal <= 3.5 && numVal >= 0) {
+          // Could be infant 0-3.5 or big kid 1-3.5
+          candidates.push(numStr);
+        } else {
+          candidates.push(numStr);
+        }
+      }
+    }
+
+    // Deduplicate while preserving priority order
+    const deduped = [];
+    const seen = new Set();
+    for (const c of candidates) {
+      const k = norm(c);
+      if (k && !seen.has(k)) {
+        seen.add(k);
+        deduped.push(c);
+      }
+    }
+    return { candidates: deduped, preferBigKid, isBaby, raw: clean };
+  }
+
+  async function selectPoshmarkSize(
+    sizeDropdown,
+    rawSize,
+    titleText,
+    department,
+    setNativeValue,
+    sleep,
+    debugOut
+  ) {
+    if (!sizeDropdown) {
+      debugOut.push("Size: dropdown root not found");
+      return false;
+    }
+    const triggerEl = getPoshmarkSelectorTrigger(sizeDropdown);
+    if (!triggerEl) {
+      debugOut.push("Size: trigger not found");
+      return false;
+    }
+
+    const beforeLabel = (triggerEl.textContent || "").replace(/\s+/g, " ").trim();
+    if (beforeLabel && !/^select size/i.test(beforeLabel)) {
+      debugOut.push(`Size: already "${beforeLabel}"`);
+      return true;
+    }
+
+    const { candidates, preferBigKid, isBaby, raw } = buildPoshmarkSizeCandidates(rawSize);
+    const hasCustomFallback = Boolean(raw && !/^os$|^one size$/i.test(raw));
+
+    triggerEl.scrollIntoView({ block: "center" });
+    await sleep(150);
+    triggerEl.click();
+    await sleep(450);
+
+    const getMenuRoot = () =>
+      sizeDropdown.querySelector('.dropdown__menu, [class*="dropdown__menu"], ul') ||
+      sizeDropdown;
+
+    const getVisibleOptions = () => {
+      const menuRoot = getMenuRoot();
+      return Array.from(
+        menuRoot.querySelectorAll(
+          'li, a, button, [role="option"], [role="tab"], .dropdown__menu__item, div[class*="item"], div[data-test], span[role="button"]'
+        )
+      ).filter((el) => {
+        if (el === triggerEl || triggerEl.contains(el)) return false;
+        if (!isElementDisplayed(el)) return false;
+        const r = el.getBoundingClientRect();
+        return r.height >= 18 && r.height <= 120 && r.width >= 20;
+      });
+    };
+
+    const findTabEl = (tabName) => {
+      const want = norm(tabName);
+      return getVisibleOptions().find((el) => {
+        const line = (el.innerText || el.textContent || "").trim().split(/\r?\n/)[0].trim();
+        return norm(line) === want;
+      });
+    };
+
+    const TAB_HEADERS = new Set(["baby", "girls", "boys", "custom", "standard", "plus", "petite", "maternity", "juniors", "tall", "us", "eu", "uk"]);
+
+    const tryPickSizeInCurrentTab = async () => {
+      const opts = getVisibleOptions();
+      const matches = [];
+      for (const el of opts) {
+        const rawTxt = (el.innerText || el.textContent || "").trim().split(/\r?\n/)[0].trim();
+        const n = norm(rawTxt);
+        if (!n || TAB_HEADERS.has(n)) continue;
+        // Prefer leaf clickable elements over huge wrapper divs
+        if (el.children.length > 2 && el.tagName === "DIV") continue;
+        const s = scoreFirstLine(el, candidates);
+        if (s >= 0.9) {
+          matches.push({ el, s, text: rawTxt });
+        }
+      }
+      if (matches.length === 0) return false;
+
+      // Sort by score descending; if tied (e.g. two "5" buttons for Toddler vs Big Kid),
+      // pick the last one for Youth/Big Kid or first one for Toddler/Child.
+      const bestScore = Math.max(...matches.map((m) => m.s));
+      const topMatches = matches.filter((m) => m.s >= bestScore - 0.01);
+      const chosen = preferBigKid ? topMatches[topMatches.length - 1] : topMatches[0];
+
+      const clickable =
+        chosen.el.tagName === "LI"
+          ? chosen.el.querySelector("a, button") || chosen.el
+          : chosen.el;
+      clickable.scrollIntoView({ block: "nearest" });
+      clickable.click();
+      await sleep(350);
+
+      const afterLabel = (triggerEl.textContent || "").replace(/\s+/g, " ").trim();
+      if (afterLabel !== beforeLabel) {
+        debugOut.push(`Size: OK ("${beforeLabel}" -> "${afterLabel}")`);
+        return true;
+      }
+      return false;
+    };
+
+    // 1. Check if this is a tabbed Kids/Standard Size picker (e.g. Baby | Girls | Boys | Custom)
+    const hasKidsTabs = Boolean(findTabEl("Girls") || findTabEl("Boys"));
+    if (hasKidsTabs || department === "Kids") {
+      const hay = String(titleText || "").toLowerCase();
+      const looksGirl = /\b(girl|girls|pink|purple|glitter|sparkle|princess|unicorn|floral|ballerina|mary jane)\b/.test(hay);
+      const looksBoy = /\b(boy|boys)\b/.test(hay);
+
+      let tabOrder;
+      if (isBaby) {
+        tabOrder = looksGirl
+          ? ["Baby", "Girls", "Boys"]
+          : ["Baby", "Boys", "Girls"];
+      } else if (looksGirl) {
+        tabOrder = ["Girls", "Boys", "Baby"];
+      } else if (looksBoy) {
+        tabOrder = ["Boys", "Girls", "Baby"];
+      } else {
+        tabOrder = ["Boys", "Girls", "Baby"];
+      }
+
+      for (const tabName of tabOrder) {
+        const tabEl = findTabEl(tabName);
+        if (tabEl) {
+          tabEl.click();
+          await sleep(400);
+        }
+        if (await tryPickSizeInCurrentTab()) {
+          return true;
+        }
+      }
+    } else {
+      // Non-Kids (Women/Men/Home/Electronics): try active tab first
+      if (await tryPickSizeInCurrentTab()) {
+        return true;
+      }
+      // Also try One Size fallback for non-shoe/accessory items if OS wasn't in candidates
+      if (!/shoe|sneaker|boot|sandal|jean|pant/i.test(String(titleText || ""))) {
+        const osBtn = getVisibleOptions().find((el) =>
+          scoreFirstLine(el, ["OS", "One Size", "One Size Fits All"]) >= 0.9
+        );
+        if (osBtn) {
+          osBtn.click();
+          await sleep(350);
+          const afterLabel = (triggerEl.textContent || "").replace(/\s+/g, " ").trim();
+          if (afterLabel !== beforeLabel) {
+            debugOut.push(`Size: OK fallback ("${beforeLabel}" -> "${afterLabel}")`);
+            return true;
+          }
+        }
+      }
+    }
+
+    // 2. Ultimate Fallback: Click Poshmark's "Custom" size tab, type the exact size (e.g. "11C"), & click Save!
+    if (hasCustomFallback) {
+      const customTab = findTabEl("Custom");
+      if (customTab) {
+        customTab.click();
+        await sleep(400);
+        const menuRoot = getMenuRoot();
+        const customInput =
+          menuRoot.querySelector('input[type="text"], input:not([type="hidden"]):not([type="checkbox"])') ||
+          document.querySelector('.listing-editor__size-container input[type="text"]');
+        if (customInput && isElementDisplayed(customInput)) {
+          setNativeValue(customInput, raw.slice(0, 20));
+          await sleep(250);
+          const saveBtn = Array.from(
+            menuRoot.querySelectorAll('button, [role="button"]')
+          ).find((b) => /^(save|done|apply)$/i.test((b.textContent || "").trim()));
+          if (saveBtn) {
+            saveBtn.click();
+            await sleep(350);
+            const afterLabel = (triggerEl.textContent || "").replace(/\s+/g, " ").trim();
+            if (afterLabel !== beforeLabel) {
+              debugOut.push(`Size: OK via Custom ("${raw}" -> "${afterLabel}")`);
+              return true;
+            }
+          }
+        }
+      }
+    }
+
+    const saw = Array.from(
+      new Set(
+        getVisibleOptions()
+          .map((el) => (el.innerText || el.textContent || "").trim().split(/\r?\n/)[0].trim())
+          .filter((t) => t && t.length <= 30)
+      )
+    ).slice(0, 14);
+    debugOut.push(`Size missed ${JSON.stringify(candidates)}; saw: [${saw.join(", ")}]`);
+    return false;
   }
 
   function tokenizeForDupCheck(raw) {
@@ -564,7 +823,7 @@
           await sleep(650);
         }
 
-        // 3b. Optional Subcategory dropdown
+        // 3b. Optional Subcategory dropdown (with Poshmark Kids/Adult synonym fallbacks)
         if (categoryMatched && sc.subcategory) {
           const subDropdown = findPoshmarkDropdownByContainerOrText(
             [
@@ -574,9 +833,16 @@
             /^select subcategory/i
           );
           if (subDropdown) {
+            const subCandidates = /athletic/i.test(sc.subcategory)
+              ? [sc.subcategory, "Sneakers"]
+              : /sneaker/i.test(sc.subcategory)
+                ? [sc.subcategory, "Athletic Shoes"]
+                : /sandal/i.test(sc.subcategory)
+                  ? [sc.subcategory, "Sandals & Flip Flops", "Sandals"]
+                  : [sc.subcategory];
             await selectPoshmarkVueDropdown(
               subDropdown,
-              [sc.subcategory],
+              [subCandidates],
               sleep,
               debugLog,
               "Subcategory"
@@ -585,7 +851,7 @@
           }
         }
 
-        // 4. Auto-select Poshmark Size (unlocks right after Category is selected)
+        // 4. Auto-select Poshmark Size (handles Kids Baby/Girls/Boys/Custom tabs + 11C/5Y/4T normalization)
         let sizeMatched = false;
         if (categoryMatched) {
           const sizeDropdown = findPoshmarkDropdownByContainerOrText(
@@ -597,26 +863,15 @@
             /^select size/i
           );
           if (sizeDropdown) {
-            const existingSizeTxt = (
-              getPoshmarkSelectorTrigger(sizeDropdown)?.textContent || ""
-            ).trim();
-            if (existingSizeTxt && !/^select size/i.test(existingSizeTxt)) {
-              sizeMatched = true;
-              debugLog.push(`Size: already "${existingSizeTxt}"`);
-            } else {
-              const targetSize = sc.sizeLabel || "OS";
-              const sizeTarget =
-                targetSize.toUpperCase() === "OS"
-                  ? ["OS", "One Size", "One Size Fits All"]
-                  : [targetSize, "OS", "One Size"];
-              sizeMatched = await selectPoshmarkVueDropdown(
-                sizeDropdown,
-                [sizeTarget],
-                sleep,
-                debugLog,
-                "Size"
-              );
-            }
+            sizeMatched = await selectPoshmarkSize(
+              sizeDropdown,
+              sc.sizeLabel || "OS",
+              payload.mappedTitle || "",
+              sc.department || "",
+              setNativeValue,
+              sleep,
+              debugLog
+            );
           } else {
             sizeMatched = true;
             debugLog.push("Size: not required for this category");
