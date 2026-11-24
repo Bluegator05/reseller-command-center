@@ -261,7 +261,7 @@ function SalesOrderDetailModalInner({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/45 flex items-center justify-center p-3 sm:p-5">
+    <div className="fixed inset-0 z-[1200] bg-black/45 flex items-center justify-center p-3 sm:p-5">
       <div className="bg-white border border-[#E2E5E8] rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
         {/* Top bar */}
         <div className="px-5 py-3.5 border-b border-[#ECEFE9] flex items-start justify-between gap-3">

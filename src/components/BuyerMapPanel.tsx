@@ -637,7 +637,7 @@ export function BuyerMapPanel({
         </div>
 
         {/* Real Interactive Leaflet Map */}
-        <div className="relative rounded-xl border border-[#DCE6EC] overflow-hidden bg-[#D5E8F0]">
+        <div className="relative isolate z-0 rounded-xl border border-[#DCE6EC] overflow-hidden bg-[#D5E8F0]">
           <div
             ref={mapContainerRef}
             className="w-full h-[360px] sm:h-[460px] z-0"
