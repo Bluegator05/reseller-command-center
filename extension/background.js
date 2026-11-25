@@ -375,11 +375,29 @@ async function scrapeActiveListingsFromDom(marketplace) {
       ? 'a[href*="/listing/"]'
       : marketplace === "mercari"
         ? 'a[href*="/us/item/m"], a[href*="/item/m"]'
-        : 'a[href*="/marketplace/item/"]';
+        : 'a[href*="/marketplace/item/"], [role="button"], button';
+
+  // Find scrollable container for Facebook Seller Hub (sometimes scrolls inside an inner pane)
+  const scrollContainers = [];
+  if (marketplace === "facebook") {
+    for (const el of document.querySelectorAll('div[role="main"], div')) {
+      const style = window.getComputedStyle(el);
+      if (
+        (style.overflowY === "auto" || style.overflowY === "scroll") &&
+        el.scrollHeight > el.clientHeight + 200 &&
+        el.clientHeight > 300
+      ) {
+        scrollContainers.push(el);
+        if (scrollContainers.length >= 3) break;
+      }
+    }
+  }
 
   // Auto-scroll to load all lazy-loaded items on Poshmark / Mercari / FB
   let lastCount = document.querySelectorAll(linkSelector).length;
-  let lastHeight = document.body.scrollHeight;
+  let lastHeight =
+    document.body.scrollHeight +
+    scrollContainers.reduce((s, el) => s + el.scrollHeight, 0);
   let stablePasses = 0;
 
   for (let step = 0; step < 40; step++) {
@@ -387,6 +405,9 @@ async function scrapeActiveListingsFromDom(marketplace) {
       top: document.body.scrollHeight,
       behavior: "instant",
     });
+    for (const el of scrollContainers) {
+      el.scrollTop = el.scrollHeight;
+    }
 
     // Click Mercari/Poshmark "Load More" button if present
     const loadMoreBtn = Array.from(document.querySelectorAll("button")).find(
@@ -402,7 +423,9 @@ async function scrapeActiveListingsFromDom(marketplace) {
     await sleep(850);
 
     const nextCount = document.querySelectorAll(linkSelector).length;
-    const nextHeight = document.body.scrollHeight;
+    const nextHeight =
+      document.body.scrollHeight +
+      scrollContainers.reduce((s, el) => s + el.scrollHeight, 0);
     if (nextCount === lastCount && nextHeight === lastHeight) {
       stablePasses += 1;
       if (stablePasses >= 2) break;
@@ -414,6 +437,9 @@ async function scrapeActiveListingsFromDom(marketplace) {
   }
 
   window.scrollTo({ top: 0, behavior: "instant" });
+  for (const el of scrollContainers) {
+    el.scrollTop = 0;
+  }
 
   const seen = new Set();
   const results = [];
@@ -425,12 +451,18 @@ async function scrapeActiveListingsFromDom(marketplace) {
   }
 
   function isSoldOrInactive(containerText) {
-    const lower = (containerText || "").toLowerCase();
+    const cleaned = (containerText || "")
+      .toLowerCase()
+      // Active Facebook Seller Hub listings have a "Mark as sold" button — never treat that button text as sold!
+      .replace(/\bmark\s+as\s+sold\b/g, "")
+      .replace(/\bmark\s+as\s+pending\b/g, "");
     return (
-      /\bsold\b/.test(lower) ||
-      lower.includes("not for sale") ||
-      lower.includes("deactivated") ||
-      lower.includes("inactive")
+      /\bsold\b/.test(cleaned) ||
+      cleaned.includes("mark as available") ||
+      cleaned.includes("out of stock") ||
+      cleaned.includes("not for sale") ||
+      cleaned.includes("deactivated") ||
+      cleaned.includes("inactive")
     );
   }
 
@@ -550,34 +582,206 @@ async function scrapeActiveListingsFromDom(marketplace) {
       });
     }
   } else if (marketplace === "facebook") {
+    const seenTitleKeys = new Set();
+
+    const makeStableFbId = (titleStr) => {
+      const norm = (titleStr || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, " ")
+        .trim();
+      let h = 2166136261;
+      for (let i = 0; i < norm.length; i++) {
+        h ^= norm.charCodeAt(i);
+        h = Math.imul(h, 16777619);
+      }
+      return `fb-${(h >>> 0).toString(36)}`;
+    };
+
+    const extractBestCardImage = (root) => {
+      if (!root) return null;
+      const imgs = Array.from(root.querySelectorAll("img[src]"));
+      let best = null;
+      let bestArea = 0;
+      for (const img of imgs) {
+        const src = (img.getAttribute("src") || "").trim();
+        if (!src.startsWith("http") || src.includes("/emoji.php")) continue;
+        const rect = img.getBoundingClientRect();
+        const w = rect.width || img.naturalWidth || img.width || 0;
+        const h = rect.height || img.naturalHeight || img.height || 0;
+        if (w < 36 || h < 36) continue;
+        const area = w * h;
+        if (area > bestArea) {
+          bestArea = area;
+          best = src;
+        }
+      }
+      return best;
+    };
+
+    const isFbNoiseLine = (line) => {
+      const t = line.trim();
+      if (t.length < 3) return true;
+      if (/^\$[\d,.]+$/.test(t) || /^free$/i.test(t)) return true;
+      if (
+        /^(active|in stock|pending|sold|draft|out of stock|renew|expired)\b/i.test(
+          t
+        )
+      ) {
+        return true;
+      }
+      if (
+        /^listed\s+on\b/i.test(t) ||
+        /\bclicks?\s+on\s+listing\b/i.test(t) ||
+        /^\d+\s+(clicks?|views?|saves?)\b/i.test(t)
+      ) {
+        return true;
+      }
+      if (
+        /^(mark as sold|mark as pending|mark as available|offer shipping|boost listing|share|view listing|delete|edit|drop price|more|manage|send offer|list in more places|see all help topics|learn more|your listings|search your listings|create new listing|create multiple listings)$/i.test(
+          t
+        )
+      ) {
+        return true;
+      }
+      if (
+        /^(boost your listings|keep your listings|this is a preview|sponsored|ad\b)/i.test(
+          t
+        )
+      ) {
+        return true;
+      }
+      return false;
+    };
+
+    const extractCleanFbTitle = (cardText, imgAlt) => {
+      const lines = (cardText || "")
+        .split("\n")
+        .map((s) => s.trim())
+        .filter((s) => !isFbNoiseLine(s));
+      const candidate = lines[0] || (imgAlt || "").trim();
+      return candidate.replace(/\s+/g, " ").trim();
+    };
+
+    const pushFbListing = ({ extId, externalUrl, title, price, imageUrl }) => {
+      const cleanTitle = (title || "").replace(/\s+/g, " ").trim();
+      if (cleanTitle.length < 3) return;
+      const titleKey = cleanTitle
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, " ")
+        .trim();
+      const finalId = extId || makeStableFbId(cleanTitle);
+      if (seen.has(finalId) || seenTitleKeys.has(titleKey)) return;
+      seen.add(finalId);
+      seenTitleKeys.add(titleKey);
+      results.push({
+        externalListingId: finalId,
+        externalUrl:
+          externalUrl || "https://www.facebook.com/marketplace/you/selling",
+        title: cleanTitle,
+        price: Number(price) || 0,
+        imageUrl: imageUrl || null,
+      });
+    };
+
+    // Pass 1: Facebook Seller Hub "Your listings" cards (/marketplace/you/selling)
+    // Each active listing card has a "Mark as sold" button (and/or "Active · Listed on ...")
+    const sellerHubAnchors = [];
+    const buttons = Array.from(
+      document.querySelectorAll('[role="button"], button')
+    );
+    for (const btn of buttons) {
+      const txt = (btn.innerText || btn.textContent || "").trim().toLowerCase();
+      if (txt === "mark as sold") {
+        sellerHubAnchors.push(btn);
+      }
+    }
+
+    const visitedCards = new Set();
+    for (const anchor of sellerHubAnchors) {
+      let node = anchor.parentElement;
+      let card = null;
+      for (let up = 0; up < 9 && node && node !== document.body; up++) {
+        const markCount = Array.from(
+          node.querySelectorAll('[role="button"], button')
+        ).filter(
+          (b) =>
+            (b.innerText || b.textContent || "").trim().toLowerCase() ===
+            "mark as sold"
+        ).length;
+        if (markCount > 1) break;
+
+        const txt = node.innerText || "";
+        const hasImg = Boolean(node.querySelector("img[src]"));
+        const hasPriceOrFree =
+          /\$\s*[0-9,]+/.test(txt) || /\bfree\b/i.test(txt);
+        if (hasImg && hasPriceOrFree && txt.length >= 15 && txt.length <= 1600) {
+          card = node;
+          // Prefer the outermost single-listing card wrapper before hitting the list container
+        }
+        node = node.parentElement;
+      }
+
+      if (!card || visitedCards.has(card)) continue;
+      visitedCards.add(card);
+
+      const cardText = card.innerText || "";
+      if (
+        cardText.includes("Boost your listings to reach more buyers") ||
+        cardText.includes("This is a preview of how your ad")
+      ) {
+        continue;
+      }
+      if (isSoldOrInactive(cardText)) continue;
+
+      const itemLink = card.querySelector('a[href*="/marketplace/item/"]');
+      const href = itemLink?.href || "";
+      const idMatch = href.match(/\/marketplace\/item\/(\d+)/i);
+      const imageUrl = extractBestCardImage(card);
+      const imgAlt = card.querySelector("img[alt]")?.getAttribute("alt") || "";
+      const cleanTitle = extractCleanFbTitle(cardText, imgAlt);
+
+      pushFbListing({
+        extId: idMatch ? idMatch[1] : null,
+        externalUrl: href ? href.split("?")[0] : null,
+        title: cleanTitle,
+        price: extractPrice(cardText),
+        imageUrl,
+      });
+    }
+
+    // Pass 2: Fallback / profile view using <a href="/marketplace/item/..."> links
     const links = Array.from(
       document.querySelectorAll('a[href*="/marketplace/item/"]')
     );
     for (const link of links) {
       const href = link.href || "";
       const idMatch = href.match(/\/marketplace\/item\/(\d+)/i);
-      const extId = idMatch ? idMatch[1] : href;
-      if (!extId || seen.has(extId)) continue;
+      const extId = idMatch ? idMatch[1] : null;
+      if (extId && seen.has(extId)) continue;
 
-      const cardText = link.innerText || "";
+      let card = link;
+      if ((link.innerText || "").trim().length < 10 && link.parentElement) {
+        card = link.parentElement.parentElement || link.parentElement;
+      }
+      const cardText = card?.innerText || link.innerText || "";
+      if (
+        cardText.includes("Boost your listings to reach more buyers") ||
+        cardText.includes("This is a preview of how your ad")
+      ) {
+        continue;
+      }
       if (isSoldOrInactive(cardText)) continue;
 
-      const imgAlt = link.querySelector("img")?.getAttribute("alt") || "";
-      const lines = cardText
-        .split("\n")
-        .map((s) => s.trim())
-        .filter((s) => s.length >= 3 && !/^\$[\d,.]+$/.test(s));
-      const cleanTitle = (lines[0] || imgAlt.trim() || "")
-        .replace(/\s+/g, " ")
-        .trim();
-      if (cleanTitle.length < 3) continue;
+      const imageUrl = extractBestCardImage(card);
+      const imgAlt = card?.querySelector("img")?.getAttribute("alt") || "";
+      const cleanTitle = extractCleanFbTitle(cardText, imgAlt);
 
-      seen.add(extId);
-      results.push({
-        externalListingId: extId,
+      pushFbListing({
+        extId,
         externalUrl: href.split("?")[0],
         title: cleanTitle,
         price: extractPrice(cardText),
+        imageUrl,
       });
     }
   }
@@ -646,6 +850,42 @@ async function scanActiveTabAndImport() {
   }
 
   await refreshJobsCache();
+  if (data.matchedCount > 0) {
+    await broadcastToCommandCenterTabs({
+      type: "RCC_JOB_COMPLETED",
+      marketplace,
+      sku: "",
+    });
+  }
+  return { ok: true, ...data };
+}
+
+async function importStandaloneListings(payload) {
+  const config = await getConfig();
+  const base = (
+    config.apiBaseUrl || "https://reseller-command-center-black.vercel.app"
+  ).replace(/\/+$/, "");
+
+  const res = await fetch(`${base}/api/extension/import-listings`, {
+    method: "POST",
+    headers: buildBridgeHeaders(config, true),
+    credentials: "include",
+    body: JSON.stringify({
+      marketplace: payload.marketplace || "facebook",
+      action: "import_standalone",
+      listings: Array.isArray(payload.listings) ? payload.listings : [],
+    }),
+  });
+
+  if (res.status === 401) {
+    throw new Error(
+      "Owner passcode required — enter your Command Center passcode in Connection Settings below."
+    );
+  }
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || `Standalone import failed (${res.status})`);
+  }
   return { ok: true, ...data };
 }
 
@@ -2120,6 +2360,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             listedPrice: message.payload?.listedPrice,
           });
           sendResponse(linkResult);
+          break;
+        }
+        case "RCC_IMPORT_STANDALONE_LISTINGS": {
+          const importResult = await importStandaloneListings(
+            message.payload || {}
+          );
+          await broadcastToCommandCenterTabs({
+            type: "RCC_JOB_COMPLETED",
+            marketplace: message.payload?.marketplace || "facebook",
+            sku: "",
+          });
+          sendResponse(importResult);
           break;
         }
         case "RCC_IMPORT_SALES": {

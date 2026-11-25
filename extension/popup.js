@@ -301,8 +301,18 @@ if (btnScanEl) {
     await loadState();
 
     const review = Array.isArray(res.reviewMatches) ? res.reviewMatches : [];
+    const unmatched = Array.isArray(res.unmatchedListings)
+      ? res.unmatchedListings
+      : [];
+    const escapeHtml = (s) =>
+      String(s || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+
     scanStatusEl.style.display = "block";
-    scanStatusEl.innerHTML = `<strong>${String(res.marketplace || "").toUpperCase()} Scan Complete:</strong> Found ${res.scannedCount} active · <strong>${res.matchedCount} auto-linked</strong>${review.length ? ` · ${review.length} need 1-click review` : ""}${res.unmatchedCount ? ` · ${res.unmatchedCount} unmatched` : ""}. Refresh your Command Center to see live badges!`;
+    scanStatusEl.innerHTML = `<strong>${escapeHtml(String(res.marketplace || "").toUpperCase())} Scan Complete:</strong> Found ${res.scannedCount} active · <strong>${res.matchedCount} auto-linked</strong>${review.length ? ` · ${review.length} need 1-click link` : ""}${unmatched.length ? ` · ${unmatched.length} not in Inventory yet` : ""}.`;
 
     if (review.length > 0) {
       for (const m of review) {
@@ -311,11 +321,11 @@ if (btnScanEl) {
         row.style.padding = "8px 0";
         row.innerHTML = `
           <div class="job-top">
-            <span class="sku">${Math.round(m.confidence * 100)}% match · ${m.candidateSku}</span>
+            <span class="sku">${Math.round(m.confidence * 100)}% match · ${escapeHtml(m.candidateSku)}</span>
             <button type="button" class="btn btn-confirm" style="padding:3px 8px;">Link</button>
           </div>
-          <div class="title"><strong>Page:</strong> ${m.scannedTitle} ($${Number(m.scannedPrice || 0).toFixed(0)})</div>
-          <div class="title" style="color:#0f766e;"><strong>eBay:</strong> ${m.candidateTitle}</div>
+          <div class="title"><strong>Page:</strong> ${escapeHtml(m.scannedTitle)} ($${Number(m.scannedPrice || 0).toFixed(0)})</div>
+          <div class="title" style="color:#0f766e;"><strong>eBay:</strong> ${escapeHtml(m.candidateTitle)}</div>
         `;
         const linkBtn = row.querySelector("button");
         linkBtn.addEventListener("click", async () => {
@@ -336,6 +346,82 @@ if (btnScanEl) {
           } else {
             linkBtn.disabled = false;
             linkBtn.textContent = "Retry";
+          }
+        });
+        scanReviewEl.appendChild(row);
+      }
+    }
+
+    if (unmatched.length > 0) {
+      const header = document.createElement("div");
+      header.style.cssText =
+        "margin-top:8px;padding-top:8px;border-top:1px solid #e4e4dd;display:flex;align-items:center;justify-content:space-between;gap:6px;";
+      const isFb = res.marketplace === "facebook";
+      header.innerHTML = `
+        <span style="font-size:10.5px;font-weight:700;color:#14151a;">
+          Not in Inventory (${unmatched.length})
+        </span>
+        <button type="button" class="btn btn-primary" style="padding:4px 8px;font-size:10.5px;">
+          ${isFb ? `Import All ${unmatched.length} as FB Local` : `Import All ${unmatched.length}`}
+        </button>
+      `;
+      const importAllBtn = header.querySelector("button");
+      const itemButtons = [];
+
+      importAllBtn.addEventListener("click", async () => {
+        importAllBtn.disabled = true;
+        importAllBtn.textContent = "Importing...";
+        const ir = await chrome.runtime.sendMessage({
+          type: "RCC_IMPORT_STANDALONE_LISTINGS",
+          payload: {
+            marketplace: res.marketplace,
+            listings: unmatched,
+          },
+        });
+        if (ir?.ok) {
+          importAllBtn.textContent = `Imported ${ir.importedCount} ✓`;
+          for (const b of itemButtons) {
+            b.disabled = true;
+            b.textContent = "Imported ✓";
+          }
+        } else {
+          importAllBtn.disabled = false;
+          importAllBtn.textContent = "Retry Import All";
+          errorBarEl.style.display = "block";
+          errorBarEl.textContent = ir?.error || "Import failed";
+        }
+      });
+      scanReviewEl.appendChild(header);
+
+      for (const u of unmatched) {
+        const row = document.createElement("div");
+        row.className = "job-row";
+        row.style.padding = "7px 0";
+        row.innerHTML = `
+          <div class="job-top">
+            <span class="sku" style="color:#1877f2;">$${Number(u.price || 0).toFixed(0)} · ${isFb ? "FB Local Only" : escapeHtml(String(res.marketplace || "").toUpperCase())}</span>
+            <button type="button" class="btn btn-confirm" style="padding:3px 8px;">+ Import</button>
+          </div>
+          <div class="title">${escapeHtml(u.title)}</div>
+        `;
+        const importBtn = row.querySelector("button");
+        itemButtons.push(importBtn);
+        importBtn.addEventListener("click", async () => {
+          importBtn.disabled = true;
+          importBtn.textContent = "Importing...";
+          const ir = await chrome.runtime.sendMessage({
+            type: "RCC_IMPORT_STANDALONE_LISTINGS",
+            payload: {
+              marketplace: res.marketplace,
+              listings: [u],
+            },
+          });
+          if (ir?.ok) {
+            importBtn.textContent =
+              ir.importedCount > 0 ? "Imported ✓" : "Already Added";
+          } else {
+            importBtn.disabled = false;
+            importBtn.textContent = "Retry";
           }
         });
         scanReviewEl.appendChild(row);

@@ -1984,12 +1984,16 @@ export function StaleRadarTable({
                       {MATRIX_CHANNELS.map((ch) => {
                         const isEbay = ch.key === "ebay";
                         const listing = isEbay
-                          ? {
-                              listed_price: row.listed_price,
-                              external_url: row.external_url,
-                              external_listing_id: row.external_listing_id,
-                              status: row.status,
-                            }
+                          ? row.marketplace === "ebay"
+                            ? {
+                                listed_price: row.listed_price,
+                                external_url: row.external_url,
+                                external_listing_id: row.external_listing_id,
+                                status: row.status,
+                              }
+                            : row.cross_listings.find(
+                                (c) => c.marketplace === "ebay"
+                              )
                           : row.cross_listings.find(
                               (c) => c.marketplace === ch.key
                             );
@@ -2245,6 +2249,29 @@ export function StaleRadarTable({
                                     {policyBlock.rule}
                                   </span>
                                 )}
+                              </button>
+                            </div>
+                          );
+                        }
+
+                        if (isEbay) {
+                          return (
+                            <div
+                              key={ch.key}
+                              className={`${isCompact ? "p-2.5" : "p-3.5"} flex items-center justify-center`}
+                            >
+                              <button
+                                type="button"
+                                onClick={() => onOpenItemDetail(row)}
+                                title="Facebook Local Only item (not listed on eBay). Click to edit COGS, Bulk Buy, or item details."
+                                className={`${isCompact ? "w-[116px] h-[108px]" : "w-[126px] h-[148px]"} rounded-xl border border-dashed border-[#CBD5E1] bg-[#F8FAFC] hover:bg-[#EFF6FF] hover:border-[#93C5FD] transition-all flex flex-col items-center justify-center gap-1 px-2 text-center cursor-pointer`}
+                              >
+                                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-[#1877F2] text-white">
+                                  FB Local Only
+                                </span>
+                                <span className="text-[10.5px] font-medium text-[#64748B] leading-tight mt-0.5">
+                                  Not on eBay
+                                </span>
                               </button>
                             </div>
                           );
