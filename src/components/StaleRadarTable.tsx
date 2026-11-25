@@ -53,6 +53,11 @@ interface StaleRadarTableProps {
   onExecuteAction: (request: EbayActionRequest) => Promise<void>;
   onOpenCrossList: (row: StaleRadarRow, target?: CrossListTarget) => void;
   onBulkCrossListEtsy: (itemIds: string[]) => Promise<void>;
+  onBulkCrossListMarketplace?: (params: {
+    marketplace: CrossListTarget;
+    itemIds: string[];
+    onProgress?: (processed: number, total: number) => void;
+  }) => Promise<void>;
   onListEverywhere: (row: StaleRadarRow) => Promise<void>;
   onUpdateExtensionJob: (params: {
     jobId: string;
@@ -268,6 +273,7 @@ export function StaleRadarTable({
   onExecuteAction,
   onOpenCrossList,
   onBulkCrossListEtsy,
+  onBulkCrossListMarketplace,
   onListEverywhere,
   onUpdateExtensionJob,
   onDeleteExtensionJob,
@@ -293,6 +299,12 @@ export function StaleRadarTable({
   const [selectedBulkBuyId, setSelectedBulkBuyId] = useState<string>("");
   const [isAssigningBulkBuy, setIsAssigningBulkBuy] = useState(false);
   const [isMarkingStandalone, setIsMarkingStandalone] = useState(false);
+  const [bulkCrossListTarget, setBulkCrossListTarget] =
+    useState<CrossListTarget>("poshmark");
+  const [bulkCrossListProgress, setBulkCrossListProgress] = useState<{
+    done: number;
+    total: number;
+  } | null>(null);
   const [listingAllItemId, setListingAllItemId] = useState<string | null>(null);
   const [resolvingConflictItemId, setResolvingConflictItemId] = useState<
     string | null
@@ -584,11 +596,31 @@ export function StaleRadarTable({
     let droppable = 0;
     let clamped = 0;
     let skippedAtFloor = 0;
-    const etsyCandidateItemIds: string[] = [];
+    const eligibleByChannel: Record<CrossListTarget, string[]> = {
+      poshmark: [],
+      mercari: [],
+      facebook: [],
+      etsy: [],
+    };
+    const channels: CrossListTarget[] = [
+      "poshmark",
+      "mercari",
+      "facebook",
+      "etsy",
+    ];
 
     for (const row of selectedRows) {
-      if (!row.is_listed_on_etsy && !row.policy_blocked_marketplaces?.etsy) {
-        etsyCandidateItemIds.push(row.item_id);
+      for (const ch of channels) {
+        const alreadyLive =
+          ch === "etsy"
+            ? row.is_listed_on_etsy ||
+              row.cross_listings.some((c) => c.marketplace === "etsy")
+            : row.cross_listings.some((c) => c.marketplace === ch);
+        const alreadyQueued = extJobLookup.has(`${row.item_id}:${ch}`);
+        const isPolicyBlocked = Boolean(row.policy_blocked_marketplaces?.[ch]);
+        if (!alreadyLive && !alreadyQueued && !isPolicyBlocked) {
+          eligibleByChannel[ch].push(row.item_id);
+        }
       }
       if (row.is_at_floor) skippedAtFloor += 1;
       else {
@@ -596,8 +628,14 @@ export function StaleRadarTable({
         if (row.drop_would_clamp) clamped += 1;
       }
     }
-    return { droppable, clamped, skippedAtFloor, etsyCandidateItemIds };
-  }, [selectedRows]);
+    return {
+      droppable,
+      clamped,
+      skippedAtFloor,
+      eligibleByChannel,
+      etsyCandidateItemIds: eligibleByChannel.etsy,
+    };
+  }, [selectedRows, extJobLookup]);
 
   const allVisibleSelected =
     filteredItems.length > 0 &&
@@ -1184,20 +1222,88 @@ export function StaleRadarTable({
                 <Megaphone className="w-3.5 h-3.5" />
                 Promote 4%
               </button>
-              <button
-                type="button"
-                disabled={
-                  isBulkBusy || bulkPreview.etsyCandidateItemIds.length === 0
-                }
-                onClick={async () => {
-                  await onBulkCrossListEtsy(bulkPreview.etsyCandidateItemIds);
-                  setSelectedIds(new Set());
-                }}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold bg-[#171A1D] text-white hover:bg-[#2A2F35] disabled:opacity-45 cursor-pointer"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                → Etsy ({bulkPreview.etsyCandidateItemIds.length})
-              </button>
+              {(() => {
+                const targetIds =
+                  bulkPreview.eligibleByChannel[bulkCrossListTarget] ?? [];
+                const targetLabel =
+                  bulkCrossListTarget === "facebook"
+                    ? "FB Marketplace"
+                    : bulkCrossListTarget.charAt(0).toUpperCase() +
+                      bulkCrossListTarget.slice(1);
+                const skippedCount = selectedRows.length - targetIds.length;
+                return (
+                  <div className="inline-flex items-center gap-1 bg-white/15 rounded-md p-0.5 border border-white/25">
+                    <select
+                      aria-label="Target marketplace for bulk cross-listing"
+                      disabled={isBulkBusy}
+                      value={bulkCrossListTarget}
+                      onChange={(e) =>
+                        setBulkCrossListTarget(
+                          e.target.value as CrossListTarget
+                        )
+                      }
+                      className="px-2 py-1 text-xs font-semibold rounded bg-white text-[#14151A] focus:outline-none cursor-pointer disabled:opacity-60"
+                    >
+                      <option value="poshmark">
+                        Poshmark ({bulkPreview.eligibleByChannel.poshmark.length})
+                      </option>
+                      <option value="mercari">
+                        Mercari ({bulkPreview.eligibleByChannel.mercari.length})
+                      </option>
+                      <option value="facebook">
+                        FB Marketplace (
+                        {bulkPreview.eligibleByChannel.facebook.length})
+                      </option>
+                      <option value="etsy">
+                        Etsy ({bulkPreview.eligibleByChannel.etsy.length})
+                      </option>
+                    </select>
+                    <button
+                      type="button"
+                      disabled={isBulkBusy || targetIds.length === 0}
+                      title={
+                        targetIds.length === 0
+                          ? `All ${selectedRows.length} selected items are already listed, queued, or policy-blocked on ${targetLabel}`
+                          : `1-click cross-list ${targetIds.length} eligible item${targetIds.length === 1 ? "" : "s"} to ${targetLabel}${skippedCount > 0 ? ` (${skippedCount} already listed/queued/policy-blocked will be skipped)` : ""}`
+                      }
+                      onClick={async () => {
+                        if (targetIds.length === 0) return;
+                        setBulkCrossListProgress({
+                          done: 0,
+                          total: targetIds.length,
+                        });
+                        try {
+                          if (onBulkCrossListMarketplace) {
+                            await onBulkCrossListMarketplace({
+                              marketplace: bulkCrossListTarget,
+                              itemIds: targetIds,
+                              onProgress: (done, total) =>
+                                setBulkCrossListProgress({ done, total }),
+                            });
+                          } else if (bulkCrossListTarget === "etsy") {
+                            await onBulkCrossListEtsy(targetIds);
+                          }
+                          setSelectedIds(new Set());
+                        } finally {
+                          setBulkCrossListProgress(null);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-bold bg-[#171A1D] text-white hover:bg-[#2A2F35] disabled:opacity-45 cursor-pointer"
+                    >
+                      {bulkCrossListProgress ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Sparkles className="w-3.5 h-3.5" />
+                      )}
+                      <span>
+                        {bulkCrossListProgress
+                          ? `Listing ${bulkCrossListProgress.done}/${bulkCrossListProgress.total}…`
+                          : `Cross-List (${targetIds.length})`}
+                      </span>
+                    </button>
+                  </div>
+                );
+              })()}
               <button
                 type="button"
                 disabled={isBulkBusy}

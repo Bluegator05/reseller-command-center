@@ -457,6 +457,144 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
     [pushToast, refreshInventory]
   );
 
+  const handleBulkCrossListMarketplace = useCallback(
+    async ({
+      marketplace,
+      itemIds,
+      onProgress,
+    }: {
+      marketplace: Exclude<MarketplaceType, "ebay">;
+      itemIds: string[];
+      onProgress?: (processed: number, total: number) => void;
+    }) => {
+      if (itemIds.length === 0) return;
+      const chLabel =
+        marketplace === "facebook"
+          ? "FB Marketplace"
+          : marketplace.charAt(0).toUpperCase() + marketplace.slice(1);
+
+      setIsBulkBusy(true);
+      onProgress?.(0, itemIds.length);
+      try {
+        const CHUNK_SIZE = 4;
+        let successCount = 0;
+        let policyBlockedCount = 0;
+        let skippedCount = 0;
+        const errors: string[] = [];
+
+        for (let i = 0; i < itemIds.length; i += CHUNK_SIZE) {
+          const chunk = itemIds.slice(i, i + CHUNK_SIZE);
+          if (marketplace === "etsy") {
+            const res = await fetch("/api/etsy/crosslist", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                itemIds: chunk,
+                publishImmediately: true,
+              }),
+            });
+            const payload = (await res.json()) as {
+              completedCount?: number;
+              errors?: Array<{ error?: string }>;
+              error?: string;
+            };
+            if (!res.ok) {
+              errors.push(payload.error || `Etsy batch failed (${res.status})`);
+            } else {
+              successCount += payload.completedCount ?? 0;
+              for (const errRow of payload.errors ?? []) {
+                if (/policy/i.test(errRow.error || "")) {
+                  policyBlockedCount += 1;
+                } else {
+                  skippedCount += 1;
+                }
+              }
+            }
+          } else {
+            const res = await fetch("/api/extension/jobs", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                itemIds: chunk,
+                marketplace,
+                action: "create",
+              }),
+            });
+            const payload = (await res.json()) as {
+              queuedCount?: number;
+              skippedAlreadyListed?: number;
+              skippedAlreadyQueued?: number;
+              skippedPolicyBlocked?: number;
+              alreadyListed?: boolean;
+              alreadyQueued?: boolean;
+              error?: string;
+            };
+            if (res.status === 422) {
+              policyBlockedCount += chunk.length;
+            } else if (res.status === 409) {
+              skippedCount += chunk.length;
+            } else if (!res.ok) {
+              errors.push(
+                payload.error || `${chLabel} batch failed (${res.status})`
+              );
+            } else {
+              successCount += payload.queuedCount ?? 0;
+              policyBlockedCount += payload.skippedPolicyBlocked ?? 0;
+              skippedCount +=
+                (payload.skippedAlreadyListed ?? 0) +
+                (payload.skippedAlreadyQueued ?? 0);
+            }
+          }
+
+          onProgress?.(Math.min(i + chunk.length, itemIds.length), itemIds.length);
+        }
+
+        await refreshInventory();
+
+        const notes: string[] = [];
+        if (marketplace !== "etsy" && successCount > 0) {
+          notes.push("Mac Mini Auto-Pilot / Companion Extension will post them automatically");
+        }
+        if (policyBlockedCount > 0) {
+          notes.push(
+            `${policyBlockedCount} policy-blocked (marked Red X on Inventory)`
+          );
+        }
+        if (skippedCount > 0) {
+          notes.push(`${skippedCount} already listed/queued`);
+        }
+        if (errors.length > 0) {
+          notes.push(errors[0]);
+        }
+
+        if (successCount > 0) {
+          pushToast(
+            "success",
+            marketplace === "etsy"
+              ? `Cross-Listed ${successCount} Item${successCount === 1 ? "" : "s"} to Etsy`
+              : `Queued ${successCount} Item${successCount === 1 ? "" : "s"} to ${chLabel}`,
+            notes.join(" · ") || undefined
+          );
+        } else {
+          pushToast(
+            errors.length > 0 ? "error" : "info",
+            `No New Items Sent to ${chLabel}`,
+            notes.join(" · ") || "Selected items were already listed, queued, or policy blocked."
+          );
+        }
+      } catch (error) {
+        pushToast(
+          "error",
+          `Bulk ${chLabel} Cross-List Failed`,
+          error instanceof Error ? error.message : "Unknown error"
+        );
+      } finally {
+        setIsBulkBusy(false);
+      }
+    },
+    [pushToast, refreshInventory]
+  );
+
   const handleDrawerPublishedEtsy = useCallback(
     async (result: EtsyCrossListResult) => {
       await refreshInventory();
@@ -1406,6 +1544,7 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
               setCrossListState({ row, target })
             }
             onBulkCrossListEtsy={handleBulkCrossListEtsy}
+            onBulkCrossListMarketplace={handleBulkCrossListMarketplace}
             onListEverywhere={async (row) => {
               const missing = (
                 ["etsy", "poshmark", "mercari", "facebook"] as Array<

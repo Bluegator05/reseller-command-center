@@ -148,6 +148,9 @@ export async function POST(request: Request) {
   const supabase = getSupabaseServerClient();
   const useLive = Boolean(supabase && isSupabaseConfigured());
   const queuedJobs: ChannelJob[] = [];
+  let skippedAlreadyListed = 0;
+  let skippedAlreadyQueued = 0;
+  let skippedPolicyBlocked = 0;
 
   for (const itemId of targetIds) {
     let item: InventoryItem | null = null;
@@ -302,6 +305,7 @@ export async function POST(request: Request) {
             { status: 409, headers: CORS_HEADERS }
           );
         }
+        skippedAlreadyListed += 1;
         continue;
       }
 
@@ -315,6 +319,7 @@ export async function POST(request: Request) {
             { status: 409, headers: CORS_HEADERS }
           );
         }
+        skippedAlreadyQueued += 1;
         continue;
       }
     }
@@ -373,6 +378,7 @@ export async function POST(request: Request) {
             { status: 422, headers: CORS_HEADERS }
           );
         }
+        skippedPolicyBlocked += 1;
         continue;
       }
     } else if (action === "create" && body.overrideCompliance && marketplace !== "ebay") {
@@ -500,6 +506,9 @@ export async function POST(request: Request) {
     {
       mode: useLive ? "live" : "demo",
       queuedCount: queuedJobs.length,
+      skippedAlreadyListed,
+      skippedAlreadyQueued,
+      skippedPolicyBlocked,
       jobs: queuedJobs,
       message: `Queued ${queuedJobs.length} ${marketplace} job${queuedJobs.length === 1 ? "" : "s"} for the Chrome/Arc Companion Extension.`,
     },
