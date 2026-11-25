@@ -1561,16 +1561,38 @@ export function ListingStudioPanel({
               <option value="Clothes">Clothes</option>
             </select>
             {(locKind === "Shelf" || locKind === "Garage") && (
-              <input
-                type="text"
-                value={locCode}
-                onChange={(e) => {
-                  setLocCode(e.target.value);
-                  setCustomSkuOverride(null);
-                }}
-                placeholder={locKind === "Garage" ? "G4" : "N"}
-                className="sm:col-span-2 px-3 py-2 text-xs font-mono uppercase rounded-lg border border-[#DDE2DF] bg-[#FAFBF9] focus:bg-white focus:border-[#0F766E] focus:outline-none"
-              />
+              <>
+                <input
+                  type="text"
+                  list={
+                    locKind === "Garage"
+                      ? "rcc-studio-garage-codes"
+                      : "rcc-studio-shelf-letters"
+                  }
+                  value={locCode}
+                  onChange={(e) => {
+                    setLocCode(e.target.value);
+                    setCustomSkuOverride(null);
+                  }}
+                  placeholder={locKind === "Garage" ? "G4" : "A–W"}
+                  className="sm:col-span-2 px-3 py-2 text-xs font-mono uppercase rounded-lg border border-[#DDE2DF] bg-[#FAFBF9] focus:bg-white focus:border-[#0F766E] focus:outline-none"
+                />
+                <datalist id="rcc-studio-shelf-letters">
+                  {[
+                    "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L",
+                    "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W",
+                  ].map((letter) => (
+                    <option key={letter} value={letter}>
+                      Shelf {letter}
+                    </option>
+                  ))}
+                </datalist>
+                <datalist id="rcc-studio-garage-codes">
+                  {["G1", "G2", "G3", "G4", "G5"].map((code) => (
+                    <option key={code} value={code} />
+                  ))}
+                </datalist>
+              </>
             )}
             <div
               className={`${

@@ -851,11 +851,25 @@ function ItemDetailModalInner({
                   </label>
                   <input
                     type="text"
+                    list="rcc-item-detail-bin-options"
                     value={binLocation}
                     onChange={(e) => setBinLocation(e.target.value)}
-                    placeholder="e.g. Bin A-04"
+                    placeholder="e.g. Shelf T or G4"
                     className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-[#DCE1DE] bg-white text-[#171A1D] focus:outline-none focus:border-[#0F766E]"
                   />
+                  <datalist id="rcc-item-detail-bin-options">
+                    {[
+                      "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L",
+                      "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W",
+                    ].map((letter) => (
+                      <option key={letter} value={`Shelf ${letter}`} />
+                    ))}
+                    {["G1", "G2", "G3", "G4", "G5", "Closet", "Rack", "Clothes"].map(
+                      (loc) => (
+                        <option key={loc} value={loc} />
+                      )
+                    )}
+                  </datalist>
                 </div>
                 <div>
                   <label className="block text-[11px] font-medium text-[#5F666D] mb-1">

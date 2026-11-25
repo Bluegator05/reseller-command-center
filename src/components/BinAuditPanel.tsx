@@ -499,6 +499,21 @@ export function BinAuditPanel({
       );
     }
 
+    const preconfiguredShelves = ["Shelf T", "Shelf U", "Shelf V", "Shelf W"];
+    for (const shelfName of preconfiguredShelves) {
+      if (!map.has(shelfName)) {
+        map.set(shelfName, {
+          bin: shelfName,
+          items: [],
+          totalBasis: 0,
+          totalRetail: 0,
+          totalUnits: 0,
+          verifiedCount: 0,
+          missingCount: 0,
+        });
+      }
+    }
+
     for (const bucket of map.values()) {
       bucket.items.sort((a, b) => {
         const numA = extractItemSortNumber(a.sku);
@@ -545,6 +560,12 @@ export function BinAuditPanel({
 
   const visibleBins = useMemo<BinEntry[]>(() => {
     const q = search.trim().toLowerCase();
+    const preconfiguredSet = new Set([
+      "Shelf T",
+      "Shelf U",
+      "Shelf V",
+      "Shelf W",
+    ]);
     return allBins
       .filter((b) => selectedBinFilter === "ALL" || b.bin === selectedBinFilter)
       .map((b) => {
@@ -583,7 +604,13 @@ export function BinAuditPanel({
           ),
         };
       })
-      .filter((b) => b.items.length > 0);
+      .filter(
+        (b) =>
+          b.items.length > 0 ||
+          (preconfiguredSet.has(b.bin) &&
+            auditFilter === "all" &&
+            (!q || b.bin.toLowerCase().includes(q)))
+      );
   }, [allBins, search, selectedBinFilter, auditFilter]);
 
   const allVisibleLabels = useMemo(
@@ -1076,16 +1103,18 @@ export function BinAuditPanel({
                     )}
                     <button
                       type="button"
+                      disabled={b.items.length === 0}
                       onClick={() => printThermalSkuLabels(b.items)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-[#DDE2DF] bg-white text-[11px] font-semibold text-[#14151A] hover:border-[#0F766E] hover:text-[#0F766E] cursor-pointer"
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-[#DDE2DF] bg-white text-[11px] font-semibold text-[#14151A] hover:border-[#0F766E] hover:text-[#0F766E] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                     >
                       <Tag className="w-3 h-3" />
                       <span>2×1 Labels</span>
                     </button>
                     <button
                       type="button"
+                      disabled={b.items.length === 0}
                       onClick={() => printBinAuditSheet(b.bin, b.items)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-[#DDE2DF] bg-white text-[11px] font-semibold text-[#14151A] hover:border-[#0F766E] hover:text-[#0F766E] cursor-pointer"
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-[#DDE2DF] bg-white text-[11px] font-semibold text-[#14151A] hover:border-[#0F766E] hover:text-[#0F766E] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                     >
                       <Printer className="w-3 h-3" />
                       <span>Audit Sheet</span>
@@ -1308,6 +1337,15 @@ export function BinAuditPanel({
 
                       // Standard shelves & locations: simple flat list
                       if (!shelfLetter) {
+                        if (b.items.length === 0) {
+                          return (
+                            <div className="px-4 py-5 text-center text-xs text-[#6B7280]">
+                              No items assigned to <strong>{b.bin}</strong> yet
+                              — select <strong>{b.bin}</strong> in Listing
+                              Studio or Item Details to start stocking it.
+                            </div>
+                          );
+                        }
                         return (
                           <div className="divide-y divide-[#F1F1EC]">
                             {b.items.map(renderItemRow)}
