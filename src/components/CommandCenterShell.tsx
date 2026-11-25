@@ -673,6 +673,57 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
     [pushToast, refreshInventory]
   );
 
+  const handleSetMarketplacePolicyBlock = useCallback(
+    async ({
+      itemId,
+      marketplace,
+      blocked,
+      rule,
+      reason,
+    }: {
+      itemId: string;
+      marketplace: Exclude<MarketplaceType, "ebay">;
+      blocked: boolean;
+      rule?: string;
+      reason?: string;
+    }) => {
+      const res = await fetch("/api/inventory", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "set_marketplace_policy_block",
+          itemId,
+          marketplace,
+          blocked,
+          rule,
+          reason,
+        }),
+      });
+      const payload = (await res.json()) as { error?: string };
+      if (!res.ok) {
+        pushToast(
+          "error",
+          "Could Not Update Policy Block",
+          payload.error || "Unknown error"
+        );
+        throw new Error(payload.error || "Could not update policy block");
+      }
+      await refreshInventory();
+      const chLabel =
+        marketplace.charAt(0).toUpperCase() + marketplace.slice(1);
+      pushToast(
+        blocked ? "info" : "success",
+        blocked
+          ? `${chLabel} Marked Policy Blocked`
+          : `${chLabel} Policy Block Cleared`,
+        blocked
+          ? `Greyed out with a red X on Inventory so you won't try to cross-list to ${chLabel}.`
+          : `Restored the List on ${chLabel} block on Inventory.`
+      );
+    },
+    [pushToast, refreshInventory]
+  );
+
   const staleCount = data.items.filter(
     (i) => i.is_stale || i.price_watcher_due
   ).length;
@@ -1361,7 +1412,9 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
                   Exclude<MarketplaceType, "ebay">
                 >
               ).filter(
-                (ch) => !row.cross_listings.some((c) => c.marketplace === ch)
+                (ch) =>
+                  !row.cross_listings.some((c) => c.marketplace === ch) &&
+                  !row.policy_blocked_marketplaces?.[ch]
               );
               const dispatchedChannels: string[] = [];
               const blockedChannels: string[] = [];
@@ -1860,11 +1913,19 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
       </div>
 
       <CrossListDrawer
-        row={crossListState?.row ?? null}
+        row={
+          crossListState
+            ? (data.items.find(
+                (i) => i.item_id === crossListState.row.item_id
+              ) ?? crossListState.row)
+            : null
+        }
         initialTarget={crossListState?.target ?? "etsy"}
         onClose={() => setCrossListState(null)}
         onPublishedEtsy={handleDrawerPublishedEtsy}
         onQueuedExtension={handleDrawerQueuedExtension}
+        onPolicyBlockDetected={() => void refreshInventory()}
+        onSetPolicyBlock={handleSetMarketplacePolicyBlock}
         onUnlinked={async (marketplace) => {
           await refreshInventory();
           pushToast(

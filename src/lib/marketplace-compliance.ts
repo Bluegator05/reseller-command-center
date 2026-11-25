@@ -1,7 +1,9 @@
 import type {
   ComplianceIssue,
+  CrossListMarketplace,
   InventoryItem,
   MarketplaceComplianceResult,
+  MarketplacePolicyBlock,
   MarketplaceType,
   StructuredCategoryMapping,
 } from "./types";
@@ -100,6 +102,12 @@ const FOOD_CONSUMABLE_RE =
 
 const POSHMARK_UNSUPPORTED_BULKY_RE =
   /\b(microwave oven|refrigerator|washing machine|clothes dryer|dishwasher|window air conditioner|space heater|lawn mower|chainsaw|table saw|miter saw|cordless power drill|impact driver|flat screen tv|sectional sofa|mattress|dining table|bookcase)\b/i;
+
+const POSHMARK_AUTO_PARTS_RE =
+  /\b(tail light|taillight|headlight|head lamp|headlamp|fog light|brake pad|brake rotor|brake caliper|alternator|starter motor|fuel filter|oil filter|diesel filter|cabin air filter|spark plug|radiator|catalytic converter|muffler|exhaust manifold|bumper cover|car bumper|fender flare|front grille|shock absorber|strut assembly|control arm|wheel hub|cv axle|transmission mount|engine mount|carburetor|ignition coil|oxygen sensor|o2 sensor|mass air flow|maf sensor|fuel pump|water pump|timing belt|serpentine belt|gasket set|head gasket|side mirror|wing mirror|wiper motor|window regulator|tow hitch|trailer hitch|hubcap|wheel bearing|auto part|car part|truck part)\b/i;
+
+const POSHMARK_AUTO_PARTS_EXCLUDE_RE =
+  /\b(shirt|t-shirt|tee|hoodie|sweatshirt|jacket|hat|cap|beanie|poster|tin sign|sign|diecast|hot wheels|matchbox|model kit|toy|lego|book|manual|magazine|sticker|decal|keychain|patch|mug|tumbler)\b/i;
 
 const DIGITAL_GOODS_RE =
   /\b(digital download|pdf download|ebook download|gift card|egift card|redeem code|activation key|steam key|xbox code|psn code)\b/i;
@@ -369,6 +377,19 @@ export function evaluateMarketplaceCompliance(params: {
         rule: "Poshmark Unsupported Bulky / Appliance Category",
         detail:
           "Heavy appliances, power tools, TVs, and furniture are not supported on Poshmark.",
+      });
+    }
+
+    if (
+      !POSHMARK_AUTO_PARTS_EXCLUDE_RE.test(productIdentity) &&
+      POSHMARK_AUTO_PARTS_RE.test(productIdentity)
+    ) {
+      issues.push({
+        code: "POSHMARK_AUTO_PARTS",
+        severity: "block",
+        rule: "Poshmark Automotive Parts Policy",
+        detail:
+          "Automotive hard parts and vehicle components (lights, filters, brakes, engine/body parts) are not supported on Poshmark.",
       });
     }
 
@@ -793,4 +814,235 @@ export function inferStructuredCategory(
     conditionLabel,
     sizeLabel: rawSize || null,
   };
+}
+
+export const CROSS_LIST_MARKETPLACES: CrossListMarketplace[] = [
+  "poshmark",
+  "mercari",
+  "etsy",
+  "facebook",
+];
+
+const CROSS_LIST_SET = new Set<string>(CROSS_LIST_MARKETPLACES);
+
+function isCrossListMarketplace(value: unknown): value is CrossListMarketplace {
+  return typeof value === "string" && CROSS_LIST_SET.has(value);
+}
+
+/**
+ * Safely parses `item_specifics.policy_blocked_marketplaces` (supports both JSONB object and legacy JSON string).
+ */
+export function parsePolicyBlockedMap(
+  specs: Record<string, unknown> | null | undefined
+): Partial<Record<CrossListMarketplace, MarketplacePolicyBlock>> {
+  const raw = specs?.policy_blocked_marketplaces;
+  let obj: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      obj = JSON.parse(raw);
+    } catch {
+      return {};
+    }
+  }
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+    return {};
+  }
+  const result: Partial<Record<CrossListMarketplace, MarketplacePolicyBlock>> =
+    {};
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+    if (!isCrossListMarketplace(k) || !v || typeof v !== "object") continue;
+    const rec = v as Record<string, unknown>;
+    const rule =
+      typeof rec.rule === "string" && rec.rule.trim()
+        ? rec.rule.trim()
+        : `${k.toUpperCase()} Policy Block`;
+    const reason =
+      typeof rec.reason === "string" && rec.reason.trim()
+        ? rec.reason.trim()
+        : "Prohibited by marketplace seller policy";
+    const source =
+      rec.source === "ai" ||
+      rec.source === "deterministic" ||
+      rec.source === "manual"
+        ? rec.source
+        : "ai";
+    result[k] = {
+      rule,
+      reason,
+      source,
+      detected_at:
+        typeof rec.detected_at === "string" ? rec.detected_at : undefined,
+    };
+  }
+  return result;
+}
+
+/**
+ * Safely parses `item_specifics.policy_override_marketplaces` (channels the user explicitly marked allowed).
+ */
+export function parsePolicyOverrideList(
+  specs: Record<string, unknown> | null | undefined
+): CrossListMarketplace[] {
+  const raw = specs?.policy_override_marketplaces;
+  let list: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      list = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(list)) return [];
+  const unique = new Set<CrossListMarketplace>();
+  for (const entry of list) {
+    if (isCrossListMarketplace(entry)) {
+      unique.add(entry);
+    }
+  }
+  return Array.from(unique);
+}
+
+/**
+ * Returns a cloned `item_specifics` object with a marketplace recorded as policy-blocked
+ * (and removed from any previous override list).
+ */
+export function applyPolicyBlockToSpecs(
+  specs: Record<string, unknown> | null | undefined,
+  marketplace: CrossListMarketplace,
+  block: MarketplacePolicyBlock
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...(specs || {}) };
+  const map = parsePolicyBlockedMap(next);
+  map[marketplace] = {
+    rule: block.rule,
+    reason: block.reason,
+    source: block.source,
+    detected_at: block.detected_at || new Date().toISOString(),
+  };
+  next.policy_blocked_marketplaces = map;
+
+  const overrides = parsePolicyOverrideList(next).filter(
+    (ch) => ch !== marketplace
+  );
+  if (overrides.length > 0) {
+    next.policy_override_marketplaces = overrides;
+  } else {
+    delete next.policy_override_marketplaces;
+  }
+  return next;
+}
+
+/**
+ * Returns a cloned `item_specifics` object with a marketplace's policy block cleared.
+ * When `addOverride` is true, records the channel in `policy_override_marketplaces`
+ * so deterministic rules won't re-block an item the user verified as allowed.
+ */
+export function clearPolicyBlockInSpecs(
+  specs: Record<string, unknown> | null | undefined,
+  marketplace: CrossListMarketplace,
+  addOverride = true
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...(specs || {}) };
+  const map = parsePolicyBlockedMap(next);
+  delete map[marketplace];
+  if (Object.keys(map).length > 0) {
+    next.policy_blocked_marketplaces = map;
+  } else {
+    delete next.policy_blocked_marketplaces;
+  }
+
+  const overrides = new Set(parsePolicyOverrideList(next));
+  if (addOverride) {
+    overrides.add(marketplace);
+  } else {
+    overrides.delete(marketplace);
+  }
+  if (overrides.size > 0) {
+    next.policy_override_marketplaces = Array.from(overrides);
+  } else {
+    delete next.policy_override_marketplaces;
+  }
+  return next;
+}
+
+/**
+ * Extracts the primary blocking MarketplacePolicyBlock from a MarketplaceComplianceResult.
+ */
+export function extractPrimaryPolicyBlock(
+  compliance: MarketplaceComplianceResult | null | undefined,
+  detectedAt?: string
+): MarketplacePolicyBlock | null {
+  if (!compliance || compliance.status !== "blocked") return null;
+  const blockIssues = compliance.issues.filter((i) => i.severity === "block");
+  if (blockIssues.length === 0) return null;
+  // Prefer AI block if present when explaining nuanced blocks, otherwise first deterministic block
+  const primary = blockIssues[0];
+  const isAi = blockIssues.some((i) => i.code.startsWith("AI_POLICY_"));
+  return {
+    rule: primary.rule,
+    reason: primary.detail,
+    source: isAi ? "ai" : "deterministic",
+    detected_at: detectedAt || new Date().toISOString(),
+  };
+}
+
+const VINTAGE_HINT_RE =
+  /\b(vintage|vtg|retro|antique|19[5-9]\d|200[0-6]|70s|80s|90s|y2k)\b/i;
+
+/**
+ * Evaluates all 4 cross-list marketplaces for an inventory item by combining:
+ * 1. Persisted AI / manual policy blocks (`item_specifics.policy_blocked_marketplaces`)
+ * 2. Fast deterministic rules (`evaluateMarketplaceCompliance`)
+ * while respecting user overrides (`item_specifics.policy_override_marketplaces`).
+ */
+export function getEffectiveMarketplacePolicyBlocks(
+  item: InventoryItem,
+  listedPrice: number
+): {
+  blocks: Partial<Record<CrossListMarketplace, MarketplacePolicyBlock>>;
+  overrides: CrossListMarketplace[];
+} {
+  const specs = (item.item_specifics || {}) as Record<string, unknown>;
+  const persistedBlocks = parsePolicyBlockedMap(specs);
+  const overrides = parsePolicyOverrideList(specs);
+  const overrideSet = new Set<CrossListMarketplace>(overrides);
+
+  const haystack = `${item.title} ${item.category_hint ?? ""} ${item.brand ?? ""}`;
+  const isCraftSupply = CRAFT_SUPPLY_RE.test(haystack);
+  const looksVintage = VINTAGE_HINT_RE.test(haystack);
+  const inferredEtsyWhenMade = looksVintage ? "1990_1999" : "2020_2026";
+
+  const blocks: Partial<Record<CrossListMarketplace, MarketplacePolicyBlock>> =
+    {};
+
+  for (const ch of CROSS_LIST_MARKETPLACES) {
+    const persisted = persistedBlocks[ch];
+    if (persisted) {
+      // Manual or AI persisted block takes precedence (until user clears it)
+      blocks[ch] = persisted;
+      continue;
+    }
+
+    if (overrideSet.has(ch)) {
+      continue;
+    }
+
+    const res = evaluateMarketplaceCompliance({
+      item,
+      targetMarketplace: ch,
+      suggestedPrice: listedPrice > 0 ? listedPrice : Number(item.target_price || 0),
+      whenMade: ch === "etsy" ? inferredEtsyWhenMade : "2020_2026",
+      isSupply: ch === "etsy" ? isCraftSupply : false,
+      whoMade: "someone_else",
+    });
+
+    if (res.status === "blocked") {
+      const primary = extractPrimaryPolicyBlock(res);
+      if (primary) {
+        blocks[ch] = { ...primary, source: "deterministic" };
+      }
+    }
+  }
+
+  return { blocks, overrides };
 }

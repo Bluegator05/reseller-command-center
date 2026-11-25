@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowRight,
@@ -37,6 +37,14 @@ interface CrossListDrawerProps {
     launchedLocally?: boolean;
   }) => Promise<void>;
   onUnlinked?: (marketplace: CrossListTarget) => Promise<void>;
+  onPolicyBlockDetected?: () => Promise<void> | void;
+  onSetPolicyBlock?: (params: {
+    itemId: string;
+    marketplace: CrossListTarget;
+    blocked: boolean;
+    rule?: string;
+    reason?: string;
+  }) => Promise<void>;
 }
 
 const TARGET_CHANNELS: Array<{
@@ -72,6 +80,8 @@ export function CrossListDrawer({
   onPublishedEtsy,
   onQueuedExtension,
   onUnlinked,
+  onPolicyBlockDetected,
+  onSetPolicyBlock,
 }: CrossListDrawerProps) {
   const [overrideTarget, setOverrideTarget] = useState<{
     key: string;
@@ -98,6 +108,8 @@ export function CrossListDrawer({
       onPublishedEtsy={onPublishedEtsy}
       onQueuedExtension={onQueuedExtension}
       onUnlinked={onUnlinked}
+      onPolicyBlockDetected={onPolicyBlockDetected}
+      onSetPolicyBlock={onSetPolicyBlock}
     />
   );
 }
@@ -110,6 +122,8 @@ function CrossListDrawerInner({
   onPublishedEtsy,
   onQueuedExtension,
   onUnlinked,
+  onPolicyBlockDetected,
+  onSetPolicyBlock,
 }: {
   row: StaleRadarRow;
   target: CrossListTarget;
@@ -123,12 +137,25 @@ function CrossListDrawerInner({
     launchedLocally?: boolean;
   }) => Promise<void>;
   onUnlinked?: (marketplace: CrossListTarget) => Promise<void>;
+  onPolicyBlockDetected?: () => Promise<void> | void;
+  onSetPolicyBlock?: (params: {
+    itemId: string;
+    marketplace: CrossListTarget;
+    blocked: boolean;
+    rule?: string;
+    reason?: string;
+  }) => Promise<void>;
 }) {
   const [isLoadingMap, setIsLoadingMap] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isUnlinking, setIsUnlinking] = useState(false);
+  const [isUpdatingPolicyBlock, setIsUpdatingPolicyBlock] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState<CrossListDraftPayload | null>(null);
+  const onPolicyBlockDetectedRef = useRef(onPolicyBlockDetected);
+  useEffect(() => {
+    onPolicyBlockDetectedRef.current = onPolicyBlockDetected;
+  }, [onPolicyBlockDetected]);
   const [localExtensionReady, setLocalExtensionReady] = useState(
     () =>
       typeof document !== "undefined" &&
@@ -148,7 +175,9 @@ function CrossListDrawerInner({
   const [tags, setTags] = useState<string[]>([]);
   const [newTagInput, setNewTagInput] = useState("");
   const [publishImmediately, setPublishImmediately] = useState(true);
-  const [overrideCompliance, setOverrideCompliance] = useState(false);
+  const [overrideCompliance, setOverrideCompliance] = useState(() =>
+    Boolean(row.policy_override_marketplaces?.includes(target))
+  );
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -195,6 +224,9 @@ function CrossListDrawerInner({
         setConditionLabel(data.structuredCategory?.conditionLabel || "");
         setSizeLabel(data.structuredCategory?.sizeLabel || "");
         setTags(data.tags);
+        if (data.policyBlockRecorded) {
+          void onPolicyBlockDetectedRef.current?.();
+        }
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Mapping failed");
@@ -228,16 +260,32 @@ function CrossListDrawerInner({
     ["before_1970", "1970s", "1980s", "1990_1999", "2000_2006"].includes(
       whenMade
     );
-  const complianceIssues = (draft?.compliance?.issues ?? []).filter((issue) => {
-    if (
-      isEtsy &&
-      isEtsyVintageOrSupply &&
-      issue.code === "ETSY_RESALE_PROHIBITED"
-    ) {
-      return false;
+  const persistedPolicyBlock = row.policy_blocked_marketplaces?.[target];
+  const baseComplianceIssues = (draft?.compliance?.issues ?? []).filter(
+    (issue) => {
+      if (
+        isEtsy &&
+        isEtsyVintageOrSupply &&
+        issue.code === "ETSY_RESALE_PROHIBITED"
+      ) {
+        return false;
+      }
+      return true;
     }
-    return true;
-  });
+  );
+  const complianceIssues =
+    persistedPolicyBlock &&
+    !baseComplianceIssues.some((i) => i.severity === "block")
+      ? [
+          {
+            code: "PERSISTED_POLICY_BLOCK",
+            severity: "block" as const,
+            rule: persistedPolicyBlock.rule,
+            detail: persistedPolicyBlock.reason,
+          },
+          ...baseComplianceIssues,
+        ]
+      : baseComplianceIssues;
   const isComplianceBlocked = complianceIssues.some(
     (i) => i.severity === "block"
   );
@@ -445,6 +493,9 @@ function CrossListDrawerInner({
               const alreadyListed = row.cross_listings.some(
                 (c) => c.marketplace === ch.key
               );
+              const isBlockedOnChannel =
+                !alreadyListed &&
+                Boolean(row.policy_blocked_marketplaces?.[ch.key]);
               return (
                 <button
                   key={ch.key}
@@ -453,19 +504,29 @@ function CrossListDrawerInner({
                   className={`px-2.5 py-2 rounded-lg border text-left transition cursor-pointer ${
                     active
                       ? "bg-[#14151A] text-white border-[#14151A]"
-                      : "bg-white text-[#14151A] border-[#DCDCD5] hover:bg-[#F1F1EC]"
+                      : isBlockedOnChannel
+                        ? "bg-[#F3F4F6] text-[#6B7280] border-[#E5D3D3] hover:bg-[#FEF2F2]"
+                        : "bg-white text-[#14151A] border-[#DCDCD5] hover:bg-[#F1F1EC]"
                   }`}
                 >
                   <div className="flex items-center justify-between gap-1 text-xs font-semibold">
                     <span className="truncate">{ch.label}</span>
                     <span
-                      className={`text-[10px] px-1 rounded ${
-                        active
-                          ? "bg-white/20 text-white"
-                          : "bg-[#F1F1EC] text-[#5C606B]"
+                      className={`text-[10px] px-1 rounded inline-flex items-center gap-0.5 ${
+                        isBlockedOnChannel
+                          ? active
+                            ? "bg-[#DC2626] text-white"
+                            : "bg-[#FEE2E2] text-[#B91C1C]"
+                          : active
+                            ? "bg-white/20 text-white"
+                            : "bg-[#F1F1EC] text-[#5C606B]"
                       }`}
                     >
-                      {alreadyListed ? "Live" : ch.mode}
+                      {alreadyListed
+                        ? "Live"
+                        : isBlockedOnChannel
+                          ? "✕ Blocked"
+                          : ch.mode}
                     </span>
                   </div>
                   <div
@@ -605,20 +666,87 @@ function CrossListDrawerInner({
                 )}
 
                 {isComplianceBlocked && (
-                  <label className="pt-1.5 border-t border-[#FCA5A5] flex items-center gap-2 text-[11px] font-medium text-[#7F1D1D] cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={overrideCompliance}
-                      onChange={(e) => setOverrideCompliance(e.target.checked)}
-                      className="rounded border-[#FCA5A5] accent-[#B91C1C]"
-                    />
-                    <span>
-                      False positive — I verified this item is allowed on{" "}
-                      <span className="capitalize">{target}</span> (override
-                      block)
-                    </span>
-                  </label>
+                  <div className="pt-1.5 border-t border-[#FCA5A5] flex flex-wrap items-center justify-between gap-2">
+                    <label className="flex items-center gap-2 text-[11px] font-medium text-[#7F1D1D] cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={overrideCompliance}
+                        onChange={(e) =>
+                          setOverrideCompliance(e.target.checked)
+                        }
+                        className="rounded border-[#FCA5A5] accent-[#B91C1C]"
+                      />
+                      <span>
+                        False positive — I verified this item is allowed on{" "}
+                        <span className="capitalize">{target}</span> (override
+                        block)
+                      </span>
+                    </label>
+                    {onSetPolicyBlock && persistedPolicyBlock && (
+                      <button
+                        type="button"
+                        disabled={isUpdatingPolicyBlock}
+                        onClick={async () => {
+                          setIsUpdatingPolicyBlock(true);
+                          try {
+                            await onSetPolicyBlock({
+                              itemId: row.item_id,
+                              marketplace: target,
+                              blocked: false,
+                            });
+                            setOverrideCompliance(true);
+                          } finally {
+                            setIsUpdatingPolicyBlock(false);
+                          }
+                        }}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-semibold bg-white border border-[#FCA5A5] text-[#991B1B] hover:bg-[#FEE2E2] disabled:opacity-50 transition cursor-pointer shrink-0"
+                      >
+                        {isUpdatingPolicyBlock && (
+                          <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                        )}
+                        <span>Clear Red X on Inventory</span>
+                      </button>
+                    )}
+                  </div>
                 )}
+
+                {!isComplianceBlocked &&
+                  !isAlreadyLiveOnTarget &&
+                  onSetPolicyBlock && (
+                    <div className="pt-1.5 border-t border-black/10 flex items-center justify-between gap-2 text-[11px]">
+                      <span className="opacity-80">
+                        Not allowed on{" "}
+                        <span className="capitalize">{target}</span>?
+                      </span>
+                      <button
+                        type="button"
+                        disabled={isUpdatingPolicyBlock}
+                        onClick={async () => {
+                          setIsUpdatingPolicyBlock(true);
+                          try {
+                            await onSetPolicyBlock({
+                              itemId: row.item_id,
+                              marketplace: target,
+                              blocked: true,
+                              rule: `Manual ${target.charAt(0).toUpperCase() + target.slice(1)} Policy Block`,
+                              reason: `Marked prohibited on ${target} — do not cross-list.`,
+                            });
+                            setOverrideCompliance(false);
+                          } finally {
+                            setIsUpdatingPolicyBlock(false);
+                          }
+                        }}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-semibold bg-white/90 border border-[#FECACA] text-[#B91C1C] hover:bg-[#FEF2F2] disabled:opacity-50 transition cursor-pointer shrink-0"
+                      >
+                        {isUpdatingPolicyBlock ? (
+                          <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                        ) : (
+                          <X className="w-3 h-3" />
+                        )}
+                        <span>Mark Policy Blocked</span>
+                      </button>
+                    </div>
+                  )}
               </div>
 
               {target === "facebook" && (

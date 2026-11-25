@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import {
+  applyDemoMarketplacePolicyBlock,
   getDemoStore,
   recordDemoJob,
   updateDemoExtensionJob,
@@ -7,7 +8,10 @@ import {
 import { fetchEbayItemDetails } from "@/lib/ebay";
 import { mapItemForMarketplace } from "@/lib/gemini-mapper";
 import {
+  applyPolicyBlockToSpecs,
+  clearPolicyBlockInSpecs,
   evaluateMarketplaceCompliance,
+  extractPrimaryPolicyBlock,
   MARKETPLACE_LIMITS,
   sanitizeMarketplaceCopy,
 } from "@/lib/marketplace-compliance";
@@ -21,6 +25,7 @@ import { getSupabaseServerClient, isSupabaseConfigured } from "@/lib/supabase";
 import type {
   ChannelJob,
   CrossListDraftPayload,
+  CrossListMarketplace,
   InventoryItem,
   JobStatusType,
   MarketplaceAccount,
@@ -327,6 +332,34 @@ export async function POST(request: Request) {
       });
 
       if (!compliance.allowed) {
+        if (marketplace !== "ebay") {
+          const ch = marketplace as CrossListMarketplace;
+          const primary = extractPrimaryPolicyBlock(compliance);
+          if (primary) {
+            const nextSpecs = applyPolicyBlockToSpecs(
+              (item.item_specifics || {}) as Record<string, unknown>,
+              ch,
+              primary
+            );
+            if (supabase && isSupabaseConfigured()) {
+              await supabase
+                .from("inventory_items")
+                .update({
+                  item_specifics: nextSpecs,
+                  updated_at: new Date().toISOString(),
+                })
+                .eq("id", item.id);
+            } else {
+              applyDemoMarketplacePolicyBlock({
+                itemId: item.id,
+                marketplace: ch,
+                blocked: true,
+                block: primary,
+              });
+            }
+          }
+        }
+
         const blockReasons = compliance.issues
           .filter((i) => i.severity === "block")
           .map((i) => `${i.rule}: ${i.detail}`)
@@ -341,6 +374,33 @@ export async function POST(request: Request) {
           );
         }
         continue;
+      }
+    } else if (action === "create" && body.overrideCompliance && marketplace !== "ebay") {
+      const ch = marketplace as CrossListMarketplace;
+      const nextSpecs = clearPolicyBlockInSpecs(
+        (item.item_specifics || {}) as Record<string, unknown>,
+        ch,
+        true
+      );
+      item = {
+        ...item,
+        item_specifics: nextSpecs as Record<string, string | string[]>,
+      };
+      if (supabase && isSupabaseConfigured()) {
+        await supabase
+          .from("inventory_items")
+          .update({
+            item_specifics: nextSpecs,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", item.id);
+      } else {
+        applyDemoMarketplacePolicyBlock({
+          itemId: item.id,
+          marketplace: ch,
+          blocked: false,
+          addOverride: true,
+        });
       }
     }
 

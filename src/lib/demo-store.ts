@@ -3,16 +3,22 @@ import type {
   AutoDelistCascadeResult,
   BusinessExpense,
   ChannelJob,
+  CrossListMarketplace,
   InventoryItem,
   ItemDetailUpdateRequest,
   JobStatusType,
   MarketplaceAccount,
   MarketplaceListing,
+  MarketplacePolicyBlock,
   MarketplaceType,
   QuickAddItemRequest,
   SalesOrderRecord,
   SalesOrderUpdateRequest,
 } from "./types";
+import {
+  applyPolicyBlockToSpecs,
+  clearPolicyBlockInSpecs,
+} from "./marketplace-compliance";
 import { roundCurrency } from "./stale-engine";
 
 export interface DemoStoreState {
@@ -1440,6 +1446,39 @@ export function applyDemoNotBulkBuy(params: {
     updated += 1;
   }
   return updated;
+}
+
+export function applyDemoMarketplacePolicyBlock(params: {
+  itemId: string;
+  marketplace: CrossListMarketplace;
+  blocked: boolean;
+  block?: MarketplacePolicyBlock;
+  addOverride?: boolean;
+}) {
+  const store = getDemoStore();
+  const item = store.items.find((i) => i.id === params.itemId);
+  if (!item) return null;
+  const nowIso = new Date().toISOString();
+  const specs = (item.item_specifics || {}) as Record<string, unknown>;
+  const nextSpecs = params.blocked
+    ? applyPolicyBlockToSpecs(specs, params.marketplace, {
+        rule:
+          params.block?.rule ||
+          `${params.marketplace.toUpperCase()} Policy Block`,
+        reason:
+          params.block?.reason ||
+          "Marked as prohibited on this marketplace.",
+        source: params.block?.source || "manual",
+        detected_at: params.block?.detected_at || nowIso,
+      })
+    : clearPolicyBlockInSpecs(
+        specs,
+        params.marketplace,
+        params.addOverride ?? true
+      );
+  item.item_specifics = nextSpecs as Record<string, string | string[]>;
+  item.updated_at = nowIso;
+  return item;
 }
 
 export function applyDemoEndAndSellSimilar(listingId: string) {

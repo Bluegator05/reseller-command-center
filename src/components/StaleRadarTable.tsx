@@ -495,13 +495,33 @@ export function StaleRadarTable({
       ) {
         return false;
       }
-      if (activeFilter === "missing_etsy" && hasChannel("etsy")) return false;
-      if (activeFilter === "missing_poshmark" && hasChannel("poshmark"))
+      if (
+        activeFilter === "missing_etsy" &&
+        (hasChannel("etsy") || Boolean(row.policy_blocked_marketplaces?.etsy))
+      ) {
         return false;
-      if (activeFilter === "missing_mercari" && hasChannel("mercari"))
+      }
+      if (
+        activeFilter === "missing_poshmark" &&
+        (hasChannel("poshmark") ||
+          Boolean(row.policy_blocked_marketplaces?.poshmark))
+      ) {
         return false;
-      if (activeFilter === "missing_facebook" && hasChannel("facebook"))
+      }
+      if (
+        activeFilter === "missing_mercari" &&
+        (hasChannel("mercari") ||
+          Boolean(row.policy_blocked_marketplaces?.mercari))
+      ) {
         return false;
+      }
+      if (
+        activeFilter === "missing_facebook" &&
+        (hasChannel("facebook") ||
+          Boolean(row.policy_blocked_marketplaces?.facebook))
+      ) {
+        return false;
+      }
 
       if (!q) return true;
       const note = notesMap[row.sku] || row.notes || "";
@@ -567,7 +587,9 @@ export function StaleRadarTable({
     const etsyCandidateItemIds: string[] = [];
 
     for (const row of selectedRows) {
-      if (!row.is_listed_on_etsy) etsyCandidateItemIds.push(row.item_id);
+      if (!row.is_listed_on_etsy && !row.policy_blocked_marketplaces?.etsy) {
+        etsyCandidateItemIds.push(row.item_id);
+      }
       if (row.is_at_floor) skippedAtFloor += 1;
       else {
         droppable += 1;
@@ -1546,7 +1568,8 @@ export function StaleRadarTable({
                   ).filter(
                     (ch) =>
                       !row.cross_listings.some((c) => c.marketplace === ch) &&
-                      !extJobLookup.has(`${row.item_id}:${ch}`)
+                      !extJobLookup.has(`${row.item_id}:${ch}`) &&
+                      !row.policy_blocked_marketplaces?.[ch]
                   );
 
                   const statusPill =
@@ -2184,6 +2207,45 @@ export function StaleRadarTable({
                                   </button>
                                 )}
                               </div>
+                            </div>
+                          );
+                        }
+
+                        const policyBlock = !isEbay
+                          ? row.policy_blocked_marketplaces?.[
+                              ch.key as CrossListTarget
+                            ]
+                          : undefined;
+
+                        if (policyBlock) {
+                          return (
+                            <div
+                              key={ch.key}
+                              className={`${isCompact ? "p-2.5" : "p-3.5"} flex items-center justify-center`}
+                            >
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onOpenCrossList(row, ch.key as CrossListTarget)
+                                }
+                                title={`Cannot cross-list to ${ch.label} — ${policyBlock.rule}: ${policyBlock.reason} (Click to view policy details or override)`}
+                                className={`${isCompact ? "w-[116px] h-[108px]" : "w-[126px] h-[148px]"} rounded-xl border border-[#E5D3D3] bg-[#F3F4F6] hover:bg-[#FEF2F2] hover:border-[#FCA5A5] transition-all flex flex-col items-center justify-center gap-1 px-2 text-center cursor-pointer opacity-85 hover:opacity-100`}
+                              >
+                                <span className="w-7 h-7 rounded-full bg-[#FEE2E2] border border-[#FECACA] flex items-center justify-center shrink-0">
+                                  <X className="w-4 h-4 text-[#DC2626] stroke-[2.5]" />
+                                </span>
+                                <span className="text-[11px] font-bold text-[#991B1B] leading-tight">
+                                  Policy Blocked
+                                </span>
+                                <span className="text-[10px] font-medium text-[#6B7280] leading-tight">
+                                  Can&apos;t list · {ch.label}
+                                </span>
+                                {!isCompact && (
+                                  <span className="mt-0.5 text-[9.5px] leading-tight text-[#7C858D] line-clamp-2">
+                                    {policyBlock.rule}
+                                  </span>
+                                )}
+                              </button>
                             </div>
                           );
                         }

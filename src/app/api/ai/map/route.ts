@@ -1,9 +1,19 @@
 import { NextResponse } from "next/server";
-import { getDemoStore } from "@/lib/demo-store";
+import {
+  applyDemoMarketplacePolicyBlock,
+  getDemoStore,
+} from "@/lib/demo-store";
 import { fetchEbayItemDetails } from "@/lib/ebay";
 import { mapItemForMarketplace } from "@/lib/gemini-mapper";
+import {
+  applyPolicyBlockToSpecs,
+  extractPrimaryPolicyBlock,
+  parsePolicyBlockedMap,
+  parsePolicyOverrideList,
+} from "@/lib/marketplace-compliance";
 import { getSupabaseServerClient, isSupabaseConfigured } from "@/lib/supabase";
 import type {
+  CrossListMarketplace,
   InventoryItem,
   MarketplaceAccount,
   MarketplaceType,
@@ -143,9 +153,47 @@ export async function POST(request: Request) {
       targetMarketplace,
       targetAccount,
     });
+
+    let policyBlockRecorded = false;
+    if (targetMarketplace !== "ebay" && draft.compliance?.status === "blocked") {
+      const ch = targetMarketplace as CrossListMarketplace;
+      const specs = (item.item_specifics || {}) as Record<string, unknown>;
+      const overrides = parsePolicyOverrideList(specs);
+      if (!overrides.includes(ch)) {
+        const primary = extractPrimaryPolicyBlock(draft.compliance);
+        if (primary) {
+          const existingMap = parsePolicyBlockedMap(specs);
+          const prev = existingMap[ch];
+          const needsWrite =
+            !prev || prev.rule !== primary.rule || prev.reason !== primary.reason;
+          if (needsWrite) {
+            const nextSpecs = applyPolicyBlockToSpecs(specs, ch, primary);
+            if (supabase && isSupabaseConfigured()) {
+              await supabase
+                .from("inventory_items")
+                .update({
+                  item_specifics: nextSpecs,
+                  updated_at: new Date().toISOString(),
+                })
+                .eq("id", item.id);
+            } else {
+              applyDemoMarketplacePolicyBlock({
+                itemId: item.id,
+                marketplace: ch,
+                blocked: true,
+                block: primary,
+              });
+            }
+            policyBlockRecorded = true;
+          }
+        }
+      }
+    }
+
     return NextResponse.json({
       ...draft,
       imageUrls: item.image_urls || [],
+      policyBlockRecorded,
     });
   } catch (error) {
     const message =

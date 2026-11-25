@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import {
+  applyDemoMarketplacePolicyBlock,
   getDemoStore,
   recordDemoJob,
   upsertDemoEtsyListing,
@@ -7,7 +8,10 @@ import {
 import { createEtsyListing, isEtsyConfigured } from "@/lib/etsy";
 import { mapItemForMarketplace } from "@/lib/gemini-mapper";
 import {
+  applyPolicyBlockToSpecs,
+  clearPolicyBlockInSpecs,
   evaluateMarketplaceCompliance,
+  extractPrimaryPolicyBlock,
   sanitizeMarketplaceCopy,
 } from "@/lib/marketplace-compliance";
 import { roundCurrency } from "@/lib/stale-engine";
@@ -180,12 +184,60 @@ export async function POST(request: Request) {
       });
 
       if (!etsyCompliance.allowed && !body.overrideCompliance) {
+        const primary = extractPrimaryPolicyBlock(etsyCompliance);
+        if (primary) {
+          const nextSpecs = applyPolicyBlockToSpecs(
+            (item.item_specifics || {}) as Record<string, unknown>,
+            "etsy",
+            primary
+          );
+          if (supabase && isSupabaseConfigured()) {
+            await supabase
+              .from("inventory_items")
+              .update({
+                item_specifics: nextSpecs,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", item.id);
+          } else {
+            applyDemoMarketplacePolicyBlock({
+              itemId: item.id,
+              marketplace: "etsy",
+              blocked: true,
+              block: primary,
+            });
+          }
+        }
         const blockMsg = etsyCompliance.issues
           .filter((i) => i.severity === "block")
           .map((i) => `${i.rule}: ${i.detail}`)
           .join(" | ");
         errors.push({ itemId, error: `Blocked by Etsy policy — ${blockMsg}` });
         continue;
+      }
+
+      if (body.overrideCompliance) {
+        const nextSpecs = clearPolicyBlockInSpecs(
+          (item.item_specifics || {}) as Record<string, unknown>,
+          "etsy",
+          true
+        );
+        if (supabase && isSupabaseConfigured()) {
+          await supabase
+            .from("inventory_items")
+            .update({
+              item_specifics: nextSpecs,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", item.id);
+        } else {
+          applyDemoMarketplacePolicyBlock({
+            itemId: item.id,
+            marketplace: "etsy",
+            blocked: false,
+            addOverride: true,
+          });
+        }
       }
 
       const nowIso = new Date().toISOString();

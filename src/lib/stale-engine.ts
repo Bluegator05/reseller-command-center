@@ -1,3 +1,4 @@
+import { getEffectiveMarketplacePolicyBlocks } from "./marketplace-compliance";
 import type {
   CrossChannelListingSummary,
   InventoryItem,
@@ -344,6 +345,9 @@ export function enrichStaleRadarRow(
         ? daysListed
         : null;
 
+  const { blocks: policyBlockedMarketplaces, overrides: policyOverrideMarketplaces } =
+    getEffectiveMarketplacePolicyBlocks(item, listedPrice);
+
   return {
     listing_id: listing.id,
     item_id: item.id,
@@ -456,5 +460,7 @@ export function enrichStaleRadarRow(
     est_roi_pct: estRoiPct,
     cross_listings: crossListings,
     is_listed_on_etsy: isListedOnEtsy,
+    policy_blocked_marketplaces: policyBlockedMarketplaces,
+    policy_override_marketplaces: policyOverrideMarketplaces,
   };
 }

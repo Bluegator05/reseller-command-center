@@ -304,6 +304,11 @@ export interface StaleRadarRow {
   // Phase 2: Multi-channel presence
   cross_listings: CrossChannelListingSummary[];
   is_listed_on_etsy: boolean;
+  // Marketplace policy blocks (deterministic, AI-detected, or manually flagged)
+  policy_blocked_marketplaces?: Partial<
+    Record<CrossListMarketplace, MarketplacePolicyBlock>
+  >;
+  policy_override_marketplaces?: CrossListMarketplace[];
   // Reconciliation safety net: active single-qty items that already have a paid/shipped sale
   sold_conflict_orders?: Array<{
     id: string;
@@ -576,7 +581,16 @@ export interface CrossListPriceBreakdown {
   respectedFloor: boolean;
 }
 
+export type CrossListMarketplace = Exclude<MarketplaceType, "ebay">;
+
 export type ComplianceStatus = "allowed" | "warning" | "blocked";
+
+export interface MarketplacePolicyBlock {
+  rule: string;
+  reason: string;
+  source: "deterministic" | "ai" | "manual";
+  detected_at?: string;
+}
 
 export interface ComplianceIssue {
   code: string;
@@ -622,6 +636,7 @@ export interface CrossListDraftPayload {
   compliance: MarketplaceComplianceResult;
   translationNotes: string[];
   imageUrls?: string[];
+  policyBlockRecorded?: boolean;
 }
 
 export interface EtsyCrossListRequest {

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import {
+  applyDemoMarketplacePolicyBlock,
   applyDemoNotBulkBuy,
   applyDemoPriceWatcherAction,
   createDemoInventoryItem,
@@ -10,8 +11,14 @@ import {
 import { isEbayConfigured, withdrawEbayOffer } from "@/lib/ebay";
 import { deactivateEtsyListing, isEtsyConfigured } from "@/lib/etsy";
 import { loadCommandCenterData } from "@/lib/inventory-loader";
+import {
+  applyPolicyBlockToSpecs,
+  clearPolicyBlockInSpecs,
+  CROSS_LIST_MARKETPLACES,
+} from "@/lib/marketplace-compliance";
 import { getEnvReadiness, getSupabaseServerClient } from "@/lib/supabase";
 import type {
+  CrossListMarketplace,
   ItemDetailUpdateRequest,
   MarketplaceListing,
   QuickAddItemRequest,
@@ -54,6 +61,15 @@ export async function POST(request: Request) {
           action: "set_not_bulk_buy";
           itemIds: string[];
           notBulkBuy: boolean;
+        }
+      | {
+          action: "set_marketplace_policy_block";
+          itemId: string;
+          marketplace: CrossListMarketplace;
+          blocked: boolean;
+          rule?: string;
+          reason?: string;
+          source?: "ai" | "deterministic" | "manual";
         }
       | {
           action: "price_watcher_action";
@@ -329,6 +345,85 @@ export async function POST(request: Request) {
         mode: "demo",
         updatedCount,
         notBulkBuy,
+      });
+    }
+
+    if (body.action === "set_marketplace_policy_block") {
+      const itemId = body.itemId?.trim();
+      const marketplace = body.marketplace;
+      if (!itemId || !CROSS_LIST_MARKETPLACES.includes(marketplace)) {
+        return NextResponse.json(
+          { error: "Missing valid itemId or cross-list marketplace" },
+          { status: 400 }
+        );
+      }
+      const blocked = Boolean(body.blocked);
+      const nowIso = new Date().toISOString();
+      const blockPayload = {
+        rule:
+          body.rule?.trim() ||
+          `${marketplace.toUpperCase()} Policy Block`,
+        reason:
+          body.reason?.trim() ||
+          "Item marked as prohibited on this marketplace.",
+        source: body.source ?? ("manual" as const),
+        detected_at: nowIso,
+      };
+
+      if (supabase && envReadiness.isSupabaseReady) {
+        const { data: existing, error: fetchErr } = await supabase
+          .from("inventory_items")
+          .select("id, item_specifics")
+          .eq("id", itemId)
+          .maybeSingle();
+
+        if (fetchErr || !existing) {
+          return NextResponse.json(
+            { error: fetchErr?.message || "Item not found" },
+            { status: 404 }
+          );
+        }
+
+        const specs = (existing.item_specifics || {}) as Record<
+          string,
+          unknown
+        >;
+        const nextSpecs = blocked
+          ? applyPolicyBlockToSpecs(specs, marketplace, blockPayload)
+          : clearPolicyBlockInSpecs(specs, marketplace, true);
+
+        const { error: updErr } = await supabase
+          .from("inventory_items")
+          .update({ item_specifics: nextSpecs, updated_at: nowIso })
+          .eq("id", itemId);
+
+        if (updErr) {
+          return NextResponse.json({ error: updErr.message }, { status: 400 });
+        }
+
+        return NextResponse.json({
+          mode: "live",
+          itemId,
+          marketplace,
+          blocked,
+        });
+      }
+
+      const updated = applyDemoMarketplacePolicyBlock({
+        itemId,
+        marketplace,
+        blocked,
+        block: blockPayload,
+        addOverride: true,
+      });
+      if (!updated) {
+        return NextResponse.json({ error: "Item not found" }, { status: 404 });
+      }
+      return NextResponse.json({
+        mode: "demo",
+        itemId,
+        marketplace,
+        blocked,
       });
     }
 
