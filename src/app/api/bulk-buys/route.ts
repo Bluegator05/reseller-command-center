@@ -44,6 +44,7 @@ async function attachItemsToBulkBuy(
               detail: `Linked to ${bulkBuy.name}`,
             }),
           };
+          delete nextSpecs.not_bulk_buy;
 
           const patch: Record<string, unknown> = {
             item_specifics: nextSpecs,

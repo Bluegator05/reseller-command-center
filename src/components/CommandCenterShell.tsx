@@ -629,6 +629,50 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
     [pushToast, refreshInventory]
   );
 
+  const handleSetNotBulkBuy = useCallback(
+    async ({
+      itemIds,
+      notBulkBuy,
+    }: {
+      itemIds: string[];
+      notBulkBuy: boolean;
+    }) => {
+      if (itemIds.length === 0) return;
+      const res = await fetch("/api/inventory", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "set_not_bulk_buy",
+          itemIds,
+          notBulkBuy,
+        }),
+      });
+      const payload = (await res.json()) as {
+        updatedCount?: number;
+        error?: string;
+      };
+      if (!res.ok) {
+        pushToast(
+          "error",
+          "Could Not Update Standalone Status",
+          payload.error || "Unknown error"
+        );
+        throw new Error(payload.error || "Could not update standalone status");
+      }
+      await refreshInventory();
+      pushToast(
+        "success",
+        notBulkBuy
+          ? `Marked ${itemIds.length} Item${itemIds.length === 1 ? "" : "s"} Standalone`
+          : "Restored to No Bulk Buy Review",
+        notBulkBuy
+          ? "Removed from the No Bulk Buy queue (can still be assigned to a Bulk Buy anytime)."
+          : "Item will appear under No Bulk Buy again until assigned."
+      );
+    },
+    [pushToast, refreshInventory]
+  );
+
   const staleCount = data.items.filter(
     (i) => i.is_stale || i.price_watcher_due
   ).length;
@@ -1269,6 +1313,7 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
             isBulkBusy={isBulkBusy}
             isLive={isLiveMode}
             onAssignToBulkBuy={handleAssignItemsToBulkBuy}
+            onSetNotBulkBuy={handleSetNotBulkBuy}
             onReconcileEbay={handleSyncEbay}
             isSyncingEbay={isSyncingEbay}
             onResolveSoldConflict={async ({ itemId, mode }) => {
@@ -1840,6 +1885,7 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
         jobs={data.recentJobs}
         onClose={() => setDetailModalItemId(null)}
         onAssignToBulkBuy={handleAssignItemsToBulkBuy}
+        onSetNotBulkBuy={handleSetNotBulkBuy}
         onDispose={async (itemId, disposition) => {
           const res = await fetch("/api/inventory", {
             method: "POST",

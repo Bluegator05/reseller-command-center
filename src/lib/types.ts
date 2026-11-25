@@ -275,6 +275,7 @@ export interface StaleRadarRow {
   quantity_purchased?: number;
   bulk_buy_id?: string | null;
   bulk_buy_locked?: boolean;
+  not_bulk_buy?: boolean;
   disposal_status?: DisposalStatus | null;
   disposal_date?: string | null;
   activity_log?: ItemActivityEvent[];

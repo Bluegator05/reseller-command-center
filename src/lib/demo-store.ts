@@ -1417,6 +1417,31 @@ export function applyDemoPriceWatcherAction(params: {
   return item;
 }
 
+export function applyDemoNotBulkBuy(params: {
+  itemIds: string[];
+  notBulkBuy: boolean;
+}) {
+  const store = getDemoStore();
+  const idSet = new Set(params.itemIds);
+  const nowIso = new Date().toISOString();
+  let updated = 0;
+  for (const item of store.items) {
+    if (!idSet.has(item.id)) continue;
+    const nextSpecs: Record<string, string | string[]> = {
+      ...(item.item_specifics || {}),
+    };
+    if (params.notBulkBuy) {
+      nextSpecs.not_bulk_buy = "true";
+    } else {
+      delete nextSpecs.not_bulk_buy;
+    }
+    item.item_specifics = nextSpecs;
+    item.updated_at = nowIso;
+    updated += 1;
+  }
+  return updated;
+}
+
 export function applyDemoEndAndSellSimilar(listingId: string) {
   const store = getDemoStore();
   const listing = store.listings.find((l) => l.id === listingId);

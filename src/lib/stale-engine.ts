@@ -422,6 +422,8 @@ export function enrichStaleRadarRow(
         : null,
     bulk_buy_locked:
       specs.bulk_buy_locked === true || specs.bulk_buy_locked === "true",
+    not_bulk_buy:
+      specs.not_bulk_buy === true || specs.not_bulk_buy === "true",
     disposal_status:
       specs.disposal_status === "donated" || specs.disposal_status === "discarded"
         ? specs.disposal_status

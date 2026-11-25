@@ -95,6 +95,10 @@ interface StaleRadarTableProps {
     bulkBuyId: string;
     itemIds: string[];
   }) => Promise<void>;
+  onSetNotBulkBuy?: (params: {
+    itemIds: string[];
+    notBulkBuy: boolean;
+  }) => Promise<void>;
   onReconcileEbay?: () => Promise<void>;
   isSyncingEbay?: boolean;
   onResolveSoldConflict?: (params: {
@@ -277,6 +281,7 @@ export function StaleRadarTable({
   onToggleStaleExempt,
   onPriceWatcherAction,
   onAssignToBulkBuy,
+  onSetNotBulkBuy,
   onReconcileEbay,
   isSyncingEbay = false,
   onResolveSoldConflict,
@@ -287,6 +292,7 @@ export function StaleRadarTable({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selectedBulkBuyId, setSelectedBulkBuyId] = useState<string>("");
   const [isAssigningBulkBuy, setIsAssigningBulkBuy] = useState(false);
+  const [isMarkingStandalone, setIsMarkingStandalone] = useState(false);
   const [listingAllItemId, setListingAllItemId] = useState<string | null>(null);
   const [resolvingConflictItemId, setResolvingConflictItemId] = useState<
     string | null
@@ -425,7 +431,10 @@ export function StaleRadarTable({
           !i.bin_location?.trim() ||
           !i.source_location?.trim()
       ).length,
-      noBulkBuyCount: items.filter((i) => !i.bulk_buy_id).length,
+      noBulkBuyCount: items.filter((i) => !i.bulk_buy_id && !i.not_bulk_buy)
+        .length,
+      standaloneCount: items.filter((i) => !i.bulk_buy_id && i.not_bulk_buy)
+        .length,
       soldConflictCount: items.filter(
         (i) => (i.sold_conflict_orders?.length ?? 0) > 0
       ).length,
@@ -468,7 +477,10 @@ export function StaleRadarTable({
       ) {
         return false;
       }
-      if (activeFilter === "no_bulk_buy" && Boolean(row.bulk_buy_id)) {
+      if (
+        activeFilter === "no_bulk_buy" &&
+        (Boolean(row.bulk_buy_id) || Boolean(row.not_bulk_buy))
+      ) {
         return false;
       }
       if (
@@ -1015,16 +1027,21 @@ export function StaleRadarTable({
         {/* Unassigned Bulk Buy Helper Banner */}
         {activeFilter === "no_bulk_buy" &&
           validSelectedIds.size === 0 &&
-          sortedBulkBuys.length > 0 &&
-          onAssignToBulkBuy && (
+          (onAssignToBulkBuy || onSetNotBulkBuy) && (
             <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2 rounded-lg bg-[#FFF7ED] border border-[#FED7AA] text-xs text-[#9A3412]">
               <div className="flex items-center gap-2">
                 <Boxes className="w-4 h-4 text-[#C2410C] shrink-0" />
                 <span>
-                  Showing <strong>{filteredItems.length}</strong> active listing
-                  {filteredItems.length === 1 ? "" : "s"} not assigned to a Bulk
-                  Buy. Check items below to bulk-assign them to a Bulk Buy (auto
-                  re-splits COGS), or click any item to assign individually.
+                  Showing <strong>{filteredItems.length}</strong> unassigned
+                  listing{filteredItems.length === 1 ? "" : "s"}. Check items
+                  below to <strong>Assign to a Bulk Buy</strong> or click{" "}
+                  <strong>Mark Standalone</strong> for individual purchases
+                  (thrift, garage sale, etc.) so they clear from this tab.
+                  {metrics.standaloneCount > 0 && (
+                    <span className="ml-1.5 font-mono text-[11px] text-[#B45309]">
+                      ({metrics.standaloneCount} marked standalone)
+                    </span>
+                  )}
                 </span>
               </div>
             </div>
@@ -1092,6 +1109,38 @@ export function StaleRadarTable({
                   </button>
                 </div>
               )}
+              {onSetNotBulkBuy &&
+                selectedRows.some((r) => !r.bulk_buy_id && !r.not_bulk_buy) && (
+                  <button
+                    type="button"
+                    disabled={isMarkingStandalone}
+                    title="Mark selected items as individual/standalone purchases (not part of a Bulk Buy) so they clear from the No Bulk Buy tab"
+                    onClick={async () => {
+                      const targets = selectedRows
+                        .filter((r) => !r.bulk_buy_id && !r.not_bulk_buy)
+                        .map((r) => r.item_id);
+                      if (targets.length === 0) return;
+                      setIsMarkingStandalone(true);
+                      try {
+                        await onSetNotBulkBuy({
+                          itemIds: targets,
+                          notBulkBuy: true,
+                        });
+                        setSelectedIds(new Set());
+                      } finally {
+                        setIsMarkingStandalone(false);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold bg-white/15 border border-white/25 text-white hover:bg-white/25 disabled:opacity-45 cursor-pointer"
+                  >
+                    {isMarkingStandalone ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <ShieldCheck className="w-3.5 h-3.5" />
+                    )}
+                    <span>Mark Standalone</span>
+                  </button>
+                )}
               <button
                 type="button"
                 disabled={isBulkBusy || bulkPreview.droppable === 0}

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import {
+  applyDemoNotBulkBuy,
   applyDemoPriceWatcherAction,
   createDemoInventoryItem,
   deleteDemoInventoryItem,
@@ -48,6 +49,11 @@ export async function POST(request: Request) {
           action: "set_stale_exempt";
           itemId: string;
           exempt: boolean;
+        }
+      | {
+          action: "set_not_bulk_buy";
+          itemIds: string[];
+          notBulkBuy: boolean;
         }
       | {
           action: "price_watcher_action";
@@ -252,6 +258,78 @@ export async function POST(request: Request) {
         return NextResponse.json({ mode: "live", item: updated, exempt });
       }
       return NextResponse.json({ mode: "demo", exempt });
+    }
+
+    if (body.action === "set_not_bulk_buy") {
+      const ids = Array.isArray(body.itemIds)
+        ? body.itemIds.filter((s) => typeof s === "string" && s.trim())
+        : [];
+      if (ids.length === 0) {
+        return NextResponse.json(
+          { error: "Provide at least one itemId" },
+          { status: 400 }
+        );
+      }
+      const notBulkBuy = Boolean(body.notBulkBuy);
+
+      if (supabase && envReadiness.isSupabaseReady) {
+        const nowIso = new Date().toISOString();
+        let updatedCount = 0;
+
+        for (let i = 0; i < ids.length; i += 100) {
+          const chunk = ids.slice(i, i + 100);
+          const { data: rows, error: fetchErr } = await supabase
+            .from("inventory_items")
+            .select("id, item_specifics")
+            .in("id", chunk);
+          if (fetchErr) {
+            return NextResponse.json(
+              { error: fetchErr.message },
+              { status: 400 }
+            );
+          }
+
+          const list = rows ?? [];
+          for (let j = 0; j < list.length; j += 15) {
+            const batch = list.slice(j, j + 15);
+            await Promise.all(
+              batch.map(async (row) => {
+                const specs = (row.item_specifics || {}) as Record<
+                  string,
+                  unknown
+                >;
+                const nextSpecs: Record<string, unknown> = { ...specs };
+                if (notBulkBuy) {
+                  nextSpecs.not_bulk_buy = "true";
+                } else {
+                  delete nextSpecs.not_bulk_buy;
+                }
+                const { error: updErr } = await supabase
+                  .from("inventory_items")
+                  .update({ item_specifics: nextSpecs, updated_at: nowIso })
+                  .eq("id", row.id);
+                if (!updErr) updatedCount += 1;
+              })
+            );
+          }
+        }
+
+        return NextResponse.json({
+          mode: "live",
+          updatedCount,
+          notBulkBuy,
+        });
+      }
+
+      const updatedCount = applyDemoNotBulkBuy({
+        itemIds: ids,
+        notBulkBuy,
+      });
+      return NextResponse.json({
+        mode: "demo",
+        updatedCount,
+        notBulkBuy,
+      });
     }
 
     if (body.action === "price_watcher_action") {
