@@ -3652,14 +3652,146 @@ export type StudioConditionChoice =
   | "pre_owned"
   | "for_parts";
 
+interface ValidEbayConditionOption {
+  id: number;
+  name: string;
+}
+
+const CONDITION_PREFERENCE_ORDER: Record<StudioConditionChoice, number[]> = {
+  new_sealed: [1000, 1500, 1750, 2750, 3000],
+  new_opened: [1500, 1750, 1000, 2750, 3000],
+  pre_owned: [3000, 4000, 5000, 2500, 2750, 6000, 1500, 1750, 1000],
+  for_parts: [7000, 6000, 5000, 3000, 1000],
+};
+
+const CONDITION_ID_LABEL: Record<number, string> = {
+  1000: "New",
+  1500: "Open box",
+  1750: "New other (see details)",
+  2000: "Certified - Refurbished",
+  2500: "Seller refurbished",
+  2750: "Like New",
+  3000: "Used",
+  4000: "Very Good",
+  5000: "Good",
+  6000: "Acceptable",
+  7000: "For parts or not working",
+};
+
+function isInvalidConditionError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err || "");
+  return /condition\s*id\s*is\s*invalid|invalid\s+condition|condition[^.\n]*(not\s*(valid|applicable|supported|allowed)|does\s*not\s*apply|cannot\s*be\s*used)|2191688[345]|21916519/i.test(
+    msg
+  );
+}
+
 /**
- * Queries `GetCategoryFeatures` for a leaf eBay category to pick an exact valid
- * `ConditionID` (prevents eBay "ConditionID not valid for this category" errors).
+ * Fetches allowed item conditions for a leaf eBay category via the modern
+ * Sell Metadata API (`get_item_condition_policies`), avoiding GetCategoryFeatures
+ * SiteDefaults pollution.
+ */
+async function fetchEbayCategoryConditionPolicies(categoryId: string): Promise<{
+  known: boolean;
+  disabled: boolean;
+  conditions: ValidEbayConditionOption[];
+}> {
+  const { apiBase } = getEbayBaseUrls();
+  const url = `${apiBase}/sell/metadata/v1/marketplace/EBAY_US/get_item_condition_policies?filter=${encodeURIComponent(
+    `categoryIds:{${categoryId}}`
+  )}`;
+
+  const send = async (forceRefresh: boolean): Promise<Response> => {
+    const token = await getEbayAppAccessToken(forceRefresh);
+    return fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+        "Content-Language": "en-US",
+      },
+      cache: "no-store",
+    });
+  };
+
+  let res = await send(false);
+  if (res.status === 401) {
+    res = await send(true);
+  }
+  if (!res.ok) {
+    return { known: false, disabled: false, conditions: [] };
+  }
+
+  const data = (await res.json()) as {
+    itemConditionPolicies?: Array<{
+      categoryId?: string;
+      itemConditionRequired?: boolean;
+      itemConditions?: Array<{
+        conditionId?: string | number;
+        conditionDescription?: string;
+      }>;
+    }>;
+  };
+
+  const policies = Array.isArray(data.itemConditionPolicies)
+    ? data.itemConditionPolicies
+    : [];
+  const policy =
+    policies.find((p) => String(p.categoryId || "").trim() === categoryId) ??
+    policies[0];
+  if (!policy) {
+    return { known: false, disabled: false, conditions: [] };
+  }
+
+  const rawConds = Array.isArray(policy.itemConditions)
+    ? policy.itemConditions
+    : [];
+  const conditions = rawConds
+    .map((c) => {
+      const id = Number(c.conditionId || 0);
+      const name =
+        String(c.conditionDescription || "").trim() ||
+        CONDITION_ID_LABEL[id] ||
+        `Condition ${id}`;
+      return { id, name };
+    })
+    .filter((c) => Number.isFinite(c.id) && c.id > 0);
+
+  if (conditions.length === 0 && policy.itemConditionRequired === false) {
+    return { known: true, disabled: true, conditions: [] };
+  }
+
+  return {
+    known: conditions.length > 0,
+    disabled: false,
+    conditions,
+  };
+}
+
+function pickPreferredCondition(
+  valid: ValidEbayConditionOption[],
+  desired: StudioConditionChoice
+): ValidEbayConditionOption {
+  const pref = CONDITION_PREFERENCE_ORDER[desired] || CONDITION_PREFERENCE_ORDER.pre_owned;
+  for (const candidateId of pref) {
+    const hit = valid.find((v) => v.id === candidateId);
+    if (hit) return hit;
+  }
+  return valid[0];
+}
+
+/**
+ * Resolves an exact valid eBay `ConditionID` for a leaf category via Sell Metadata API
+ * (`get_item_condition_policies`) with a strictly Category-scoped `GetCategoryFeatures`
+ * fallback (never letting `<SiteDefaults>` pollute category-specific conditions).
  */
 export async function resolveValidEbayCondition(
   categoryId: string,
   desired: StudioConditionChoice
-): Promise<{ conditionId: number | null; conditionName: string }> {
+): Promise<{
+  conditionId: number | null;
+  conditionName: string;
+  validConditions: ValidEbayConditionOption[];
+}> {
   const defaultMap: Record<StudioConditionChoice, { id: number; name: string }> = {
     new_sealed: { id: 1000, name: "New" },
     new_opened: { id: 1500, name: "Open box" },
@@ -3669,9 +3801,39 @@ export async function resolveValidEbayCondition(
   const fallback = defaultMap[desired] || defaultMap.pre_owned;
 
   if (!categoryId || !isEbayConfigured()) {
-    return { conditionId: fallback.id, conditionName: fallback.name };
+    return {
+      conditionId: fallback.id,
+      conditionName: fallback.name,
+      validConditions: [],
+    };
   }
 
+  // 1. Primary: Modern Sell Metadata API (exact leaf category condition policies)
+  try {
+    const meta = await fetchEbayCategoryConditionPolicies(categoryId);
+    if (meta.known) {
+      if (meta.disabled || meta.conditions.length === 0) {
+        return {
+          conditionId: null,
+          conditionName: "Not applicable",
+          validConditions: [],
+        };
+      }
+      const chosen = pickPreferredCondition(meta.conditions, desired);
+      return {
+        conditionId: chosen.id,
+        conditionName: chosen.name,
+        validConditions: meta.conditions,
+      };
+    }
+  } catch (metaErr) {
+    console.warn(
+      `[ebay] get_item_condition_policies(${categoryId}) warning:`,
+      metaErr
+    );
+  }
+
+  // 2. Fallback: Trading API GetCategoryFeatures — strictly scoped to <Category> block
   try {
     const xml = await ebayTradingRequest(
       "GetCategoryFeatures",
@@ -3681,12 +3843,33 @@ export async function resolveValidEbayCondition(
       <FeatureID>ConditionValues</FeatureID>`
     );
 
-    const enabled = (extractXmlTag(xml, "ConditionEnabled") || "").toLowerCase();
-    if (enabled === "disabled") {
-      return { conditionId: null, conditionName: "Not applicable" };
+    const categoryBlocks = extractAllXmlTags(xml, "Category");
+    const matchingCategoryBlock =
+      categoryBlocks.find(
+        (b) => (extractXmlTag(b, "CategoryID") || "").trim() === categoryId
+      ) ??
+      categoryBlocks[0] ??
+      "";
+    const siteDefaultsBlock = extractXmlTag(xml, "SiteDefaults") || "";
+
+    const catEnabled = (
+      extractXmlTag(matchingCategoryBlock, "ConditionEnabled") ||
+      extractXmlTag(siteDefaultsBlock, "ConditionEnabled") ||
+      ""
+    ).toLowerCase();
+    if (catEnabled === "disabled") {
+      return {
+        conditionId: null,
+        conditionName: "Not applicable",
+        validConditions: [],
+      };
     }
 
-    const condBlocks = extractAllXmlTags(xml, "Condition");
+    const catCondValues = extractXmlTag(matchingCategoryBlock, "ConditionValues");
+    const sourceBlock = catCondValues
+      ? catCondValues
+      : extractXmlTag(siteDefaultsBlock, "ConditionValues") || "";
+    const condBlocks = extractAllXmlTags(sourceBlock, "Condition");
     const valid = condBlocks
       .map((b) => ({
         id: Number(extractXmlTag(b, "ID") || 0),
@@ -3695,27 +3878,26 @@ export async function resolveValidEbayCondition(
       .filter((c) => c.id > 0);
 
     if (valid.length === 0) {
-      return { conditionId: fallback.id, conditionName: fallback.name };
+      return {
+        conditionId: fallback.id,
+        conditionName: fallback.name,
+        validConditions: [],
+      };
     }
 
-    const prefIds: Record<StudioConditionChoice, number[]> = {
-      new_sealed: [1000, 1500, 1750, 2750, 3000],
-      new_opened: [1500, 1750, 1000, 2750, 3000],
-      pre_owned: [3000, 4000, 5000, 2500, 2750, 6000, 1500],
-      for_parts: [7000, 6000, 5000, 3000],
+    const chosen = pickPreferredCondition(valid, desired);
+    return {
+      conditionId: chosen.id,
+      conditionName: chosen.name,
+      validConditions: valid,
     };
-
-    for (const candidateId of prefIds[desired] || prefIds.pre_owned) {
-      const hit = valid.find((v) => v.id === candidateId);
-      if (hit) {
-        return { conditionId: hit.id, conditionName: hit.name };
-      }
-    }
-
-    return { conditionId: valid[0].id, conditionName: valid[0].name };
   } catch (err) {
     console.warn(`[ebay] GetCategoryFeatures(${categoryId}) warning:`, err);
-    return { conditionId: fallback.id, conditionName: fallback.name };
+    return {
+      conditionId: fallback.id,
+      conditionName: fallback.name,
+      validConditions: [],
+    };
   }
 }
 
@@ -3938,17 +4120,6 @@ export async function publishEbayFixedPriceListing(
     )
     .join("\n");
 
-  const condXml =
-    resolvedCond.conditionId !== null
-      ? `<ConditionID>${resolvedCond.conditionId}</ConditionID>`
-      : "";
-  const condDescXml =
-    params.conditionDescription?.trim() &&
-    resolvedCond.conditionId !== null &&
-    resolvedCond.conditionId !== 1000
-      ? `<ConditionDescription>${escapeXml(params.conditionDescription.trim().slice(0, 1000))}</ConditionDescription>`
-      : "";
-
   const chosenShippingProfileId = params.freeShipping
     ? sellerDefaults.freeShippingProfileId
     : sellerDefaults.calculatedShippingProfileId;
@@ -4031,7 +4202,16 @@ export async function publishEbayFixedPriceListing(
 
   const safeDescHtml = (params.descriptionHtml || "").replace(/\]\]>/g, "]]&gt;");
 
-  const innerXml = `<Item>
+  const buildItemXml = (condId: number | null, includeBestOffer: boolean) => {
+    const condXml =
+      condId !== null ? `<ConditionID>${condId}</ConditionID>` : "";
+    const condDescXml =
+      params.conditionDescription?.trim() &&
+      condId !== null &&
+      condId !== 1000
+        ? `<ConditionDescription>${escapeXml(params.conditionDescription.trim().slice(0, 1000))}</ConditionDescription>`
+        : "";
+    return `<Item>
     <Title>${escapeXml(cleanTitle)}</Title>
     <SKU>${escapeXml(cleanSku)}</SKU>
     <Description><![CDATA[${safeDescHtml}]]></Description>
@@ -4050,7 +4230,7 @@ export async function publishEbayFixedPriceListing(
     <Quantity>${qty}</Quantity>
     ${condXml}
     ${condDescXml}
-    ${bestOfferXml}
+    ${includeBestOffer ? bestOfferXml : ""}
     <PictureDetails>
 ${picXml}
     </PictureDetails>
@@ -4066,24 +4246,82 @@ ${picXml}
     </ShippingPackageDetails>
     ${policyOrShippingXml}
   </Item>`;
+  };
 
-  let resXml: string;
-  try {
-    resXml = await ebayTradingRequest("AddFixedPriceItem", innerXml);
-  } catch (addErr) {
-    if (isBestOfferUnavailableError(addErr) && bestOfferXml) {
-      console.warn(
-        `[ebay] AddFixedPriceItem(${cleanSku}) hit Best Offer unavailable for category ${params.categoryId} — retrying without Best Offer:`,
-        addErr
-      );
+  // Ordered candidate conditions to try if eBay rejects the initial ConditionID for this category
+  const candidateQueue: Array<{ id: number | null; name: string }> = [
+    { id: resolvedCond.conditionId, name: resolvedCond.conditionName },
+  ];
+  const seenCondKeys = new Set<string>([String(resolvedCond.conditionId)]);
+  const pushCondCandidate = (id: number | null, name?: string) => {
+    const key = String(id);
+    if (seenCondKeys.has(key)) return;
+    seenCondKeys.add(key);
+    candidateQueue.push({
+      id,
+      name:
+        name ||
+        (id === null
+          ? "Not applicable"
+          : CONDITION_ID_LABEL[id] || `Condition ${id}`),
+    });
+  };
+
+  // Prefer remaining category-reported conditions in desired preference order
+  const prefOrder =
+    CONDITION_PREFERENCE_ORDER[params.conditionChoice] ||
+    CONDITION_PREFERENCE_ORDER.pre_owned;
+  for (const id of prefOrder) {
+    const found = resolvedCond.validConditions.find((v) => v.id === id);
+    if (found) pushCondCandidate(found.id, found.name);
+  }
+  for (const v of resolvedCond.validConditions) {
+    pushCondCandidate(v.id, v.name);
+  }
+  // Universal safe fallbacks if category metadata was unavailable/incomplete
+  for (const id of prefOrder) {
+    if (id === 1000 || id === 3000 || id === 1500 || id === 1750 || id === 2750) {
+      pushCondCandidate(id);
+    }
+  }
+  pushCondCandidate(1000, "New");
+  pushCondCandidate(3000, "Used");
+  pushCondCandidate(null, "Not applicable");
+
+  let includeBestOffer = true;
+  let activeCond = candidateQueue[0];
+  let condIndex = 0;
+  let resXml = "";
+
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
       resXml = await ebayTradingRequest(
         "AddFixedPriceItem",
-        innerXml.replace(bestOfferXml, "")
+        buildItemXml(activeCond.id, includeBestOffer)
       );
-    } else {
+      break;
+    } catch (addErr) {
+      if (isBestOfferUnavailableError(addErr) && includeBestOffer) {
+        console.warn(
+          `[ebay] AddFixedPriceItem(${cleanSku}) hit Best Offer unavailable for category ${params.categoryId} — retrying without Best Offer:`,
+          addErr
+        );
+        includeBestOffer = false;
+        continue;
+      }
+      if (isInvalidConditionError(addErr) && condIndex + 1 < candidateQueue.length) {
+        const nextCond = candidateQueue[condIndex + 1];
+        console.warn(
+          `[ebay] AddFixedPriceItem(${cleanSku}) rejected ConditionID=${activeCond.id} for category ${params.categoryId} — retrying with ConditionID=${nextCond.id} (${nextCond.name})`
+        );
+        condIndex += 1;
+        activeCond = nextCond;
+        continue;
+      }
       throw addErr;
     }
   }
+
   const newItemId = extractXmlTag(resXml, "ItemID");
   if (!newItemId) {
     throw new Error("eBay AddFixedPriceItem succeeded but did not return an ItemID.");
@@ -4092,8 +4330,8 @@ ${picXml}
   return {
     itemId: newItemId,
     listingUrl: `${webBase}/${newItemId}`,
-    conditionId: resolvedCond.conditionId,
-    conditionName: resolvedCond.conditionName,
+    conditionId: activeCond.id,
+    conditionName: activeCond.name,
   };
 }
 
