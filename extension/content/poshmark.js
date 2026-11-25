@@ -984,19 +984,157 @@
             if (clickedList) {
               showRccHud({
                 title: `Submitting to Poshmark (${payload.sku || "SKU"})`,
-                message: `Clicked List This Item — checking for Fragile Item confirmation...`,
+                message: `Clicked List This Item — checking for Fragile Item or Policy modals...`,
                 tone: "info",
               });
 
-              // Handle Poshmark's 2-step "Fragile Item Detected" modal if it pops up
-              await sleep(1000);
-              const clickedPublishListing = await clickButtonByText(
-                [/^publish listing$/i],
-                3500
-              );
-              if (clickedPublishListing) {
-                await sleep(800);
-                await clickButtonByText([/^publish$/i], 3500);
+              const hasPoshmarkProhibitedModal = () => {
+                const txt = (document.body?.innerText || "").toLowerCase();
+                return (
+                  txt.includes("flagged your listing as a potential prohibited") ||
+                  (txt.includes("prohibited items policy") &&
+                    (txt.includes("certify listing") ||
+                      txt.includes("delete listing"))) ||
+                  (txt.includes("problem detected") &&
+                    txt.includes("prohibited item"))
+                );
+              };
+
+              // Handle Poshmark's 2-step "Fragile Item Detected" modal if it pops up,
+              // while continuously checking for Poshmark's "Problem Detected / Prohibited Item" modal
+              await sleep(1100);
+              let prohibitedDetected = hasPoshmarkProhibitedModal();
+              if (!prohibitedDetected) {
+                const clickedPublishListing = await clickButtonByText(
+                  [/^publish listing$/i],
+                  2800
+                );
+                if (clickedPublishListing) {
+                  await sleep(900);
+                  await clickButtonByText([/^publish$/i], 3000);
+                  await sleep(1100);
+                }
+                prohibitedDetected = hasPoshmarkProhibitedModal();
+              }
+
+              // Wait up to 4.5s for either navigation away from /create-listing or late prohibited modal
+              if (!prohibitedDetected) {
+                for (let w = 0; w < 9; w++) {
+                  if (hasPoshmarkProhibitedModal()) {
+                    prohibitedDetected = true;
+                    break;
+                  }
+                  if (!window.location.pathname.includes("/create-listing")) {
+                    break;
+                  }
+                  await sleep(500);
+                }
+              }
+
+              if (prohibitedDetected) {
+                const policyReason =
+                  "Poshmark's validation system flagged this listing as a potential prohibited item during publishing.";
+
+                if (isAutoPilot) {
+                  // Auto-Pilot (unattended Mac Mini): never auto-certify prohibited items.
+                  // Delete the flagged draft, mark Poshmark Policy Blocked (Red X) on Inventory, and close tab.
+                  await clickButtonByText([/^delete listing$/i], 3000);
+                  await sleep(900);
+                  await chrome.runtime.sendMessage({
+                    type: "RCC_MARK_POLICY_BLOCKED",
+                    jobId: job.id,
+                    itemId: job.item_id,
+                    marketplace: "poshmark",
+                    rule: "Poshmark Validation System Flag",
+                    reason: policyReason,
+                  });
+                  showRccHud({
+                    title: `Poshmark Policy Blocked (${payload.sku || "SKU"})`,
+                    message:
+                      "Poshmark flagged this as prohibited — deleted draft & marked Poshmark with a Red X on Inventory.",
+                    tone: "error",
+                  });
+                  await sleep(1800);
+                  chrome.runtime.sendMessage({ type: "RCC_CLOSE_SENDER_TAB" });
+                  sendResponse({ ok: false, policyBlocked: true });
+                  return;
+                }
+
+                // Interactive mode: pause cleanly and let user either mark Policy Blocked (Red X) or click Certify Listing
+                await chrome.runtime.sendMessage({
+                  type: "RCC_JOB_STATUS_UPDATE",
+                  jobId: job.id,
+                  status: "needs_user_confirm",
+                  extra: {
+                    errorMessage:
+                      "Poshmark flagged this listing as a potential prohibited item — click Mark Policy Blocked or Certify Listing.",
+                  },
+                });
+
+                showRccHud({
+                  title: `Poshmark Policy Flag (${payload.sku || "SKU"})`,
+                  message:
+                    'Poshmark flagged this as a potential prohibited item. Click "Mark Blocked (Red X)" below to delete & grey out Poshmark on Inventory — or click "Certify Listing" on Poshmark if it is allowed.',
+                  tone: "error",
+                  actionLabel: "Mark Blocked (Red X) & Delete",
+                  onAction: async () => {
+                    await clickButtonByText([/^delete listing$/i], 2500);
+                    await chrome.runtime.sendMessage({
+                      type: "RCC_MARK_POLICY_BLOCKED",
+                      jobId: job.id,
+                      itemId: job.item_id,
+                      marketplace: "poshmark",
+                      rule: "Poshmark Validation System Flag",
+                      reason: policyReason,
+                    });
+                    showRccHud({
+                      title: `Marked Policy Blocked (${payload.sku || "SKU"})`,
+                      message:
+                        "Poshmark cell is now greyed out with a Red X on Command Center Inventory.",
+                      tone: "error",
+                    });
+                  },
+                });
+                sendResponse({ ok: false, policyBlocked: true });
+                return;
+              }
+
+              // If still stuck on /create-listing after submit, don't claim green success!
+              if (window.location.pathname.includes("/create-listing")) {
+                await chrome.runtime.sendMessage({
+                  type: "RCC_JOB_STATUS_UPDATE",
+                  jobId: job.id,
+                  status: "needs_user_confirm",
+                  extra: {
+                    errorMessage:
+                      "Poshmark stayed on /create-listing after clicking List This Item — review any popup or missing field.",
+                  },
+                });
+                showRccHud({
+                  title: `Poshmark Needs Review (${payload.sku || "SKU"})`,
+                  message:
+                    "Poshmark did not finish publishing (check any popup or red field on this page). Once it posts, Command Center will auto-sync.",
+                  tone: "confirm",
+                  actionLabel: "Mark Blocked (Red X)",
+                  onAction: async () => {
+                    await chrome.runtime.sendMessage({
+                      type: "RCC_MARK_POLICY_BLOCKED",
+                      jobId: job.id,
+                      itemId: job.item_id,
+                      marketplace: "poshmark",
+                      rule: "Poshmark Policy / Validation Block",
+                      reason: "Marked policy blocked after Poshmark rejected listing.",
+                    });
+                    showRccHud({
+                      title: `Marked Policy Blocked (${payload.sku || "SKU"})`,
+                      message:
+                        "Poshmark cell is now greyed out with a Red X on Command Center Inventory.",
+                      tone: "error",
+                    });
+                  },
+                });
+                sendResponse({ ok: false, needsReview: true });
+                return;
               }
 
               showRccHud({

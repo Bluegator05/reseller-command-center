@@ -889,6 +889,57 @@ async function importStandaloneListings(payload) {
   return { ok: true, ...data };
 }
 
+async function markMarketplacePolicyBlocked({
+  jobId,
+  itemId,
+  marketplace,
+  rule,
+  reason,
+}) {
+  const config = await getConfig();
+  const base = (
+    config.apiBaseUrl || "https://reseller-command-center-black.vercel.app"
+  ).replace(/\/+$/, "");
+
+  if (itemId && marketplace) {
+    try {
+      await fetch(`${base}/api/inventory`, {
+        method: "POST",
+        headers: buildBridgeHeaders(config, true),
+        credentials: "include",
+        body: JSON.stringify({
+          action: "set_marketplace_policy_block",
+          itemId,
+          marketplace,
+          blocked: true,
+          rule: rule || `${marketplace.toUpperCase()} Policy Block`,
+          reason:
+            reason ||
+            "Flagged as prohibited by marketplace validation during publishing.",
+          source: "manual",
+        }),
+      });
+    } catch (err) {
+      console.warn("[RCC] Failed to persist policy block:", err);
+    }
+  }
+
+  if (jobId) {
+    try {
+      await updateJobStatus(jobId, "failed", {
+        errorMessage:
+          reason ||
+          `${marketplace || "Marketplace"} flagged this listing as a potential prohibited item — marked Policy Blocked on Inventory.`,
+      });
+    } catch (err) {
+      console.warn("[RCC] Failed to mark blocked job failed:", err);
+    }
+  }
+
+  await refreshJobsCache(false);
+  return { ok: true, policyBlocked: true };
+}
+
 async function waitForTabLoad(tabId, settleMs = 2200, timeoutMs = 18000) {
   await new Promise((resolve) => {
     let finished = false;
@@ -2372,6 +2423,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sku: "",
           });
           sendResponse(importResult);
+          break;
+        }
+        case "RCC_MARK_POLICY_BLOCKED": {
+          const blockResult = await markMarketplacePolicyBlocked({
+            jobId: message.jobId,
+            itemId: message.itemId,
+            marketplace: message.marketplace,
+            rule: message.rule,
+            reason: message.reason,
+          });
+          await broadcastToCommandCenterTabs({
+            type: "RCC_JOB_COMPLETED",
+            marketplace: message.marketplace || "poshmark",
+            sku: "",
+          });
+          sendResponse(blockResult);
           break;
         }
         case "RCC_IMPORT_SALES": {
