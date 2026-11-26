@@ -433,12 +433,13 @@ if (btnScanEl) {
 const btnCheckNewSales = document.getElementById("btn-check-new-sales");
 const btnImportPoshSales = document.getElementById("btn-import-posh-sales");
 const btnImportMercariSales = document.getElementById("btn-import-mercari-sales");
+const btnImportEtsySales = document.getElementById("btn-import-etsy-sales");
 const salesImportStatusEl = document.getElementById("sales-import-status");
 
 if (btnCheckNewSales) {
   btnCheckNewSales.addEventListener("click", async () => {
     btnCheckNewSales.disabled = true;
-    btnCheckNewSales.textContent = "Checking eBay, Poshmark & Mercari...";
+    btnCheckNewSales.textContent = "Checking eBay, Poshmark, Mercari & Etsy...";
     errorBarEl.style.display = "none";
     if (salesImportStatusEl) salesImportStatusEl.style.display = "none";
     try {
@@ -492,12 +493,17 @@ async function runSalesImport(marketplace, btn, defaultLabel) {
 
 if (btnImportPoshSales) {
   btnImportPoshSales.addEventListener("click", () =>
-    runSalesImport("poshmark", btnImportPoshSales, "Import Poshmark Sales")
+    runSalesImport("poshmark", btnImportPoshSales, "Poshmark Sales")
   );
 }
 if (btnImportMercariSales) {
   btnImportMercariSales.addEventListener("click", () =>
-    runSalesImport("mercari", btnImportMercariSales, "Import Mercari Sales")
+    runSalesImport("mercari", btnImportMercariSales, "Mercari Sales")
+  );
+}
+if (btnImportEtsySales) {
+  btnImportEtsySales.addEventListener("click", () =>
+    runSalesImport("etsy", btnImportEtsySales, "Etsy Sales")
   );
 }
 

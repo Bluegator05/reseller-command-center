@@ -1682,11 +1682,256 @@ async function scrapeSoldOrdersFromDom(marketplace) {
     return results;
   }
 
+  if (marketplace === "etsy") {
+    const extractEtsyOrderImage = (root) => {
+      if (!root) return null;
+      const imgs = Array.from(root.querySelectorAll("img[src]"));
+      for (const img of imgs) {
+        const src = (img.getAttribute("src") || "").trim();
+        if (!src.startsWith("http")) continue;
+        if (/avatar|profile|icon|badge|emoji/i.test(src)) continue;
+        const r = img.getBoundingClientRect();
+        const w = r.width || img.naturalWidth || img.width || 0;
+        if (w > 0 && w < 28) continue;
+        return src;
+      }
+      return null;
+    };
+
+    const isEtsyNoiseLine = (line) => {
+      const t = line.trim();
+      if (t.length < 3) return true;
+      if (/^\$[\d,.]+$/.test(t) || /^free$/i.test(t)) return true;
+      if (/^#\d{7,13}$/.test(t)) return true;
+      if (
+        /^(ordered|ship by|shipped|delivered|completed|new|open|in transit|pre-transit|tracking|quantity|qty|sku|buyer|ship to|order total|item total|subtotal|shipping|tax|discount|message|print|get shipping labels|mark complete|update progress|private note|receipt|gift|paid|not shipped|overdue|canceled|cancelled|refunded)\b/i.test(
+          t
+        )
+      ) {
+        return true;
+      }
+      return false;
+    };
+
+    const scrapeCurrentEtsyOrdersView = (defaultStatus) => {
+      // Find individual Etsy order cards by anchoring on order # / receipt_id links or order containers
+      const cardCandidates = new Set();
+
+      const receiptAnchors = Array.from(
+        document.querySelectorAll(
+          'a[href*="receipt_id="], a[href*="/your/orders/sold/"], [data-test-id*="order"], .panel-body-row, [class*="order-card"]'
+        )
+      );
+
+      for (const el of receiptAnchors) {
+        let node = el;
+        let bestCard = null;
+        for (let up = 0; up < 7 && node && node !== document.body; up++) {
+          const txt = node.innerText || "";
+          const orderNums = Array.from(
+            new Set(
+              Array.from(txt.matchAll(/#(\d{8,12})\b/g)).map((m) => m[1])
+            )
+          );
+          if (orderNums.length > 1) break;
+          if (
+            orderNums.length === 1 &&
+            /\$\s*[0-9,]+/.test(txt) &&
+            txt.length >= 20 &&
+            txt.length <= 4000
+          ) {
+            bestCard = node;
+          }
+          node = node.parentElement;
+        }
+        if (bestCard) cardCandidates.add(bestCard);
+      }
+
+      // Fallback: walk from any element containing "#1234567890" order number text
+      if (cardCandidates.size === 0) {
+        const allEls = Array.from(document.querySelectorAll("a, span, div, h2, h3, p"));
+        for (const el of allEls) {
+          if (el.children.length > 2) continue;
+          const ownTxt = (el.textContent || "").trim();
+          if (!/^#?\d{8,12}$/.test(ownTxt) && !/#\d{8,12}\b/.test(ownTxt)) {
+            continue;
+          }
+          let node = el.parentElement;
+          let bestCard = null;
+          for (let up = 0; up < 8 && node && node !== document.body; up++) {
+            const txt = node.innerText || "";
+            const orderNums = Array.from(
+              new Set(
+                Array.from(txt.matchAll(/#(\d{8,12})\b/g)).map((m) => m[1])
+              )
+            );
+            if (orderNums.length > 1) break;
+            if (
+              orderNums.length === 1 &&
+              /\$\s*[0-9,]+/.test(txt) &&
+              txt.length >= 20 &&
+              txt.length <= 4000
+            ) {
+              bestCard = node;
+            }
+            node = node.parentElement;
+          }
+          if (bestCard) cardCandidates.add(bestCard);
+        }
+      }
+
+      for (const card of cardCandidates) {
+        const cardText = card.innerText || "";
+        const receiptLink = card.querySelector(
+          'a[href*="receipt_id="], a[href*="/your/orders/sold/"]'
+        );
+        const receiptHref = receiptLink?.getAttribute("href") || "";
+        const receiptIdMatch =
+          receiptHref.match(/receipt_id=(\d{7,13})/i) ||
+          receiptHref.match(/\/sold\/(\d{7,13})/i) ||
+          cardText.match(/#(\d{8,12})\b/);
+        const receiptId = receiptIdMatch?.[1];
+        if (!receiptId) continue;
+
+        const skuMatch = cardText.match(/\bSKU\s*:?\s*([^\n\r]+)/i);
+        const sku = skuMatch ? skuMatch[1].trim().slice(0, 80) : null;
+
+        const orderTotalMatch = cardText.match(
+          /(?:order\s+total|item\s+total|total)\s*:?\s*\$\s*([0-9,]+(?:\.[0-9]{1,2})?)/i
+        );
+        const dollars = extractDollars(cardText);
+        const cardPrice = orderTotalMatch
+          ? Number(orderTotalMatch[1].replace(/,/g, "")) || 0
+          : dollars.length > 0
+            ? dollars[0]
+            : 0;
+
+        const soldAt = parseDateFromText(cardText);
+        const fulfillmentStatus = inferStatus(cardText, defaultStatus);
+        const cardImage = extractEtsyOrderImage(card);
+
+        // Extract distinct listing links inside this order card (supports multi-item orders)
+        const listingLinks = Array.from(
+          card.querySelectorAll('a[href*="/listing/"]')
+        );
+        const seenListingIds = new Set();
+        const itemsInOrder = [];
+
+        for (const a of listingLinks) {
+          const href = a.getAttribute("href") || "";
+          const lidMatch = href.match(/\/listing\/(\d+)/i);
+          const listingId = lidMatch?.[1] || null;
+          if (listingId && seenListingIds.has(listingId)) continue;
+          const linkTitle = (
+            a.getAttribute("title") ||
+            a.innerText ||
+            a.textContent ||
+            a.querySelector("img")?.getAttribute("alt") ||
+            ""
+          )
+            .replace(/\s+/g, " ")
+            .trim();
+          if (linkTitle.length < 3 || isEtsyNoiseLine(linkTitle)) continue;
+          if (listingId) seenListingIds.add(listingId);
+          itemsInOrder.push({
+            listingId,
+            title: linkTitle,
+            imageUrl: extractEtsyOrderImage(a.closest("div, li, tr") || a) || cardImage,
+          });
+        }
+
+        if (itemsInOrder.length === 0) {
+          const lines = cardText
+            .split("\n")
+            .map((s) => s.trim())
+            .filter((s) => !isEtsyNoiseLine(s));
+          const fallbackTitle = (
+            card.querySelector("img[alt]")?.getAttribute("alt") ||
+            lines[0] ||
+            ""
+          )
+            .replace(/\s+/g, " ")
+            .trim();
+          if (fallbackTitle.length >= 3) {
+            itemsInOrder.push({
+              listingId: null,
+              title: fallbackTitle,
+              imageUrl: cardImage,
+            });
+          }
+        }
+
+        if (itemsInOrder.length === 0) continue;
+
+        const perItemPrice =
+          itemsInOrder.length > 1 && cardPrice > 0
+            ? Math.round((cardPrice / itemsInOrder.length) * 100) / 100
+            : cardPrice;
+
+        itemsInOrder.forEach((it, idx) => {
+          const extOrderId =
+            itemsInOrder.length === 1
+              ? `ETSY-${receiptId}`
+              : `ETSY-${receiptId}-${idx + 1}`;
+          if (seen.has(extOrderId)) return;
+          seen.add(extOrderId);
+          results.push({
+            externalOrderId: extOrderId,
+            externalListingId: it.listingId,
+            sku: itemsInOrder.length === 1 ? sku : null,
+            title: it.title,
+            imageUrl: it.imageUrl,
+            grossSalePrice: perItemPrice,
+            marketplaceFees: null,
+            shippingCost: 0,
+            fulfillmentStatus,
+            soldAt,
+          });
+        });
+      }
+    };
+
+    // 1. Scrape currently active tab (usually "New" open orders waiting to ship)
+    const isCompletedUrl = window.location.pathname.includes("/completed");
+    await autoScrollAll('a[href*="/listing/"], a[href*="receipt_id="]');
+    scrapeCurrentEtsyOrdersView(isCompletedUrl ? "shipped" : "to_ship");
+
+    // 2. Also click the "Completed" (or "New") sibling tab to capture shipped + open Etsy orders
+    const wantTabPrefix = isCompletedUrl ? "new" : "completed";
+    const siblingTab = Array.from(
+      document.querySelectorAll('button, a, [role="tab"]')
+    ).find((el) => {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) return false;
+      const t = (el.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+      return (
+        t === wantTabPrefix ||
+        t.startsWith(`${wantTabPrefix} `) ||
+        t.startsWith(`${wantTabPrefix}(`) ||
+        /^completed\s*\d+$/.test(t) ||
+        /^new\s*\d+$/.test(t)
+      );
+    });
+
+    if (siblingTab) {
+      siblingTab.click();
+      await sleep(2400);
+      await autoScrollAll('a[href*="/listing/"], a[href*="receipt_id="]');
+      scrapeCurrentEtsyOrdersView(isCompletedUrl ? "to_ship" : "shipped");
+    }
+
+    return results;
+  }
+
   return results;
 }
 
 async function importMarketplaceSales(marketplace, options = {}) {
-  if (marketplace !== "poshmark" && marketplace !== "mercari") {
+  if (
+    marketplace !== "poshmark" &&
+    marketplace !== "mercari" &&
+    marketplace !== "etsy"
+  ) {
     throw new Error(`Unsupported sales import marketplace: ${marketplace}`);
   }
 
@@ -1713,18 +1958,28 @@ async function importMarketplaceSales(marketplace, options = {}) {
     activeTab.url.includes("mercari.com/mypage/")
   ) {
     targetTab = activeTab;
+  } else if (
+    !background &&
+    marketplace === "etsy" &&
+    activeTab?.id &&
+    activeTab.url &&
+    activeTab.url.includes("etsy.com/your/orders")
+  ) {
+    targetTab = activeTab;
   } else {
     const startUrl =
       marketplace === "poshmark"
         ? "https://poshmark.com/order/sales"
-        : "https://www.mercari.com/mypage/listings/active/";
+        : marketplace === "mercari"
+          ? "https://www.mercari.com/mypage/listings/active/"
+          : "https://www.etsy.com/your/orders/sold";
     const created = await chrome.tabs.create({ url: startUrl, active: !background });
     createdTempTab = background;
     await new Promise((resolve) => {
       const listener = (tabId, changeInfo) => {
         if (tabId === created.id && changeInfo.status === "complete") {
           chrome.tabs.onUpdated.removeListener(listener);
-          setTimeout(resolve, 2200);
+          setTimeout(resolve, 2400);
         }
       };
       chrome.tabs.onUpdated.addListener(listener);
@@ -1732,7 +1987,7 @@ async function importMarketplaceSales(marketplace, options = {}) {
       setTimeout(() => {
         chrome.tabs.onUpdated.removeListener(listener);
         resolve();
-      }, 15000);
+      }, 16000);
     });
     targetTab = created;
   }
@@ -1758,7 +2013,9 @@ async function importMarketplaceSales(marketplace, options = {}) {
     throw new Error(
       marketplace === "poshmark"
         ? "No Poshmark sold orders detected. Make sure you are signed into Poshmark on the My Sales page and try again."
-        : "No Mercari sold orders detected. Make sure you are signed into Mercari (My listings → Sold → Complete) and try again."
+        : marketplace === "mercari"
+          ? "No Mercari sold orders detected. Make sure you are signed into Mercari (My listings → Sold → Complete) and try again."
+          : "No Etsy sold orders detected. Make sure you are signed into Etsy Shop Manager (Orders & Shipping) and try again."
     );
   }
 
@@ -1797,9 +2054,9 @@ async function importMarketplaceSales(marketplace, options = {}) {
 
 /**
  * 24/7 Anti-Double-Sell Sale Watcher:
- * Checks eBay (API), Poshmark, and Mercari for brand-new recent sales (past 3-7 days),
+ * Checks eBay (API), Poshmark, Mercari, and Etsy for brand-new recent sales,
  * immediately ends eBay via API when sold elsewhere, queues urgent delist jobs for
- * Poshmark/Mercari, and immediately dispatches them!
+ * Poshmark/Mercari/FB, and immediately dispatches them!
  */
 async function runSaleWatchCycle({ background = true } = {}) {
   if (saleWatchBusy) {
@@ -1810,6 +2067,7 @@ async function runSaleWatchCycle({ background = true } = {}) {
     ebayNew: 0,
     poshmarkNew: 0,
     mercariNew: 0,
+    etsyNew: 0,
     delistsTriggered: 0,
     errors: [],
   };
@@ -1837,8 +2095,8 @@ async function runSaleWatchCycle({ background = true } = {}) {
       summary.errors.push(`eBay: ${e instanceof Error ? e.message : String(e)}`);
     }
 
-    // 2. Check Poshmark & Mercari quietly in background tabs (auto-closes after scraping)
-    for (const mkt of ["poshmark", "mercari"]) {
+    // 2. Check Poshmark, Mercari & Etsy quietly in background tabs (auto-closes after scraping)
+    for (const mkt of ["poshmark", "mercari", "etsy"]) {
       try {
         const r = await importMarketplaceSales(mkt, {
           cascadeDelist: true,
@@ -1846,6 +2104,7 @@ async function runSaleWatchCycle({ background = true } = {}) {
         });
         if (mkt === "poshmark") summary.poshmarkNew = Number(r.importedCount || 0);
         if (mkt === "mercari") summary.mercariNew = Number(r.importedCount || 0);
+        if (mkt === "etsy") summary.etsyNew = Number(r.importedCount || 0);
         summary.delistsTriggered += Number(r.delistedCount || 0);
       } catch (e) {
         summary.errors.push(`${mkt}: ${e instanceof Error ? e.message : String(e)}`);
@@ -1866,14 +2125,18 @@ async function runSaleWatchCycle({ background = true } = {}) {
       }
     }
 
-    const totalNew = summary.ebayNew + summary.poshmarkNew + summary.mercariNew;
+    const totalNew =
+      summary.ebayNew +
+      summary.poshmarkNew +
+      summary.mercariNew +
+      summary.etsyNew;
     return {
       ok: true,
       ...summary,
       message:
         totalNew > 0 || summary.delistsTriggered > 0
-          ? `Found ${totalNew} new sale${totalNew === 1 ? "" : "s"} (eBay ${summary.ebayNew}, Posh ${summary.poshmarkNew}, Mercari ${summary.mercariNew}) · ${summary.delistsTriggered} auto-delist${summary.delistsTriggered === 1 ? "" : "s"} triggered!`
-          : `Checked eBay, Poshmark & Mercari — no new sales to delist right now.`,
+          ? `Found ${totalNew} new sale${totalNew === 1 ? "" : "s"} (eBay ${summary.ebayNew}, Posh ${summary.poshmarkNew}, Mercari ${summary.mercariNew}, Etsy ${summary.etsyNew}) · ${summary.delistsTriggered} auto-delist${summary.delistsTriggered === 1 ? "" : "s"} triggered!`
+          : `Checked eBay, Poshmark, Mercari & Etsy — no new sales to delist right now.`,
     };
   } finally {
     saleWatchBusy = false;

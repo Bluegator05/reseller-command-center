@@ -9,6 +9,7 @@ export const maxDuration = 60;
 interface ScannedSaleInput {
   externalOrderId: string;
   externalListingId?: string | null;
+  sku?: string | null;
   title: string;
   imageUrl?: string | null;
   grossSalePrice: number;
@@ -19,8 +20,10 @@ interface ScannedSaleInput {
   soldAt?: string | null;
 }
 
+type ImportableSalesMarketplace = Exclude<MarketplaceType, "ebay">;
+
 interface ImportSalesBody {
-  marketplace: Exclude<MarketplaceType, "ebay" | "etsy">;
+  marketplace: ImportableSalesMarketplace;
   sales: ScannedSaleInput[];
   cascadeDelist?: boolean;
 }
@@ -73,7 +76,7 @@ function titleScore(a: Set<string>, b: Set<string>): number {
 }
 
 function estimateMarketplaceFee(
-  marketplace: "poshmark" | "mercari" | "facebook",
+  marketplace: ImportableSalesMarketplace,
   gross: number
 ): number {
   if (gross <= 0) return 0;
@@ -82,6 +85,10 @@ function estimateMarketplaceFee(
   }
   if (marketplace === "mercari") {
     return roundCurrency(gross * 0.1);
+  }
+  if (marketplace === "etsy") {
+    // 6.5% transaction fee + 3% + $0.25 payment processing + $0.20 listing fee
+    return roundCurrency(gross * 0.095 + 0.45);
   }
   return roundCurrency(Math.max(0.8, gross * 0.1));
 }
@@ -103,10 +110,11 @@ export async function POST(request: Request) {
     if (
       marketplace !== "poshmark" &&
       marketplace !== "mercari" &&
-      marketplace !== "facebook"
+      marketplace !== "facebook" &&
+      marketplace !== "etsy"
     ) {
       return NextResponse.json(
-        { error: "marketplace must be poshmark, mercari, or facebook" },
+        { error: "marketplace must be poshmark, mercari, etsy, or facebook" },
         { status: 400 }
       );
     }
@@ -217,7 +225,16 @@ export async function POST(request: Request) {
         ? "PM"
         : marketplace === "mercari"
           ? "MC"
-          : "FB";
+          : marketplace === "etsy"
+            ? "ET"
+            : "FB";
+
+    const skuToItemId = new Map<string, string>();
+    for (const cand of existingItems) {
+      if (cand.sku) {
+        skuToItemId.set(cand.sku.trim().toLowerCase(), cand.id);
+      }
+    }
 
     let importedCount = 0;
     let updatedCount = 0;
@@ -225,7 +242,7 @@ export async function POST(request: Request) {
 
     const newRows: Array<{
       item_id: string;
-      marketplace: "poshmark" | "mercari" | "facebook";
+      marketplace: ImportableSalesMarketplace;
       external_order_id: string;
       gross_sale_price: number;
       marketplace_fees: number;
@@ -315,11 +332,13 @@ export async function POST(request: Request) {
         continue;
       }
 
-      // Resolve parent inventory_items ID
+      // Resolve parent inventory_items ID (exact SKU -> external listing ID -> fuzzy title)
       let itemId: string | null =
+        (raw.sku ? skuToItemId.get(raw.sku.trim().toLowerCase()) ?? null : null) ||
         (raw.externalListingId
           ? listingIdToItemId.get(raw.externalListingId.trim()) ?? null
-          : null) || null;
+          : null) ||
+        null;
 
       if (!itemId) {
         const tok = tokenize(title);
