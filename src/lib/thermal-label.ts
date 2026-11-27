@@ -162,3 +162,357 @@ export function printBinAuditSheet(
 </html>`);
   win.document.close();
 }
+
+export interface PickListLabelOrder {
+  id: string;
+  sku: string;
+  title: string;
+  image_url?: string | null;
+  marketplace: string;
+  bin_location?: string | null;
+  quantity?: number;
+  fulfillment_status?: string;
+}
+
+function formatMarketplaceShort(marketplace: string): string {
+  const m = (marketplace || "").toLowerCase();
+  if (m === "ebay") return "EBAY";
+  if (m === "poshmark") return "POSH";
+  if (m === "mercari") return "MERCARI";
+  if (m === "etsy") return "ETSY";
+  if (m === "facebook") return "FB";
+  return m.toUpperCase() || "SHOP";
+}
+
+/**
+ * Opens a dedicated print view strictly aligned for 4"×6" thermal shipping label printers
+ * (Rollo, Munbyn, Dymo 4XL, Zebra). Paginates cleanly (6 orders per 4×6 label) with
+ * checkbox, thumbnail photo, marketplace, bin/shelf, full SKU, short title, and bold QTY.
+ */
+export function printThermal4x6PickList(orders: PickListLabelOrder[]): void {
+  if (typeof window === "undefined" || orders.length === 0) return;
+  const win = window.open("", "_blank", "width=480,height=720");
+  if (!win) return;
+
+  const ITEMS_PER_LABEL = 6;
+  const pages: PickListLabelOrder[][] = [];
+  for (let i = 0; i < orders.length; i += ITEMS_PER_LABEL) {
+    pages.push(orders.slice(i, i + ITEMS_PER_LABEL));
+  }
+
+  const totalUnits = orders.reduce(
+    (sum, o) => sum + Math.max(1, Math.floor(Number(o.quantity || 1))),
+    0
+  );
+  const dateLabel = new Date().toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+  });
+
+  const pagesHtml = pages
+    .map((pageOrders, pageIdx) => {
+      const isLast = pageIdx === pages.length - 1;
+      const rowsHtml = pageOrders
+        .map((order) => {
+          const qty = Math.max(1, Math.floor(Number(order.quantity || 1)));
+          const mkt = formatMarketplaceShort(order.marketplace);
+          const sku = (order.sku || "").trim();
+          const binRaw = (order.bin_location || "").trim();
+          const showBin =
+            Boolean(binRaw) &&
+            binRaw.toUpperCase() !== "UNASSIGNED" &&
+            !sku.toLowerCase().includes(binRaw.toLowerCase());
+          const isPicked = order.fulfillment_status === "picked";
+          const imgHtml = order.image_url
+            ? `<img class="thumb" src="${escHtml(order.image_url)}" alt="" />`
+            : `<div class="thumb thumb-empty">NO<br/>IMG</div>`;
+
+          return `
+            <div class="row">
+              <div class="chk ${isPicked ? "chk-done" : ""}">${isPicked ? "✓" : ""}</div>
+              ${imgHtml}
+              <div class="info">
+                <div class="meta">
+                  <span class="mkt">${escHtml(mkt)}</span>
+                  ${showBin ? `<span class="bin">${escHtml(binRaw)}</span>` : ""}
+                </div>
+                <div class="sku">${escHtml(sku)}</div>
+                <div class="title">${escHtml(order.title || "")}</div>
+              </div>
+              <div class="qty ${qty > 1 ? "qty-multi" : ""}">
+                <span class="qty-lbl">QTY</span>
+                <span class="qty-val">${qty}</span>
+              </div>
+            </div>
+          `;
+        })
+        .join("");
+
+      return `
+        <div class="sheet ${isLast ? "sheet-last" : ""}">
+          <div class="hdr">
+            <span class="hdr-title">PICK LIST · ${escHtml(dateLabel)}</span>
+            <span class="hdr-meta">${orders.length} ord · ${totalUnits} unit${totalUnits === 1 ? "" : "s"} · Pg ${pageIdx + 1}/${pages.length}</span>
+          </div>
+          <div class="rows">
+            ${rowsHtml}
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  win.document.write(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>4x6 Pick List (${orders.length} Orders)</title>
+  <style>
+    @page {
+      size: 4in 6in;
+      margin: 0;
+    }
+    * {
+      box-sizing: border-box;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #000;
+      background: #e5e7eb;
+    }
+    .toolbar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      background: #14151a;
+      color: #fff;
+      font-size: 12px;
+    }
+    .toolbar button {
+      padding: 6px 12px;
+      background: #0f766e;
+      color: #fff;
+      border: 0;
+      border-radius: 6px;
+      font-weight: 700;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .preview-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      padding: 14px;
+    }
+    .sheet {
+      width: 4in;
+      height: 6in;
+      background: #fff;
+      padding: 0.14in 0.16in;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.16);
+      page-break-after: always;
+      break-after: page;
+    }
+    .sheet-last {
+      page-break-after: auto;
+      break-after: auto;
+    }
+    .hdr {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      border-bottom: 2px solid #000;
+      padding-bottom: 4px;
+      margin-bottom: 4px;
+      flex-shrink: 0;
+    }
+    .hdr-title {
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: 0.04em;
+    }
+    .hdr-meta {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 9px;
+      font-weight: 700;
+    }
+    .rows {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 16px 46px minmax(0, 1fr) 38px;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 0;
+      border-bottom: 1px dashed #666;
+      min-height: 0.84in;
+      max-height: 0.92in;
+      overflow: hidden;
+    }
+    .row:last-child {
+      border-bottom: 0;
+    }
+    .chk {
+      width: 15px;
+      height: 15px;
+      border: 1.75px solid #000;
+      border-radius: 2px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 900;
+      line-height: 1;
+    }
+    .chk-done {
+      background: #000;
+      color: #fff;
+    }
+    .thumb {
+      width: 46px;
+      height: 46px;
+      object-fit: cover;
+      border: 1px solid #000;
+      border-radius: 3px;
+      display: block;
+      background: #f5f5f5;
+      filter: contrast(1.12);
+    }
+    .thumb-empty {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      font-size: 7.5px;
+      font-weight: 800;
+      line-height: 1.1;
+      color: #333;
+    }
+    .info {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .meta {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    .mkt {
+      display: inline-block;
+      padding: 1px 4px;
+      border: 1.5px solid #000;
+      border-radius: 3px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 8.5px;
+      font-weight: 900;
+      letter-spacing: 0.03em;
+      line-height: 1.15;
+    }
+    .bin {
+      display: inline-block;
+      padding: 1px 5px;
+      background: #000;
+      color: #fff;
+      border-radius: 3px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 8.5px;
+      font-weight: 800;
+      line-height: 1.15;
+    }
+    .sku {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 9.5px;
+      font-weight: 800;
+      line-height: 1.18;
+      color: #000;
+      overflow-wrap: anywhere;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .title {
+      font-size: 8px;
+      line-height: 1.15;
+      color: #222;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .qty {
+      width: 38px;
+      height: 44px;
+      border: 1.5px solid #000;
+      border-radius: 4px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      line-height: 1;
+    }
+    .qty-multi {
+      background: #000;
+      color: #fff;
+    }
+    .qty-lbl {
+      font-size: 7px;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      margin-bottom: 2px;
+    }
+    .qty-val {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 15px;
+      font-weight: 900;
+    }
+    @media print {
+      html, body {
+        background: #fff;
+      }
+      .toolbar {
+        display: none !important;
+      }
+      .preview-wrap {
+        display: block;
+        padding: 0;
+        gap: 0;
+      }
+      .sheet {
+        box-shadow: none;
+        margin: 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <span><strong>4" × 6" Pick List</strong> · ${orders.length} order${orders.length === 1 ? "" : "s"} (${totalUnits} unit${totalUnits === 1 ? "" : "s"}) · ${pages.length} label${pages.length === 1 ? "" : "s"}</span>
+    <button onclick="window.print()">Print 4×6 Labels</button>
+  </div>
+  <div class="preview-wrap">
+    ${pagesHtml}
+  </div>
+</body>
+</html>`);
+  win.document.close();
+}

@@ -385,6 +385,18 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
           country: resolvedCountry,
         });
 
+        const orderQtyMap =
+          sp.order_quantities && typeof sp.order_quantities === "object"
+            ? (sp.order_quantities as Record<string, unknown>)
+            : null;
+        const rawOrderQty = Number(
+          (rec.external_order_id && orderQtyMap?.[rec.external_order_id]) ?? 1
+        );
+        const resolvedQuantity =
+          Number.isFinite(rawOrderQty) && rawOrderQty >= 1
+            ? Math.floor(rawOrderQty)
+            : 1;
+
         return {
           id: rec.id,
           item_id: rec.item_id,
@@ -393,6 +405,7 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
           image_url: firstImage,
           marketplace: rec.marketplace,
           external_order_id: rec.external_order_id,
+          quantity: resolvedQuantity,
           gross_sale_price: Number(rec.gross_sale_price),
           marketplace_fees: Number(rec.marketplace_fees),
           ad_fee:

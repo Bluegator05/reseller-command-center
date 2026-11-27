@@ -377,6 +377,7 @@ export interface SalesOrderRecord {
   image_url?: string | null;
   marketplace: MarketplaceType;
   external_order_id: string | null;
+  quantity?: number;
   gross_sale_price: number;
   marketplace_fees: number;
   ad_fee?: number;

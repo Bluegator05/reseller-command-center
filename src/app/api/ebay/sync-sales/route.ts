@@ -158,6 +158,7 @@ export async function POST(request: Request) {
         state: string | null;
         postal: string | null;
         country: string | null;
+        quantity: number;
       }>
     >();
     const recordBuyerLoc = (
@@ -166,9 +167,14 @@ export async function POST(request: Request) {
       city?: string | null,
       state?: string | null,
       postal?: string | null,
-      country?: string | null
+      country?: string | null,
+      quantity?: number | null
     ) => {
-      if (!invId || (!city && !state && !country)) return;
+      const cleanQty =
+        Number.isFinite(Number(quantity)) && Number(quantity) >= 1
+          ? Math.floor(Number(quantity))
+          : 1;
+      if (!invId || (!city && !state && !country && cleanQty <= 1)) return;
       const list = buyerLocationsByItem.get(invId) ?? [];
       list.push({
         orderId,
@@ -176,6 +182,7 @@ export async function POST(request: Request) {
         state: state ?? null,
         postal: postal ?? null,
         country: country ?? null,
+        quantity: cleanQty,
       });
       buyerLocationsByItem.set(invId, list);
     };
@@ -189,7 +196,8 @@ export async function POST(request: Request) {
           line.buyerCity,
           line.buyerState,
           line.buyerPostal,
-          line.buyerCountry
+          line.buyerCountry,
+          line.quantity
         );
         if (
           line.legacyItemId &&
@@ -292,7 +300,8 @@ export async function POST(request: Request) {
         line.buyerCity,
         line.buyerState,
         line.buyerPostal,
-        line.buyerCountry
+        line.buyerCountry,
+        line.quantity
       );
 
       if (
@@ -406,29 +415,45 @@ export async function POST(request: Request) {
                 }
               : {};
 
+          const existingOrderQtys =
+            existingSpecs.order_quantities &&
+            typeof existingSpecs.order_quantities === "object"
+              ? {
+                  ...(existingSpecs.order_quantities as Record<string, number>),
+                }
+              : {};
+
           let changed = false;
           for (const loc of locs) {
-            const prev = existingOrderLocs[loc.orderId];
-            if (
-              !prev ||
-              prev.city !== loc.city ||
-              prev.state !== loc.state ||
-              prev.country !== loc.country
-            ) {
-              existingOrderLocs[loc.orderId] = {
-                city: loc.city,
-                state: loc.state,
-                postal: loc.postal,
-                country: loc.country,
-              };
+            if (loc.city || loc.state || loc.country) {
+              const prev = existingOrderLocs[loc.orderId];
+              if (
+                !prev ||
+                prev.city !== loc.city ||
+                prev.state !== loc.state ||
+                prev.country !== loc.country
+              ) {
+                existingOrderLocs[loc.orderId] = {
+                  city: loc.city,
+                  state: loc.state,
+                  postal: loc.postal,
+                  country: loc.country,
+                };
+                changed = true;
+              }
+            }
+            if (loc.quantity > 1 && existingOrderQtys[loc.orderId] !== loc.quantity) {
+              existingOrderQtys[loc.orderId] = loc.quantity;
               changed = true;
             }
           }
-          const latest = locs[0];
+          const latestWithLoc =
+            locs.find((l) => l.city || l.state || l.country) ?? locs[0];
           if (
-            existingSpecs.buyer_city !== latest.city ||
-            existingSpecs.buyer_state !== latest.state ||
-            existingSpecs.buyer_country !== latest.country
+            (latestWithLoc.city || latestWithLoc.state || latestWithLoc.country) &&
+            (existingSpecs.buyer_city !== latestWithLoc.city ||
+              existingSpecs.buyer_state !== latestWithLoc.state ||
+              existingSpecs.buyer_country !== latestWithLoc.country)
           ) {
             changed = true;
           }
@@ -438,11 +463,18 @@ export async function POST(request: Request) {
               id,
               specs: {
                 ...existingSpecs,
-                buyer_city: latest.city,
-                buyer_state: latest.state,
-                buyer_postal: latest.postal,
-                buyer_country: latest.country,
+                ...(latestWithLoc.city || latestWithLoc.state || latestWithLoc.country
+                  ? {
+                      buyer_city: latestWithLoc.city,
+                      buyer_state: latestWithLoc.state,
+                      buyer_postal: latestWithLoc.postal,
+                      buyer_country: latestWithLoc.country,
+                    }
+                  : {}),
                 order_locations: existingOrderLocs,
+                ...(Object.keys(existingOrderQtys).length > 0
+                  ? { order_quantities: existingOrderQtys }
+                  : {}),
               },
             });
           }

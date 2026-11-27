@@ -24,6 +24,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
+import { printThermal4x6PickList } from "@/lib/thermal-label";
 import { LogLocalFacebookSaleModal } from "./LogLocalFacebookSaleModal";
 import type {
   AutoDelistCascadeResult,
@@ -662,11 +663,13 @@ export function SalesLedgerPanel({
           {subView === "picklist" && (
             <button
               type="button"
-              onClick={() => window.print()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-white border border-[#E4E4DD] text-[#14151A] hover:border-[#0F766E] hover:text-[#0F766E] cursor-pointer"
+              disabled={pickListOrders.length === 0}
+              onClick={() => printThermal4x6PickList(pickListOrders)}
+              title='Opens a 4" × 6" thermal-label formatted pick list (thumbnail, SKU, marketplace, bin & quantity)'
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#14151A] text-white hover:bg-[#272A34] disabled:opacity-45 cursor-pointer shadow-sm"
             >
               <Printer className="w-3.5 h-3.5" />
-              Print Pick List
+              Print 4×6 Pick List
             </button>
           )}
         </div>
@@ -697,6 +700,10 @@ export function SalesLedgerPanel({
               {pickListOrders.map((order) => {
                 const isPicked = order.fulfillment_status === "picked";
                 const isBusy = busyOrderId === order.id;
+                const orderQty = Math.max(
+                  1,
+                  Math.floor(Number(order.quantity || 1))
+                );
                 return (
                   <div
                     key={order.id}
@@ -765,6 +772,15 @@ export function SalesLedgerPanel({
                           </code>
                           <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-[#EFF6FF] text-[#1D4ED8]">
                             {order.marketplace}
+                          </span>
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold ${
+                              orderQty > 1
+                                ? "bg-[#FEF3C7] text-[#92400E] border border-[#F59E0B]"
+                                : "bg-[#F4F5F5] text-[#5C606B]"
+                            }`}
+                          >
+                            QTY {orderQty}
                           </span>
                           {statusBadge(order.fulfillment_status)}
                           {order.delisted_channels.map((ch) => (
