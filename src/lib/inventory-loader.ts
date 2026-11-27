@@ -32,21 +32,43 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
   const envReadiness = getEnvReadiness();
   const supabase = getSupabaseServerClient();
 
+  let supabaseError: string | null = null;
+
   if (supabase && envReadiness.isSupabaseReady) {
     try {
+      const runWithRetry = async <T>(
+        fn: () => Promise<T>,
+        maxAttempts = 2
+      ): Promise<T> => {
+        let lastErr: unknown;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          try {
+            return await fn();
+          } catch (err) {
+            lastErr = err;
+            if (attempt < maxAttempts) {
+              await new Promise((r) => setTimeout(r, 600 * attempt));
+            }
+          }
+        }
+        throw lastErr;
+      };
+
       const fetchAllActiveListings = async (): Promise<JoinedListingRecord[]> => {
         const all: JoinedListingRecord[] = [];
-        const pageSize = 1000;
+        const pageSize = 350;
         for (let from = 0; from < 5000; from += pageSize) {
-          const { data: page, error } = await supabase
-            .from("marketplace_listings")
-            .select("*, inventory_items(*)")
-            .in("status", ["active", "draft"])
-            .order("listed_at", { ascending: false, nullsFirst: false })
-            .order("id", { ascending: false })
-            .range(from, from + pageSize - 1);
-          if (error) throw error;
-          const rows = (page ?? []) as JoinedListingRecord[];
+          const rows = await runWithRetry(async () => {
+            const { data: page, error } = await supabase
+              .from("marketplace_listings")
+              .select("*, inventory_items(*)")
+              .in("status", ["active", "draft"])
+              .order("listed_at", { ascending: false, nullsFirst: false })
+              .order("id", { ascending: false })
+              .range(from, from + pageSize - 1);
+            if (error) throw error;
+            return (page ?? []) as JoinedListingRecord[];
+          });
           all.push(...rows);
           if (rows.length < pageSize) break;
         }
@@ -55,17 +77,19 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
 
       const fetchAllSalesOrders = async () => {
         const all: unknown[] = [];
-        const pageSize = 1000;
+        const pageSize = 400;
         for (let from = 0; from < 2000; from += pageSize) {
-          const { data: page, error } = await supabase
-            .from("sales_orders")
-            .select(
-              "*, inventory_items(sku, title, image_urls, cogs, prep_cost, source_location, source_type, acquired_at, bin_location, weight_oz, length_in, width_in, height_in, item_specifics, created_at)"
-            )
-            .order("sold_at", { ascending: false })
-            .range(from, from + pageSize - 1);
-          if (error) throw error;
-          const rows = page ?? [];
+          const rows = await runWithRetry(async () => {
+            const { data: page, error } = await supabase
+              .from("sales_orders")
+              .select(
+                "*, inventory_items(sku, title, image_urls, cogs, prep_cost, source_location, source_type, acquired_at, bin_location, weight_oz, length_in, width_in, height_in, item_specifics, created_at)"
+              )
+              .order("sold_at", { ascending: false })
+              .range(from, from + pageSize - 1);
+            if (error) throw error;
+            return page ?? [];
+          });
           all.push(...rows);
           if (rows.length < pageSize) break;
         }
@@ -76,6 +100,7 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
         joinedRows,
         accountsRes,
         jobsRes,
+        delistStatusRes,
         ordersRes,
         draftsRes,
         expensesRes,
@@ -89,7 +114,13 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
           .from("channel_jobs")
           .select("*, inventory_items(sku, title)")
           .order("created_at", { ascending: false })
-          .limit(250),
+          .limit(50),
+        supabase
+          .from("channel_jobs")
+          .select("item_id, marketplace, status")
+          .eq("action", "delist")
+          .order("created_at", { ascending: false })
+          .limit(500),
         fetchAllSalesOrders(),
         supabase
           .from("inventory_items")
@@ -273,6 +304,31 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
         };
       });
 
+      const delistJobsByItem = new Map<
+        string,
+        Array<{ marketplace: MarketplaceType; status: string }>
+      >();
+      const rawDelistRows =
+        Array.isArray(delistStatusRes.data) && delistStatusRes.data.length > 0
+          ? (delistStatusRes.data as Array<{
+              item_id: string;
+              marketplace: MarketplaceType;
+              status: string;
+            }>)
+          : allJobs
+              .filter((j) => j.action === "delist")
+              .map((j) => ({
+                item_id: j.item_id,
+                marketplace: j.marketplace,
+                status: j.status,
+              }));
+      for (const dj of rawDelistRows) {
+        if (!dj.item_id) continue;
+        const list = delistJobsByItem.get(dj.item_id) ?? [];
+        list.push({ marketplace: dj.marketplace, status: dj.status });
+        delistJobsByItem.set(dj.item_id, list);
+      }
+
       const salesOrders: SalesOrderRecord[] = (ordersRes.data ?? []).map((o) => {
         const rec = o as {
           id: string;
@@ -334,9 +390,7 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
         const cogs = Number(inv?.cogs ?? 0);
         const prepCost = Number(inv?.prep_cost ?? 0);
         const netProfit = Number(rec.net_profit ?? 0);
-        const itemDelistJobs = allJobs.filter(
-          (j) => j.item_id === rec.item_id && j.action === "delist"
-        );
+        const itemDelistJobs = delistJobsByItem.get(rec.item_id) ?? [];
         const delistedChannels = [
           ...new Set(
             itemDelistJobs
@@ -587,8 +641,24 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
         auditHistory,
       };
     } catch (error) {
+      if (error instanceof Error) {
+        supabaseError = error.message;
+      } else if (error && typeof error === "object") {
+        const e = error as {
+          message?: string;
+          code?: string;
+          details?: string;
+          hint?: string;
+        };
+        supabaseError =
+          [e.code, e.message, e.details].filter(Boolean).join(" — ") ||
+          JSON.stringify(error);
+      } else {
+        supabaseError = String(error);
+      }
       console.error(
         "[inventory-loader] Falling back to demo store after Supabase error:",
+        supabaseError,
         error
       );
     }
@@ -660,5 +730,6 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
     etsyActiveCount: channelCounts.etsy,
     etsyLastSyncedAt: store.etsyLastSyncedAt,
     channelCounts,
+    supabaseError,
   };
 }

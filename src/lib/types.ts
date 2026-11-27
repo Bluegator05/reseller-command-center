@@ -505,6 +505,7 @@ export interface CommandCenterPayload {
   etsyLastSyncedAt: string | null;
   channelCounts: Record<MarketplaceType, number>;
   auditHistory?: InventoryAuditRecord[];
+  supabaseError?: string | null;
 }
 
 export interface EbayActionRequest {

@@ -193,8 +193,24 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
       throw new Error("Failed to refresh inventory");
     }
     const fresh = (await res.json()) as CommandCenterPayload;
-    setData(fresh);
-  }, []);
+    let blockedDemoOverwrite = false;
+    setData((prev) => {
+      if (prev.mode === "live" && fresh.mode === "demo") {
+        blockedDemoOverwrite = true;
+        return prev;
+      }
+      return fresh;
+    });
+    if (blockedDemoOverwrite) {
+      pushToast(
+        "error",
+        "Temporary Database Hiccup",
+        fresh.supabaseError
+          ? `Kept your live data on screen (${fresh.supabaseError}). Try refreshing again in a moment.`
+          : "Kept your live data on screen instead of switching to demo mode."
+      );
+    }
+  }, [pushToast]);
 
   // Auto-sync live status the instant the Companion Extension finishes publishing on Poshmark / Mercari
   useEffect(() => {
@@ -1198,12 +1214,16 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
                 className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider ${
                   data.mode === "live"
                     ? "bg-[#ECFDF5] text-[#0F766E]"
-                    : "bg-[#EFF6FF] text-[#1D4ED8]"
+                    : data.envReadiness.isSupabaseReady
+                      ? "bg-[#FEF2F2] text-[#B91C1C] border border-[#FECACA]"
+                      : "bg-[#EFF6FF] text-[#1D4ED8]"
                 }`}
               >
                 {data.mode === "live"
                   ? `Live · ${data.envReadiness.ebayEnv}`
-                  : "All 4 Phases Built"}
+                  : data.envReadiness.isSupabaseReady
+                    ? "DB Reconnecting"
+                    : "All 4 Phases Built"}
               </span>
             </div>
 
@@ -1279,6 +1299,43 @@ export function CommandCenterShell({ initialData }: CommandCenterShellProps) {
         </header>
 
         <main className="flex-1 max-w-[1380px] w-full mx-auto px-4 sm:px-6 py-5 space-y-5">
+        {data.mode === "demo" && data.envReadiness.isSupabaseReady && (
+          <div className="bg-[#FEF2F2] border border-[#FECACA] rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-start gap-2.5 min-w-0">
+              <AlertCircle className="w-4 h-4 text-[#B91C1C] shrink-0 mt-0.5" />
+              <div className="text-xs text-[#7F1D1D] space-y-0.5">
+                <p className="font-semibold">
+                  Database connection error — temporarily displaying example data (your live Supabase data is safe).
+                </p>
+                {data.supabaseError && (
+                  <p className="font-mono text-[11px] text-[#991B1B] break-all">
+                    Error: {data.supabaseError}
+                  </p>
+                )}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                refreshInventory()
+                  .then(() =>
+                    pushToast("info", "Checked Database Connection")
+                  )
+                  .catch(() =>
+                    pushToast(
+                      "error",
+                      "Database Still Unreachable",
+                      "Check Supabase dashboard or try again in a few seconds."
+                    )
+                  );
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#B91C1C] text-white hover:bg-[#991B1B] transition cursor-pointer shrink-0"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              Retry Database
+            </button>
+          </div>
+        )}
         {activeTab === "roadmap" && (
           <ChannelStatusStrip
             mode={data.mode}
