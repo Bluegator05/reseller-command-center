@@ -378,6 +378,7 @@ export interface SalesOrderRecord {
   marketplace: MarketplaceType;
   external_order_id: string | null;
   quantity?: number;
+  quantity_verified?: boolean;
   gross_sale_price: number;
   marketplace_fees: number;
   ad_fee?: number;
@@ -449,6 +450,7 @@ export interface SalesOrderUpdateRequest {
   shipping_cost?: number;
   cogs?: number;
   image_url?: string | null;
+  quantity?: number;
 }
 
 export interface AutoDelistCascadeItem {

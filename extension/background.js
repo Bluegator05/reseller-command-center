@@ -1810,6 +1810,23 @@ async function scrapeSoldOrdersFromDom(marketplace) {
         const fulfillmentStatus = inferStatus(cardText, defaultStatus);
         const cardImage = extractEtsyOrderImage(card);
 
+        const extractQtyFromText = (txt) => {
+          const s = String(txt || "");
+          const mLabel = s.match(/\b(?:quantity|qty)\s*:?\s*[\r\n\s]*(\d{1,3})\b/i);
+          if (mLabel) {
+            const n = Number(mLabel[1]);
+            if (Number.isFinite(n) && n >= 1 && n <= 999) return n;
+          }
+          const mTimesPrice = s.match(/(?:^|\s)(\d{1,3})\s*[×x]\s*\$\s*[0-9]/i);
+          if (mTimesPrice) {
+            const n = Number(mTimesPrice[1]);
+            if (Number.isFinite(n) && n >= 1 && n <= 999) return n;
+          }
+          return null;
+        };
+
+        const cardQuantity = extractQtyFromText(cardText) ?? 1;
+
         // Extract distinct listing links inside this order card (supports multi-item orders)
         const listingLinks = Array.from(
           card.querySelectorAll('a[href*="/listing/"]')
@@ -1833,10 +1850,15 @@ async function scrapeSoldOrdersFromDom(marketplace) {
             .trim();
           if (linkTitle.length < 3 || isEtsyNoiseLine(linkTitle)) continue;
           if (listingId) seenListingIds.add(listingId);
+          const rowEl = a.closest("div, li, tr") || a;
+          const rowQty =
+            extractQtyFromText(rowEl?.innerText || "") ??
+            extractQtyFromText(rowEl?.parentElement?.innerText || "");
           itemsInOrder.push({
             listingId,
             title: linkTitle,
-            imageUrl: extractEtsyOrderImage(a.closest("div, li, tr") || a) || cardImage,
+            imageUrl: extractEtsyOrderImage(rowEl) || cardImage,
+            quantity: rowQty,
           });
         }
 
@@ -1857,6 +1879,7 @@ async function scrapeSoldOrdersFromDom(marketplace) {
               listingId: null,
               title: fallbackTitle,
               imageUrl: cardImage,
+              quantity: cardQuantity,
             });
           }
         }
@@ -1875,12 +1898,15 @@ async function scrapeSoldOrdersFromDom(marketplace) {
               : `ETSY-${receiptId}-${idx + 1}`;
           if (seen.has(extOrderId)) return;
           seen.add(extOrderId);
+          const resolvedQty =
+            it.quantity ?? (itemsInOrder.length === 1 ? cardQuantity : 1);
           results.push({
             externalOrderId: extOrderId,
             externalListingId: it.listingId,
             sku: itemsInOrder.length === 1 ? sku : null,
             title: it.title,
             imageUrl: it.imageUrl,
+            quantity: resolvedQty,
             grossSalePrice: perItemPrice,
             marketplaceFees: null,
             shippingCost: 0,

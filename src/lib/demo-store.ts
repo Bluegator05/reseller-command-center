@@ -1996,6 +1996,14 @@ export function updateDemoSalesOrder(
     order.return_reason = req.return_reason;
   }
   if (
+    typeof req.quantity === "number" &&
+    Number.isFinite(req.quantity) &&
+    req.quantity >= 1
+  ) {
+    order.quantity = Math.min(999, Math.max(1, Math.floor(req.quantity)));
+    order.quantity_verified = true;
+  }
+  if (
     typeof req.refund_amount === "number" &&
     Number.isFinite(req.refund_amount)
   ) {

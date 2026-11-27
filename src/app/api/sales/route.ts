@@ -610,6 +610,64 @@ export async function PATCH(request: Request) {
         }
       }
 
+      if (
+        typeof body.quantity === "number" &&
+        Number.isFinite(body.quantity) &&
+        body.quantity >= 1 &&
+        order.item_id
+      ) {
+        const cleanQty = Math.min(999, Math.max(1, Math.floor(body.quantity)));
+        const { data: invRow } = await supabase
+          .from("inventory_items")
+          .select("item_specifics")
+          .eq("id", order.item_id)
+          .maybeSingle();
+        const prevSpecs =
+          invRow?.item_specifics && typeof invRow.item_specifics === "object"
+            ? { ...(invRow.item_specifics as Record<string, unknown>) }
+            : {};
+        const prevQtys =
+          prevSpecs.order_quantities &&
+          typeof prevSpecs.order_quantities === "object"
+            ? { ...(prevSpecs.order_quantities as Record<string, number>) }
+            : {};
+        const prevOverrides =
+          prevSpecs.order_quantity_overrides &&
+          typeof prevSpecs.order_quantity_overrides === "object"
+            ? {
+                ...(prevSpecs.order_quantity_overrides as Record<
+                  string,
+                  boolean
+                >),
+              }
+            : {};
+
+        prevQtys[order.id] = cleanQty;
+        prevOverrides[order.id] = true;
+        if (order.external_order_id) {
+          prevQtys[order.external_order_id] = cleanQty;
+          prevOverrides[order.external_order_id] = true;
+        }
+
+        const { error: qtyErr } = await supabase
+          .from("inventory_items")
+          .update({
+            item_specifics: {
+              ...prevSpecs,
+              order_quantities: prevQtys,
+              order_quantity_overrides: prevOverrides,
+            },
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", order.item_id);
+        if (qtyErr) {
+          return NextResponse.json(
+            { error: `Failed to save quantity: ${qtyErr.message}` },
+            { status: 400 }
+          );
+        }
+      }
+
       if (body.restockAndRelist && order.item_id) {
         const nowIso = new Date().toISOString();
         await supabase

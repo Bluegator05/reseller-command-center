@@ -170,11 +170,11 @@ export async function POST(request: Request) {
       country?: string | null,
       quantity?: number | null
     ) => {
+      if (!invId || !orderId) return;
       const cleanQty =
         Number.isFinite(Number(quantity)) && Number(quantity) >= 1
           ? Math.floor(Number(quantity))
           : 1;
-      if (!invId || (!city && !state && !country && cleanQty <= 1)) return;
       const list = buyerLocationsByItem.get(invId) ?? [];
       list.push({
         orderId,
@@ -422,6 +422,14 @@ export async function POST(request: Request) {
                   ...(existingSpecs.order_quantities as Record<string, number>),
                 }
               : {};
+          const existingQtyOverrides =
+            existingSpecs.order_quantity_overrides &&
+            typeof existingSpecs.order_quantity_overrides === "object"
+              ? (existingSpecs.order_quantity_overrides as Record<
+                  string,
+                  boolean
+                >)
+              : {};
 
           let changed = false;
           for (const loc of locs) {
@@ -442,7 +450,10 @@ export async function POST(request: Request) {
                 changed = true;
               }
             }
-            if (loc.quantity > 1 && existingOrderQtys[loc.orderId] !== loc.quantity) {
+            if (
+              !existingQtyOverrides[loc.orderId] &&
+              existingOrderQtys[loc.orderId] !== loc.quantity
+            ) {
               existingOrderQtys[loc.orderId] = loc.quantity;
               changed = true;
             }

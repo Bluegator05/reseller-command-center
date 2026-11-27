@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
   Calendar,
@@ -11,6 +11,7 @@ import {
   Image as ImageIcon,
   Loader2,
   Mail,
+  Minus,
   Plus,
   Printer,
   RefreshCw,
@@ -181,6 +182,74 @@ export function SalesLedgerPanel({
         (a.bin_location || "ZZZ").localeCompare(b.bin_location || "ZZZ")
       );
   }, [salesOrders]);
+
+  const pickListTotalUnits = useMemo(
+    () =>
+      pickListOrders.reduce(
+        (sum, o) => sum + Math.max(1, Math.floor(Number(o.quantity || 1))),
+        0
+      ),
+    [pickListOrders]
+  );
+
+  const unverifiedEbayPickOrders = useMemo(
+    () =>
+      pickListOrders.filter(
+        (o) => o.marketplace === "ebay" && !o.quantity_verified
+      ),
+    [pickListOrders]
+  );
+
+  // One-shot auto-sync when Pick List opens if any open eBay order hasn't
+  // had its real line-item quantity backfilled from eBay yet.
+  const autoQtySyncRanRef = useRef(false);
+  useEffect(() => {
+    if (
+      subView !== "picklist" ||
+      !isLiveMode ||
+      !onSyncEbaySales ||
+      isSyncingEbaySales ||
+      unverifiedEbayPickOrders.length === 0 ||
+      autoQtySyncRanRef.current
+    ) {
+      return;
+    }
+    autoQtySyncRanRef.current = true;
+    const now = Date.now();
+    let maxDays = 14;
+    for (const o of unverifiedEbayPickOrders) {
+      const ms = Date.parse(o.sold_at);
+      if (!Number.isNaN(ms) && ms < now) {
+        const ageDays = Math.ceil((now - ms) / (24 * 60 * 60 * 1000)) + 2;
+        if (ageDays > maxDays) maxDays = ageDays;
+      }
+    }
+    void onSyncEbaySales(Math.min(90, Math.max(14, maxDays)));
+  }, [
+    subView,
+    isLiveMode,
+    onSyncEbaySales,
+    isSyncingEbaySales,
+    unverifiedEbayPickOrders,
+  ]);
+
+  const handleOrderQuantityChange = async (
+    order: SalesOrderRecord,
+    nextQty: number
+  ) => {
+    const cleanQty = Math.min(999, Math.max(1, Math.floor(nextQty)));
+    const currentQty = Math.max(1, Math.floor(Number(order.quantity || 1)));
+    if (cleanQty === currentQty) return;
+    setBusyOrderId(order.id);
+    try {
+      await onUpdateSalesOrder({
+        orderId: order.id,
+        quantity: cleanQty,
+      });
+    } finally {
+      setBusyOrderId(null);
+    }
+  };
 
   const openReturnModal = (order: SalesOrderRecord) => {
     setReturnModalOrder(order);
@@ -661,16 +730,24 @@ export function SalesLedgerPanel({
           )}
 
           {subView === "picklist" && (
-            <button
-              type="button"
-              disabled={pickListOrders.length === 0}
-              onClick={() => printThermal4x6PickList(pickListOrders)}
-              title='Opens a 4" × 6" thermal-label formatted pick list (thumbnail, SKU, marketplace, bin & quantity)'
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#14151A] text-white hover:bg-[#272A34] disabled:opacity-45 cursor-pointer shadow-sm"
-            >
-              <Printer className="w-3.5 h-3.5" />
-              Print 4×6 Pick List
-            </button>
+            <div className="flex items-center gap-2">
+              {isSyncingEbaySales && (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-[#F0FDF9] text-[#0F766E] border border-[#CCFBF1]">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  Syncing eBay Qty…
+                </span>
+              )}
+              <button
+                type="button"
+                disabled={pickListOrders.length === 0}
+                onClick={() => printThermal4x6PickList(pickListOrders)}
+                title='Opens a 4" × 6" thermal-label formatted pick list (thumbnail, SKU, marketplace, bin & quantity)'
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#14151A] text-white hover:bg-[#272A34] disabled:opacity-45 cursor-pointer shadow-sm"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                Print 4×6 Pick List
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -687,7 +764,8 @@ export function SalesLedgerPanel({
             </div>
             <span className="text-xs font-mono text-[#5C606B]">
               {pickListOrders.length} order
-              {pickListOrders.length === 1 ? "" : "s"} awaiting shipment
+              {pickListOrders.length === 1 ? "" : "s"} · {pickListTotalUnits}{" "}
+              unit{pickListTotalUnits === 1 ? "" : "s"} awaiting shipment
             </span>
           </div>
 
@@ -774,13 +852,38 @@ export function SalesLedgerPanel({
                             {order.marketplace}
                           </span>
                           <span
-                            className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold ${
+                            title="Order quantity — use − / + to adjust (saves to Pick List & 4×6 print)"
+                            className={`inline-flex items-center rounded border text-[10px] font-mono font-bold overflow-hidden ${
                               orderQty > 1
-                                ? "bg-[#FEF3C7] text-[#92400E] border border-[#F59E0B]"
-                                : "bg-[#F4F5F5] text-[#5C606B]"
+                                ? "bg-[#FEF3C7] text-[#92400E] border-[#F59E0B]"
+                                : "bg-[#F4F5F5] text-[#5C606B] border-[#DCE1DE]"
                             }`}
                           >
-                            QTY {orderQty}
+                            <button
+                              type="button"
+                              disabled={isBusy || orderQty <= 1}
+                              onClick={() =>
+                                handleOrderQuantityChange(order, orderQty - 1)
+                              }
+                              aria-label="Decrease quantity"
+                              className="px-1 py-0.5 hover:bg-black/10 disabled:opacity-30 cursor-pointer transition"
+                            >
+                              <Minus className="w-2.5 h-2.5" />
+                            </button>
+                            <span className="px-1.5 py-0.5 select-none">
+                              QTY {orderQty}
+                            </span>
+                            <button
+                              type="button"
+                              disabled={isBusy || orderQty >= 999}
+                              onClick={() =>
+                                handleOrderQuantityChange(order, orderQty + 1)
+                              }
+                              aria-label="Increase quantity"
+                              className="px-1 py-0.5 hover:bg-black/10 disabled:opacity-30 cursor-pointer transition"
+                            >
+                              <Plus className="w-2.5 h-2.5" />
+                            </button>
                           </span>
                           {statusBadge(order.fulfillment_status)}
                           {order.delisted_channels.map((ch) => (
@@ -1531,6 +1634,11 @@ export function SalesLedgerPanel({
                               </span>
                             )}
                             {statusBadge(order.fulfillment_status)}
+                            {(order.quantity ?? 1) > 1 && (
+                              <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-[#FEF3C7] text-[#92400E] border border-[#F59E0B]">
+                                QTY {order.quantity}
+                              </span>
+                            )}
                             {onSelectOrder && (
                               <button
                                 type="button"

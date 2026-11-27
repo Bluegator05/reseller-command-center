@@ -12,6 +12,7 @@ interface ScannedSaleInput {
   sku?: string | null;
   title: string;
   imageUrl?: string | null;
+  quantity?: number | null;
   grossSalePrice: number;
   marketplaceFees?: number | null;
   shippingCost?: number | null;
@@ -240,6 +241,25 @@ export async function POST(request: Request) {
     let updatedCount = 0;
     let skippedCount = 0;
 
+    const quantitiesByItem = new Map<
+      string,
+      Array<{ orderId: string; quantity: number }>
+    >();
+    const recordImportedQty = (
+      invId: string | null | undefined,
+      orderId: string,
+      qtyRaw?: number | null
+    ) => {
+      if (!invId || !orderId) return;
+      if (qtyRaw === undefined || qtyRaw === null) return;
+      const n = Number(qtyRaw);
+      if (!Number.isFinite(n) || n < 1) return;
+      const cleanQty = Math.min(999, Math.max(1, Math.floor(n)));
+      const list = quantitiesByItem.get(invId) ?? [];
+      list.push({ orderId, quantity: cleanQty });
+      quantitiesByItem.set(invId, list);
+    };
+
     const newRows: Array<{
       item_id: string;
       marketplace: ImportableSalesMarketplace;
@@ -299,6 +319,7 @@ export async function POST(request: Request) {
 
       const existing = existingSales.get(extOrderId);
       if (existing) {
+        recordImportedQty(existing.item_id, extOrderId, raw.quantity);
         if (
           cleanImageUrl &&
           existing.item_id &&
@@ -403,6 +424,8 @@ export async function POST(request: Request) {
         if (!picErr) itemsWithImages.add(itemId);
       }
 
+      recordImportedQty(itemId, extOrderId, raw.quantity);
+
       existingSales.set(extOrderId, {
         id: "pending",
         item_id: itemId,
@@ -433,6 +456,62 @@ export async function POST(request: Request) {
         throw new Error(`Failed saving imported ${marketplace} sales: ${insErr.message}`);
       }
       importedCount += chunk.length;
+    }
+
+    if (quantitiesByItem.size > 0) {
+      const qtyItemIds = [...quantitiesByItem.keys()];
+      for (let i = 0; i < qtyItemIds.length; i += 100) {
+        const chunkIds = qtyItemIds.slice(i, i + 100);
+        const { data: invRows } = await supabase
+          .from("inventory_items")
+          .select("id, item_specifics")
+          .in("id", chunkIds);
+
+        const updates: Array<{ id: string; specs: Record<string, unknown> }> = [];
+        for (const r of invRows ?? []) {
+          const id = String(r.id);
+          const entries = quantitiesByItem.get(id);
+          if (!entries || entries.length === 0) continue;
+          const prevSpecs =
+            r.item_specifics && typeof r.item_specifics === "object"
+              ? { ...(r.item_specifics as Record<string, unknown>) }
+              : {};
+          const prevQtys =
+            prevSpecs.order_quantities &&
+            typeof prevSpecs.order_quantities === "object"
+              ? { ...(prevSpecs.order_quantities as Record<string, number>) }
+              : {};
+          const prevOverrides =
+            prevSpecs.order_quantity_overrides &&
+            typeof prevSpecs.order_quantity_overrides === "object"
+              ? (prevSpecs.order_quantity_overrides as Record<string, boolean>)
+              : {};
+
+          let changed = false;
+          for (const e of entries) {
+            if (!prevOverrides[e.orderId] && prevQtys[e.orderId] !== e.quantity) {
+              prevQtys[e.orderId] = e.quantity;
+              changed = true;
+            }
+          }
+          if (changed) {
+            updates.push({
+              id,
+              specs: { ...prevSpecs, order_quantities: prevQtys },
+            });
+          }
+        }
+        for (let j = 0; j < updates.length; j += 10) {
+          await Promise.all(
+            updates.slice(j, j + 10).map((u) =>
+              supabase
+                .from("inventory_items")
+                .update({ item_specifics: u.specs })
+                .eq("id", u.id)
+            )
+          );
+        }
+      }
     }
 
     // Mark the selling channel's own marketplace_listings row as "sold" for all
@@ -497,7 +576,9 @@ export async function POST(request: Request) {
         ? "Poshmark"
         : marketplace === "mercari"
           ? "Mercari"
-          : "Facebook";
+          : marketplace === "etsy"
+            ? "Etsy"
+            : "Facebook";
 
     return NextResponse.json({
       mode: "live",

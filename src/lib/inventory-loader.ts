@@ -389,13 +389,17 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
           sp.order_quantities && typeof sp.order_quantities === "object"
             ? (sp.order_quantities as Record<string, unknown>)
             : null;
-        const rawOrderQty = Number(
-          (rec.external_order_id && orderQtyMap?.[rec.external_order_id]) ?? 1
-        );
-        const resolvedQuantity =
-          Number.isFinite(rawOrderQty) && rawOrderQty >= 1
-            ? Math.floor(rawOrderQty)
-            : 1;
+        const savedQtyRaw =
+          (rec.external_order_id && orderQtyMap?.[rec.external_order_id]) ??
+          orderQtyMap?.[rec.id];
+        const hasSavedQty =
+          savedQtyRaw !== undefined &&
+          savedQtyRaw !== null &&
+          Number.isFinite(Number(savedQtyRaw)) &&
+          Number(savedQtyRaw) >= 1;
+        const resolvedQuantity = hasSavedQty
+          ? Math.floor(Number(savedQtyRaw))
+          : 1;
 
         return {
           id: rec.id,
@@ -406,6 +410,7 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
           marketplace: rec.marketplace,
           external_order_id: rec.external_order_id,
           quantity: resolvedQuantity,
+          quantity_verified: hasSavedQty,
           gross_sale_price: Number(rec.gross_sale_price),
           marketplace_fees: Number(rec.marketplace_fees),
           ad_fee:
