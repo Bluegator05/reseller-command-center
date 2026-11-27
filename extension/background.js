@@ -268,9 +268,21 @@ async function refreshJobsCache(allowAutoPilot = false) {
 
 const dispatchedJobIds = new Set();
 
+function isSyntheticFallbackUrlOrId(val) {
+  const s = String(val || "").trim();
+  if (!s) return false;
+  return (
+    /^(poshmark|mercari|facebook)-(?:draft-)?\d{5,}$/i.test(s) ||
+    /\/(?:listing|item)\/(poshmark|mercari|facebook)-(?:draft-)?\d{5,}/i.test(s)
+  );
+}
+
 function resolveDelistTargetUrl(job) {
   const extUrl = job?.payload?.externalUrl || "";
   const extId = job?.payload?.externalListingId || "";
+  const isSynthetic =
+    isSyntheticFallbackUrlOrId(extId) || isSyntheticFallbackUrlOrId(extUrl);
+
   if (job.marketplace === "poshmark") {
     const pmMatch =
       String(extId).match(/([0-9a-f]{24})/i) ||
@@ -278,18 +290,28 @@ function resolveDelistTargetUrl(job) {
     if (pmMatch) {
       return `https://poshmark.com/edit-listing/${pmMatch[1]}`;
     }
-    return extUrl || null;
+    if (!isSynthetic && extUrl && /poshmark\.com/i.test(extUrl)) {
+      return extUrl;
+    }
+    // No real 24-hex listing ID — open Poshmark feed so poshmark.js can locate the live listing in the user's closet by title!
+    return "https://poshmark.com/feed";
   }
+
   if (job.marketplace === "mercari") {
+    if (extUrl && /\/mypage\/listings\/draft/i.test(extUrl)) {
+      return "https://www.mercari.com/mypage/listings/draft/ready-to-list/?page=1";
+    }
     const mcMatch =
       String(extId).match(/(?:^|[^a-z0-9])(m\d{9,13})(?:$|[^a-z0-9])/i) ||
       String(extUrl).match(/(?:^|[^a-z0-9])(m\d{9,13})(?:$|[^a-z0-9])/i);
     if (mcMatch) {
       return `https://www.mercari.com/sell/edit/${mcMatch[1]}/`;
     }
-    return extUrl || null;
+    // Items saved to Mercari Drafts (100-active cap) have no m... ID — open Drafts Ready-to-list directly!
+    return "https://www.mercari.com/mypage/listings/draft/ready-to-list/?page=1";
   }
-  return extUrl || null;
+
+  return !isSynthetic && extUrl ? extUrl : null;
 }
 
 /**
@@ -2586,8 +2608,62 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   }
 });
 
+const watchedDelistTabs = new Map();
+
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  const delistWatch = watchedDelistTabs.get(tabId);
+  if (!delistWatch) return;
+  const url = changeInfo.url || tab?.url || "";
+  if (!url) return;
+
+  // Never treat a redirect to login as a successful delist!
+  if (/\/login\b|\/signin\b|\/sign-in\b/i.test(url)) {
+    watchedDelistTabs.delete(tabId);
+    return;
+  }
+
+  let confirmedNavigatedAway = false;
+  if (delistWatch.marketplace === "poshmark") {
+    const leftEditPage =
+      url.includes("poshmark.com") &&
+      !url.includes("/edit-listing") &&
+      (!delistWatch.listingId || !url.includes(delistWatch.listingId)) &&
+      (url.includes("/closet/") || url.includes("/feed") || /poshmark\.com\/?(\?|$)/i.test(url));
+    confirmedNavigatedAway = leftEditPage;
+  } else if (delistWatch.marketplace === "mercari") {
+    const leftEditPage =
+      url.includes("mercari.com") &&
+      !url.includes("/sell/edit") &&
+      (url.includes("/mypage/listings") || url.includes("/us/item/"));
+    confirmedNavigatedAway = leftEditPage;
+  }
+
+  if (!confirmedNavigatedAway) return;
+  watchedDelistTabs.delete(tabId);
+
+  try {
+    await updateJobStatus(delistWatch.jobId, "completed", {
+      marketplace: delistWatch.marketplace,
+    });
+    await refreshJobsCache(false);
+    await broadcastToCommandCenterTabs({
+      type: "RCC_JOB_COMPLETED",
+      jobId: delistWatch.jobId,
+      marketplace: delistWatch.marketplace,
+    });
+    if (delistWatch.autoPilot) {
+      setTimeout(() => {
+        chrome.tabs.remove(tabId).catch(() => {});
+      }, 1800);
+    }
+  } catch (err) {
+    console.warn("[RCC] Auto-complete delist navigation sync error:", err);
+  }
+});
+
 chrome.tabs.onRemoved.addListener((tabId) => {
   watchedPublishTabs.delete(tabId);
+  watchedDelistTabs.delete(tabId);
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -2650,6 +2726,66 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ ok: true });
           break;
         }
+        case "RCC_WATCH_DELIST_SUCCESS": {
+          if (sender?.tab?.id && message.jobId) {
+            watchedDelistTabs.set(sender.tab.id, {
+              jobId: message.jobId,
+              marketplace: message.marketplace,
+              listingId: message.listingId || "",
+              autoPilot: Boolean(message.autoPilot),
+              watchStartedAtMs: Date.now(),
+            });
+          }
+          sendResponse({ ok: true });
+          break;
+        }
+        case "RCC_CLEAR_DELIST_WATCH": {
+          if (sender?.tab?.id) {
+            watchedDelistTabs.delete(sender.tab.id);
+          }
+          sendResponse({ ok: true });
+          break;
+        }
+        case "RCC_REDIRECT_DELIST_TAB": {
+          const tabId = sender?.tab?.id;
+          const targetUrl = String(message.url || "").trim();
+          const nextJob = message.job;
+          const attempt = Number(nextJob?._redirectAttempt || 0);
+          if (!tabId || !targetUrl || !nextJob || attempt >= 10) {
+            sendResponse({ ok: false, error: "Cannot redirect delist tab" });
+            break;
+          }
+          watchedDelistTabs.delete(tabId);
+          const updatedJob = {
+            ...nextJob,
+            _redirectAttempt: attempt + 1,
+          };
+          await chrome.tabs.update(tabId, { url: targetUrl });
+          await new Promise((resolve) => {
+            let done = false;
+            const finish = () => {
+              if (done) return;
+              done = true;
+              chrome.tabs.onUpdated.removeListener(listener);
+              setTimeout(resolve, 1400);
+            };
+            const listener = (id, changeInfo) => {
+              if (id === tabId && changeInfo.status === "complete") {
+                finish();
+              }
+            };
+            chrome.tabs.onUpdated.addListener(listener);
+            setTimeout(finish, 12000);
+          });
+          await chrome.tabs.sendMessage(tabId, {
+            type: "RCC_EXECUTE_JOB",
+            job: updatedJob,
+            autoPilot: Boolean(message.autoPilot),
+            autoPilotSaveDraft: false,
+          });
+          sendResponse({ ok: true });
+          break;
+        }
         case "RCC_CLOSE_SENDER_TAB": {
           if (sender?.tab?.id) {
             await chrome.tabs.remove(sender.tab.id);
@@ -2658,8 +2794,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
         case "RCC_JOB_STATUS_UPDATE": {
-          if (message.status === "completed" && sender?.tab?.id) {
-            watchedPublishTabs.delete(sender.tab.id);
+          if (sender?.tab?.id) {
+            if (message.status === "completed") {
+              watchedPublishTabs.delete(sender.tab.id);
+            }
+            watchedDelistTabs.delete(sender.tab.id);
           }
           await updateJobStatus(message.jobId, message.status, message.extra || {});
           await refreshJobsCache(false);

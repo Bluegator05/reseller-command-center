@@ -89,7 +89,7 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
           .from("channel_jobs")
           .select("*, inventory_items(sku, title)")
           .order("created_at", { ascending: false })
-          .limit(50),
+          .limit(250),
         fetchAllSalesOrders(),
         supabase
           .from("inventory_items")
@@ -334,9 +334,26 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
         const cogs = Number(inv?.cogs ?? 0);
         const prepCost = Number(inv?.prep_cost ?? 0);
         const netProfit = Number(rec.net_profit ?? 0);
-        const delistedChannels = allJobs
-          .filter((j) => j.item_id === rec.item_id && j.action === "delist")
-          .map((j) => j.marketplace);
+        const itemDelistJobs = allJobs.filter(
+          (j) => j.item_id === rec.item_id && j.action === "delist"
+        );
+        const delistedChannels = [
+          ...new Set(
+            itemDelistJobs
+              .filter((j) => j.status === "completed")
+              .map((j) => j.marketplace)
+          ),
+        ];
+        const delistedSet = new Set(delistedChannels);
+        const pendingDelistChannels = [
+          ...new Set(
+            itemDelistJobs
+              .filter(
+                (j) => j.status !== "completed" && !delistedSet.has(j.marketplace)
+              )
+              .map((j) => j.marketplace)
+          ),
+        ];
         const pkgDims =
           inv?.length_in && inv?.width_in && inv?.height_in
             ? `${inv.length_in}×${inv.width_in}×${inv.height_in} in`
@@ -456,6 +473,7 @@ export async function loadCommandCenterData(): Promise<CommandCenterPayload> {
           true_net_after_cogs: roundCurrency(netProfit - cogsApplied),
           sold_at: rec.sold_at,
           delisted_channels: delistedChannels,
+          pending_delist_channels: pendingDelistChannels,
           source:
             rec.marketplace === "ebay" || rec.marketplace === "etsy"
               ? "webhook"

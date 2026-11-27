@@ -697,6 +697,9 @@ export async function PATCH(request: Request) {
         }
       }
 
+      const isMercariDraftUrl =
+        job.marketplace === "mercari" && /\/draft\b/i.test(safeUrl);
+
       const { data: listingRow } = await supabase
         .from("marketplace_listings")
         .upsert(
@@ -707,7 +710,7 @@ export async function PATCH(request: Request) {
             external_url: safeUrl,
             listed_price: price,
             shipping_price: 0,
-            status: "active",
+            status: isMercariDraftUrl ? "draft" : "active",
             views_count: 0,
             watchers_count: 0,
             impressions_count: 0,
@@ -720,6 +723,53 @@ export async function PATCH(request: Request) {
         .single();
 
       listingId = listingRow?.id ?? listingId;
+    } else if (
+      status === "needs_user_confirm" &&
+      job.action === "create" &&
+      job.marketplace === "mercari" &&
+      ((typeof errorMessage === "string" && /saved mercari draft/i.test(errorMessage)) ||
+        (typeof externalUrl === "string" && /\/draft\b/i.test(externalUrl)))
+    ) {
+      // Mercari accounts capped at 100 active listings save cross-listed items to Drafts —
+      // record a "draft" marketplace_listings row so anti-double-sell auto-delist deletes them when sold!
+      const draftPrice = roundCurrency(
+        Number(listedPrice ?? job.payload?.suggestedPrice ?? 0)
+      );
+      const draftUrl =
+        typeof externalUrl === "string" && /mercari\.com/i.test(externalUrl.trim())
+          ? externalUrl.trim()
+          : "https://www.mercari.com/mypage/listings/draft/ready-to-list/?page=1";
+      const { data: existingMc } = await supabase
+        .from("marketplace_listings")
+        .select("id, status")
+        .eq("item_id", job.item_id)
+        .eq("marketplace", "mercari")
+        .maybeSingle();
+
+      if (!existingMc || existingMc.status !== "active") {
+        const { data: draftRow } = await supabase
+          .from("marketplace_listings")
+          .upsert(
+            {
+              item_id: job.item_id,
+              marketplace: "mercari",
+              external_listing_id: `mercari-draft-${Date.now().toString().slice(-7)}`,
+              external_url: draftUrl,
+              listed_price: draftPrice,
+              shipping_price: 0,
+              status: "draft",
+              views_count: 0,
+              watchers_count: 0,
+              impressions_count: 0,
+              listed_at: nowIso,
+              last_synced_at: nowIso,
+            },
+            { onConflict: "item_id,marketplace" }
+          )
+          .select("id")
+          .single();
+        listingId = draftRow?.id ?? listingId;
+      }
     } else if (status === "completed" && job.action === "delist") {
       await supabase
         .from("marketplace_listings")

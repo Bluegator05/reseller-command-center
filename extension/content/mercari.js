@@ -884,27 +884,500 @@
       const shouldSaveDraft = Boolean(message.autoPilot && message.autoPilotSaveDraft);
 
       try {
-        // ANTI-DOUBLE-SELL AUTO-DELIST (DEACTIVATE) HANDLER
+        // ANTI-DOUBLE-SELL AUTO-DELIST HANDLER (SUPPORTS ACTIVE LISTINGS + MERCARI DRAFTS!)
         if (job.action === "delist") {
+          const failMercariManualConfirm = async (reasonMsg, hintMsg) => {
+            try {
+              await chrome.runtime.sendMessage({ type: "RCC_CLEAR_DELIST_WATCH" });
+            } catch {
+              // ignore
+            }
+            await chrome.runtime.sendMessage({
+              type: "RCC_JOB_STATUS_UPDATE",
+              jobId: job.id,
+              status: "needs_user_confirm",
+              extra: { errorMessage: reasonMsg },
+            });
+            showRccHud({
+              title: `Confirm Mercari Delist (${payload.sku || "SKU"})`,
+              message: hintMsg || `${reasonMsg} Tap Mark Delisted once removed.`,
+              tone: "confirm",
+              actionLabel: "Mark Delisted",
+              onAction: async () => {
+                await chrome.runtime.sendMessage({
+                  type: "RCC_JOB_STATUS_UPDATE",
+                  jobId: job.id,
+                  status: "completed",
+                  extra: { marketplace: "mercari" },
+                });
+                showRccHud({
+                  title: "Mercari Delist Synced",
+                  message: "Marked ended in Command Center.",
+                  tone: "success",
+                });
+              },
+            });
+            sendResponse({ ok: true, delisted: false });
+          };
+
+          const isVisibleEl = (el) => {
+            if (!el || el.closest("#rcc-companion-hud")) return false;
+            const cs = window.getComputedStyle(el);
+            if (cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0") {
+              return false;
+            }
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          };
+
+          const clickMercariConfirmModal = async (timeoutMs = 3000) => {
+            const start = Date.now();
+            while (Date.now() - start < timeoutMs) {
+              const modals = Array.from(
+                document.querySelectorAll(
+                  '[role="dialog"], [role="alertdialog"], .modal, [class*="Modal"], [class*="Dialog"]'
+                )
+              ).filter((m) => isVisibleEl(m));
+              for (const modal of modals) {
+                const btns = Array.from(modal.querySelectorAll('button, [role="button"]')).filter(
+                  (b) => !b.disabled && isVisibleEl(b)
+                );
+                const confirmBtn = btns.find((b) => {
+                  const t = (b.textContent || "").replace(/\s+/g, " ").trim();
+                  if (/^(cancel|no|keep|close|back)$/i.test(t)) return false;
+                  return /^(deactivate|delete|yes|confirm|ok|remove|yes,?\s*delete|delete draft)$/i.test(t);
+                });
+                if (confirmBtn) {
+                  confirmBtn.click();
+                  return true;
+                }
+              }
+              await sleep(220);
+            }
+            return false;
+          };
+
+          const scoreMercariTitleMatch = (candTitle, targets) => {
+            const clean = (s) =>
+              String(s || "")
+                .replace(/\(\s*edit\s*\)\s*$/i, "")
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, " ")
+                .trim();
+            const stop = new Set([
+              "the", "and", "for", "with", "from", "new", "of", "in", "on", "to", "by", "draft", "edit", "ready", "off", "list",
+            ]);
+            const tok = (s) =>
+              clean(s)
+                .split(/\s+/)
+                .filter((w) => w.length >= 2 && !stop.has(w));
+
+            const candNorm = clean(candTitle);
+            const candTokens = new Set(tok(candTitle));
+            if (!candNorm || candTokens.size === 0) return 0;
+
+            let best = 0;
+            for (const rawTarget of targets) {
+              const tNorm = clean(rawTarget);
+              if (!tNorm) continue;
+              if (candNorm === tNorm) return 1.0;
+              // Mercari truncates titles to 80 chars, so check strong prefix match!
+              if (
+                candNorm.length >= 16 &&
+                tNorm.length >= 16 &&
+                (tNorm.startsWith(candNorm.slice(0, 32)) || candNorm.startsWith(tNorm.slice(0, 32)))
+              ) {
+                best = Math.max(best, 0.94);
+              }
+              const tTokens = new Set(tok(rawTarget));
+              if (tTokens.size === 0) continue;
+              let hit = 0;
+              for (const w of tTokens) {
+                if (candTokens.has(w)) hit += 1;
+              }
+              const dice = (2 * hit) / (tTokens.size + candTokens.size);
+              const contain = hit / Math.min(tTokens.size, candTokens.size);
+              best = Math.max(best, dice * 0.6 + contain * 0.4);
+            }
+            return best;
+          };
+
+          const targetTitles = [
+            payload.mappedTitle,
+            payload.title,
+            job.item_title,
+          ]
+            .map((t) => String(t || "").trim())
+            .filter((t) => t.length >= 3);
+
           showRccHud({
             title: `${isAutoPilot ? "Auto-Pilot · " : ""}Auto-Delisting Mercari (${payload.sku || "SKU"})`,
-            message: `Sold on another marketplace (${payload.reason || "anti-double-sell"}) — deactivating Mercari listing now...`,
+            message: `Sold on another marketplace (${payload.reason || "anti-double-sell"}) — checking Mercari listing/drafts now...`,
             tone: "info",
           });
 
-          await sleep(1000);
+          if (/\/login\b|\/signin\b/i.test(window.location.pathname)) {
+            await failMercariManualConfirm("Mercari requires sign-in before delisting.");
+            return;
+          }
+
+          // =========================================================================
+          // PATH A: MERCARI DRAFTS PAGE (/mypage/listings/draft/ready-to-list/ or action-required)
+          // =========================================================================
+          if (/\/mypage\/listings\/draft/i.test(window.location.pathname)) {
+            const getVisibleDraftRows = () => {
+              const listBtns = Array.from(document.querySelectorAll('button, [role="button"]')).filter(
+                (b) => {
+                  if (!isVisibleEl(b)) return false;
+                  const txt = (b.textContent || "").trim();
+                  if (!/^list$/i.test(txt)) return false;
+                  // Exclude the disabled/enabled top bulk-action "List" button next to "Select all"
+                  const r = b.getBoundingClientRect();
+                  return r.left > window.innerWidth * 0.5;
+                }
+              );
+
+              const rows = [];
+              const seenRows = new Set();
+              for (const listBtn of listBtns) {
+                let row = listBtn.parentElement;
+                for (let up = 0; up < 7 && row && row !== document.body; up++) {
+                  const hasCb = Boolean(row.querySelector('input[type="checkbox"]'));
+                  const hasPrice = /\$\s*\d/.test(row.innerText || "");
+                  const r = row.getBoundingClientRect();
+                  if ((hasCb || hasPrice) && r.height >= 45 && r.height <= 320) {
+                    break;
+                  }
+                  row = row.parentElement;
+                }
+                if (!row || row === document.body || seenRows.has(row)) continue;
+                seenRows.add(row);
+
+                // Extract row title (prefer link text / underlined title, stripping trailing "(Edit)")
+                const links = Array.from(row.querySelectorAll("a")).filter((a) => {
+                  const t = (a.innerText || a.textContent || "").trim();
+                  return t.length >= 6 && !/^\$[\d,.]+$/.test(t);
+                });
+                const imgAlt = (row.querySelector("img[alt]")?.getAttribute("alt") || "").trim();
+                const rawTitle =
+                  (links[0]?.innerText || links[0]?.textContent || "").trim() ||
+                  imgAlt ||
+                  (row.innerText || "")
+                    .split(/\r?\n/)
+                    .map((l) => l.trim())
+                    .find((l) => l.length >= 8 && !/^(draft|ready|off|list|edit|delete|\$|\d{1,2}\/\d{1,2}\/\d{2})/i.test(l)) ||
+                  "";
+
+                rows.push({
+                  row,
+                  listBtn,
+                  titleText: rawTitle.replace(/\s+/g, " ").trim(),
+                });
+              }
+              return rows;
+            };
+
+            const findMatchOnCurrentDraftPage = () => {
+              const rows = getVisibleDraftRows();
+              let best = null;
+              for (const entry of rows) {
+                const score = scoreMercariTitleMatch(entry.titleText, targetTitles);
+                if (!best || score > best.score) {
+                  best = { ...entry, score };
+                }
+              }
+              return best && best.score >= 0.58 ? best : null;
+            };
+
+            const deleteMatchedDraftRow = async (match) => {
+              const { row, listBtn, titleText } = match;
+              row.scrollIntoView({ block: "center" });
+              await sleep(300);
+
+              let clickedDelete = false;
+
+              // Strategy 1 (Matches exact Mercari Drafts UI): click the chevron dropdown next to "List" -> click "Delete"
+              const listRect = listBtn.getBoundingClientRect();
+              const chevronCandidates = Array.from(
+                row.querySelectorAll('button, [role="button"]')
+              ).filter((b) => {
+                if (b === listBtn || b.disabled || !isVisibleEl(b)) return false;
+                const r = b.getBoundingClientRect();
+                // Right next to the "List" button (same vertical band, to the right of List)
+                return (
+                  r.left >= listRect.right - 8 &&
+                  Math.abs(r.top - listRect.top) < 28 &&
+                  r.width <= 72
+                );
+              });
+              const chevronBtn =
+                chevronCandidates[0] ||
+                (listBtn.nextElementSibling &&
+                isVisibleEl(listBtn.nextElementSibling) &&
+                listBtn.nextElementSibling.tagName === "BUTTON"
+                  ? listBtn.nextElementSibling
+                  : null);
+
+              if (chevronBtn) {
+                chevronBtn.click();
+                const menuStart = Date.now();
+                let deleteMenuItem = null;
+                while (Date.now() - menuStart < 2500 && !deleteMenuItem) {
+                  await sleep(200);
+                  const chevRect = chevronBtn.getBoundingClientRect();
+                  const menuEls = Array.from(
+                    document.querySelectorAll('button, a, li, [role="menuitem"], div, span')
+                  ).filter((el) => {
+                    if (!isVisibleEl(el) || el.children.length > 2) return false;
+                    const txt = (el.textContent || "").trim();
+                    if (!/^delete$/i.test(txt)) return false;
+                    // Must be positioned in the dropdown popover near the chevron (NOT the top toolbar's bulk Delete button!)
+                    const r = el.getBoundingClientRect();
+                    return (
+                      r.left > window.innerWidth * 0.45 &&
+                      Math.abs(r.left - chevRect.left) < 220 &&
+                      r.top >= chevRect.top - 120 &&
+                      r.top <= chevRect.bottom + 220
+                    );
+                  });
+                  if (menuEls.length > 0) {
+                    // Pick deepest matching element
+                    deleteMenuItem = menuEls[menuEls.length - 1];
+                  }
+                }
+                if (deleteMenuItem) {
+                  deleteMenuItem.click();
+                  clickedDelete = true;
+                }
+              }
+
+              // Strategy 2 (Backup): Check the row's checkbox -> click the top bulk toolbar "Delete" button
+              if (!clickedDelete) {
+                const cb = row.querySelector('input[type="checkbox"], [role="checkbox"]');
+                if (cb) {
+                  cb.click();
+                  await sleep(500);
+                  const bulkDeleteBtn = Array.from(
+                    document.querySelectorAll('button, [role="button"]')
+                  ).find((b) => {
+                    if (b.disabled || !isVisibleEl(b)) return false;
+                    const txt = (b.textContent || "").trim();
+                    const r = b.getBoundingClientRect();
+                    return /^delete$/i.test(txt) && r.left < window.innerWidth * 0.6 && r.top < 260;
+                  });
+                  if (bulkDeleteBtn) {
+                    bulkDeleteBtn.click();
+                    clickedDelete = true;
+                  }
+                }
+              }
+
+              if (!clickedDelete) return false;
+
+              // Confirm any Mercari delete confirmation dialog if shown
+              await sleep(500);
+              await clickMercariConfirmModal(2800);
+
+              // MANDATORY VERIFICATION: confirm the matched draft row actually disappeared!
+              const verifyStart = Date.now();
+              while (Date.now() - verifyStart < 6000) {
+                await sleep(400);
+                if (!document.body.contains(row)) {
+                  return true;
+                }
+                const remaining = getVisibleDraftRows();
+                const stillThere = remaining.some(
+                  (r) => scoreMercariTitleMatch(r.titleText, [titleText]) >= 0.9
+                );
+                if (!stillThere) {
+                  return true;
+                }
+              }
+              return false;
+            };
+
+            // Wait up to 6s for React drafts table to render
+            const waitTableStart = Date.now();
+            while (Date.now() - waitTableStart < 6000) {
+              if (getVisibleDraftRows().length > 0) break;
+              const txt = (document.body?.innerText || "").toLowerCase();
+              if (txt.includes("no drafts") || txt.includes("0 drafts")) break;
+              await sleep(350);
+            }
+
+            // Scan up to 6 SPA pages on the current Drafts tab
+            const currentUrlObj = new URL(window.location.href);
+            const startPage = Math.max(1, Number(currentUrlObj.searchParams.get("page") || 1));
+
+            for (let spaHop = 0; spaHop < 6; spaHop++) {
+              const matched = findMatchOnCurrentDraftPage();
+              if (matched) {
+                showRccHud({
+                  title: `${isAutoPilot ? "Auto-Pilot · " : ""}Deleting Mercari Draft (${payload.sku || "SKU"})`,
+                  message: `Found draft "${matched.titleText.slice(0, 60)}" — clicking ▾ → Delete...`,
+                  tone: "info",
+                });
+                const deletedOk = await deleteMatchedDraftRow(matched);
+                if (deletedOk) {
+                  await chrome.runtime.sendMessage({
+                    type: "RCC_JOB_STATUS_UPDATE",
+                    jobId: job.id,
+                    status: "completed",
+                    extra: { marketplace: "mercari" },
+                  });
+                  showRccHud({
+                    title: `Deleted Mercari Draft! (${payload.sku || "SKU"})`,
+                    message: "Verified removed from Mercari Drafts & synced to Command Center.",
+                    tone: "success",
+                  });
+                  if (isAutoPilot) {
+                    await sleep(1800);
+                    chrome.runtime.sendMessage({ type: "RCC_CLOSE_SENDER_TAB" });
+                  }
+                  sendResponse({ ok: true, delisted: true });
+                  return;
+                }
+                await failMercariManualConfirm(
+                  `Found draft "${matched.titleText.slice(0, 50)}" but could not verify deletion.`,
+                  "Click the ▾ arrow next to List → Delete on the highlighted draft, then tap Mark Delisted below."
+                );
+                return;
+              }
+
+              // Not on this page — check for next page button/link!
+              const nextPageNum = startPage + spaHop + 1;
+              if (nextPageNum > 8) break;
+
+              const nextPageLink =
+                document.querySelector(`a[href*="page=${nextPageNum}"]`) ||
+                Array.from(document.querySelectorAll('a, button')).find((el) => {
+                  if (el.disabled || !isVisibleEl(el)) return false;
+                  const aria = (el.getAttribute("aria-label") || "").toLowerCase();
+                  const txt = (el.textContent || "").trim();
+                  return (
+                    aria.includes("next") ||
+                    txt === String(nextPageNum) ||
+                    txt === ">" ||
+                    txt === "›"
+                  );
+                });
+
+              if (!nextPageLink) break;
+
+              const nextHref = nextPageLink.getAttribute?.("href") || "";
+              if (nextHref && nextHref.includes("page=")) {
+                const absNextUrl = nextHref.startsWith("http")
+                  ? nextHref
+                  : `https://www.mercari.com${nextHref}`;
+                await chrome.runtime.sendMessage({
+                  type: "RCC_REDIRECT_DELIST_TAB",
+                  url: absNextUrl,
+                  job,
+                  autoPilot: isAutoPilot,
+                });
+                sendResponse({ ok: true, redirected: true });
+                return;
+              }
+
+              // SPA pagination click
+              const beforeFirstTitle = getVisibleDraftRows()[0]?.titleText || "";
+              nextPageLink.click();
+              const pageWaitStart = Date.now();
+              while (Date.now() - pageWaitStart < 3500) {
+                await sleep(350);
+                const nowFirst = getVisibleDraftRows()[0]?.titleText || "";
+                if (nowFirst && nowFirst !== beforeFirstTitle) break;
+              }
+            }
+
+            // If we were on Ready to list and didn't find it, also check "Action required" if it has drafts!
+            if (
+              window.location.pathname.includes("ready-to-list") &&
+              !job._checkedActionRequired &&
+              Number(job._redirectAttempt || 0) < 8
+            ) {
+              const actionReqEl = Array.from(document.querySelectorAll("a, button, li, div")).find(
+                (el) => {
+                  if (!isVisibleEl(el)) return false;
+                  const t = (el.innerText || "").replace(/\s+/g, " ").trim();
+                  return /^action required\s+[1-9]\d*$/i.test(t);
+                }
+              );
+              if (actionReqEl) {
+                const actionHref = actionReqEl.closest("a")?.getAttribute("href");
+                await chrome.runtime.sendMessage({
+                  type: "RCC_REDIRECT_DELIST_TAB",
+                  url: actionHref
+                    ? actionHref.startsWith("http")
+                      ? actionHref
+                      : `https://www.mercari.com${actionHref}`
+                    : "https://www.mercari.com/mypage/listings/draft/action-required/?page=1",
+                  job: { ...job, _checkedActionRequired: true },
+                  autoPilot: isAutoPilot,
+                });
+                sendResponse({ ok: true, redirected: true });
+                return;
+              }
+            }
+
+            await failMercariManualConfirm(
+              `Could not find "${(targetTitles[0] || payload.sku || "item").slice(0, 50)}" in Mercari Drafts.`,
+              "Locate this item in Drafts (or Active), click ▾ → Delete (or Deactivate), then tap Mark Delisted below."
+            );
+            return;
+          }
+
+          // =========================================================================
+          // PATH B: ACTIVE MERCARI LISTING (/sell/edit/m... or /us/item/m...)
+          // =========================================================================
+          const findActivateBtn = () =>
+            Array.from(document.querySelectorAll('button, [role="button"]')).find(
+              (b) => isVisibleEl(b) && /^activate$/i.test((b.textContent || "").trim())
+            );
+          const findDeactivateBtn = () =>
+            document.querySelector('button[data-testid="DeactivateButton"]') ||
+            Array.from(document.querySelectorAll('button, [role="button"]')).find((b) => {
+              if (b.disabled || !isVisibleEl(b)) return false;
+              const r = b.getBoundingClientRect();
+              return r.width > 40 && r.height > 20 && /^deactivate$/i.test((b.textContent || "").trim());
+            });
+
+          // Wait up to 4.5s for Mercari's React edit/item page to render
+          const mcLoadStart = Date.now();
+          while (Date.now() - mcLoadStart < 4500) {
+            if (/\/mypage\/listings\/draft/i.test(window.location.pathname)) {
+              // Redirected straight into Drafts — re-run handler on Drafts!
+              await chrome.runtime.sendMessage({
+                type: "RCC_REDIRECT_DELIST_TAB",
+                url: window.location.href,
+                job,
+                autoPilot: isAutoPilot,
+              });
+              sendResponse({ ok: true, redirected: true });
+              return;
+            }
+            const bodyLowerNow = (document.body?.innerText || "").toLowerCase();
+            if (
+              findActivateBtn() ||
+              findDeactivateBtn() ||
+              document.querySelector('a[href*="/sell/edit/"]') ||
+              bodyLowerNow.includes("this item has sold") ||
+              bodyLowerNow.includes("item is no longer available") ||
+              bodyLowerNow.includes("page not found") ||
+              bodyLowerNow.includes("listing was deleted")
+            ) {
+              break;
+            }
+            await sleep(300);
+          }
+
           const bodyLower = (document.body?.innerText || "").toLowerCase();
-          const hasActivateBtn = Array.from(document.querySelectorAll("button")).some(
-            (b) => !b.closest("#rcc-companion-hud") && /^activate$/i.test((b.textContent || "").trim())
-          );
-          const alreadyEnded =
-            hasActivateBtn ||
-            bodyLower.includes("item is no longer available") ||
-            bodyLower.includes("page not found") ||
+          const hasExplicitSoldOrInactive =
+            Boolean(findActivateBtn()) ||
             bodyLower.includes("this item has sold") ||
             bodyLower.includes("listing was deleted");
 
-          if (alreadyEnded) {
+          if (hasExplicitSoldOrInactive) {
             await chrome.runtime.sendMessage({
               type: "RCC_JOB_STATUS_UPDATE",
               jobId: job.id,
@@ -913,7 +1386,7 @@
             });
             showRccHud({
               title: `Mercari Already Inactive (${payload.sku || "SKU"})`,
-              message: "Listing is already deactivated or removed — synced back to Command Center.",
+              message: "Verified listing is already deactivated or sold — synced back to Command Center.",
               tone: "success",
             });
             if (isAutoPilot) {
@@ -921,6 +1394,25 @@
               chrome.runtime.sendMessage({ type: "RCC_CLOSE_SENDER_TAB" });
             }
             sendResponse({ ok: true, delisted: true });
+            return;
+          }
+
+          // If this URL showed "page not found" / "no longer available" OR landed on /mypage/listings/active/,
+          // check Mercari Drafts before assuming it's gone!
+          if (
+            (bodyLower.includes("page not found") ||
+              bodyLower.includes("item is no longer available") ||
+              window.location.pathname.includes("/mypage/listings/active")) &&
+            !job._checkedDrafts &&
+            Number(job._redirectAttempt || 0) < 3
+          ) {
+            await chrome.runtime.sendMessage({
+              type: "RCC_REDIRECT_DELIST_TAB",
+              url: "https://www.mercari.com/mypage/listings/draft/ready-to-list/?page=1",
+              job: { ...job, _checkedDrafts: true },
+              autoPilot: isAutoPilot,
+            });
+            sendResponse({ ok: true, redirected: true });
             return;
           }
 
@@ -939,15 +1431,7 @@
           window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
           await sleep(700);
 
-          // Prefer Deactivate (safe reversible hide); fall back to Delete if Deactivate isn't shown
-          const deactivateBtn =
-            document.querySelector('button[data-testid="DeactivateButton"]') ||
-            Array.from(document.querySelectorAll('button, [role="button"]')).find((b) => {
-              if (b.disabled || b.closest("#rcc-companion-hud")) return false;
-              const r = b.getBoundingClientRect();
-              return r.width > 40 && r.height > 20 && /^deactivate$/i.test((b.textContent || "").trim());
-            });
-
+          const deactivateBtn = findDeactivateBtn();
           let clickedEnd = false;
           if (deactivateBtn) {
             deactivateBtn.scrollIntoView({ block: "center" });
@@ -955,47 +1439,50 @@
             deactivateBtn.click();
             clickedEnd = true;
           } else {
-            clickedEnd = await clickButtonByText([/^deactivate$/i, /^delete$/i, /^delete listing$/i], 3500);
+            clickedEnd = await clickButtonByText([/^deactivate$/i, /^delete listing$/i], 3000);
           }
 
           if (clickedEnd) {
-            await sleep(750);
-            await clickButtonByText([/^deactivate$/i, /^yes$/i, /^confirm$/i, /^delete$/i], 3000);
-            await sleep(1500);
-
-            await chrome.runtime.sendMessage({
-              type: "RCC_JOB_STATUS_UPDATE",
-              jobId: job.id,
-              status: "completed",
-              extra: { marketplace: "mercari" },
-            });
-            showRccHud({
-              title: `Deactivated on Mercari! (${payload.sku || "SKU"})`,
-              message: "Anti-double-sell complete — listing hidden from buyers & synced to Command Center.",
-              tone: "success",
-            });
-            if (isAutoPilot) {
-              await sleep(1800);
-              chrome.runtime.sendMessage({ type: "RCC_CLOSE_SENDER_TAB" });
+            try {
+              await chrome.runtime.sendMessage({
+                type: "RCC_WATCH_DELIST_SUCCESS",
+                jobId: job.id,
+                marketplace: "mercari",
+                autoPilot: isAutoPilot,
+              });
+            } catch {
+              // ignore
             }
-            sendResponse({ ok: true, delisted: true });
-            return;
-          }
+            await sleep(500);
+            await clickMercariConfirmModal(3000);
 
-          await chrome.runtime.sendMessage({
-            type: "RCC_JOB_STATUS_UPDATE",
-            jobId: job.id,
-            status: "needs_user_confirm",
-            extra: {
-              errorMessage: "Could not find Deactivate button — please deactivate manually on this tab.",
-            },
-          });
-          showRccHud({
-            title: `Confirm Mercari Delist (${payload.sku || "SKU"})`,
-            message: "Click Deactivate on this page, then tap Mark Delisted below.",
-            tone: "confirm",
-            actionLabel: "Mark Delisted",
-            onAction: async () => {
+            // MANDATORY VERIFICATION: verify Activate button appears, inactive toast, or navigation off /sell/edit
+            let verifiedInactive = false;
+            const verifyStart = Date.now();
+            while (Date.now() - verifyStart < 6500) {
+              await sleep(400);
+              if (findActivateBtn()) {
+                verifiedInactive = true;
+                break;
+              }
+              if (!window.location.pathname.includes("/sell/edit")) {
+                verifiedInactive = true;
+                break;
+              }
+              const txtNow = (document.body?.innerText || "").toLowerCase();
+              if (
+                txtNow.includes("item deactivated") ||
+                txtNow.includes("listing deactivated") ||
+                txtNow.includes("listing is inactive") ||
+                txtNow.includes("item is inactive") ||
+                txtNow.includes("listing was deleted")
+              ) {
+                verifiedInactive = true;
+                break;
+              }
+            }
+
+            if (verifiedInactive) {
               await chrome.runtime.sendMessage({
                 type: "RCC_JOB_STATUS_UPDATE",
                 jobId: job.id,
@@ -1003,13 +1490,23 @@
                 extra: { marketplace: "mercari" },
               });
               showRccHud({
-                title: "Mercari Delist Synced",
-                message: "Marked ended in Command Center.",
+                title: `Deactivated on Mercari! (${payload.sku || "SKU"})`,
+                message: "Verified hidden from buyers & synced to Command Center.",
                 tone: "success",
               });
-            },
-          });
-          sendResponse({ ok: true, delisted: false });
+              if (isAutoPilot) {
+                await sleep(1800);
+                chrome.runtime.sendMessage({ type: "RCC_CLOSE_SENDER_TAB" });
+              }
+              sendResponse({ ok: true, delisted: true });
+              return;
+            }
+          }
+
+          await failMercariManualConfirm(
+            "Could not verify Mercari deactivation on this page.",
+            "Click Deactivate (or Delete in Drafts) on this page, then tap Mark Delisted below."
+          );
           return;
         }
 

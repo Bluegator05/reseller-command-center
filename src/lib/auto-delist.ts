@@ -175,6 +175,7 @@ export async function processSaleAndCascadeDelist(
         execution_mode: executionMode,
         payload: {
           sku: item.sku,
+          title: item.title,
           externalListingId: other.external_listing_id,
           externalUrl: other.external_url,
           reason: `SOLD_ON_${input.marketplace.toUpperCase()}`,
@@ -271,7 +272,12 @@ export async function processSaleAndCascadeDelist(
     net_profit: netProfit,
     true_net_after_cogs: roundCurrency(netProfit - cogs),
     sold_at: orderRow.sold_at,
-    delisted_channels: cascadedDelists.map((c) => c.marketplace),
+    delisted_channels: cascadedDelists
+      .filter((c) => c.status === "delisted")
+      .map((c) => c.marketplace),
+    pending_delist_channels: cascadedDelists
+      .filter((c) => c.status !== "delisted")
+      .map((c) => c.marketplace),
     source: input.source,
   };
 

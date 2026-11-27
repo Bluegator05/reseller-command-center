@@ -492,66 +492,110 @@
    * Checks the seller's own live Poshmark closet (same-origin) BEFORE creating a
    * listing so we never create a duplicate if it's already live on Poshmark!
    */
-  async function findExistingInPoshmarkCloset(targetTitles) {
+  async function findExistingInPoshmarkCloset(targetTitles, options = {}) {
+    const minScore = typeof options.minScore === "number" ? options.minScore : 0.78;
+    const includeSearch = Boolean(options.includeSearch);
+    const cleanTargets = (Array.isArray(targetTitles) ? targetTitles : [targetTitles])
+      .map((t) => String(t || "").trim())
+      .filter((t) => t.length >= 3);
+    if (cleanTargets.length === 0) return null;
+
     try {
+      const pathMatch = window.location.pathname.match(/^\/closet\/([a-z0-9_.-]+)/i);
       const closetLink = Array.from(document.querySelectorAll('a[href*="/closet/"]')).find(
         (a) => /\/closet\/[a-z0-9_.-]+/i.test(a.getAttribute("href") || "")
       );
-      if (!closetLink) return null;
-      const m = (closetLink.getAttribute("href") || "").match(/\/closet\/([a-z0-9_.-]+)/i);
-      if (!m) return null;
-      const username = m[1];
-
-      const res = await fetch(
-        `/closet/${encodeURIComponent(username)}?availability=available`,
-        { credentials: "include" }
+      const linkMatch = (closetLink?.getAttribute("href") || "").match(
+        /\/closet\/([a-z0-9_.-]+)/i
       );
-      if (!res.ok) return null;
-      const html = await res.text();
-      const doc = new DOMParser().parseFromString(html, "text/html");
+      const username = pathMatch?.[1] || linkMatch?.[1] || null;
 
-      const links = Array.from(doc.querySelectorAll('a[href*="/listing/"]'));
-      const seen = new Set();
       let bestMatch = null;
       let bestScore = 0;
 
-      for (const link of links) {
-        const href = link.getAttribute("href") || "";
-        const idMatch = href.match(/([0-9a-f]{24})(?:[/?#]|$)/i);
-        const extId = idMatch ? idMatch[1] : href;
-        if (!extId || seen.has(extId)) continue;
-        seen.add(extId);
+      const scanDocument = (doc) => {
+        const links = Array.from(doc.querySelectorAll('a[href*="/listing/"]'));
+        const seen = new Set();
+        for (const link of links) {
+          const href = link.getAttribute("href") || "";
+          const idMatch = href.match(/([0-9a-f]{24})(?:[/?#]|$)/i);
+          const extId = idMatch ? idMatch[1] : null;
+          if (!extId || seen.has(extId)) continue;
+          seen.add(extId);
 
-        const card = link.closest('[data-et-name="listing"], .card, .tile, article, li') || link.parentElement;
-        const cardText = (card?.textContent || "").toLowerCase();
-        if (/\bsold\b|not for sale/.test(cardText)) continue;
+          const card =
+            link.closest('[data-et-name="listing"], .card, .tile, article, li') ||
+            link.parentElement;
+          const cardText = (card?.textContent || "").toLowerCase();
+          if (/\bsold\b|not for sale/.test(cardText)) continue;
 
-        const titleEl = card?.querySelector(".tile__title, [data-et-name='listing_title'], a.tile__title");
-        const title = (
-          titleEl?.textContent ||
-          link.getAttribute("title") ||
-          link.querySelector("img")?.getAttribute("alt") ||
-          link.textContent ||
-          ""
-        )
-          .replace(/\s+/g, " ")
-          .trim();
-        if (title.length < 4) continue;
+          const titleEl = card?.querySelector(
+            ".tile__title, [data-et-name='listing_title'], a.tile__title"
+          );
+          const title = (
+            titleEl?.textContent ||
+            link.getAttribute("title") ||
+            link.querySelector("img")?.getAttribute("alt") ||
+            link.textContent ||
+            ""
+          )
+            .replace(/\s+/g, " ")
+            .trim();
+          if (title.length < 4) continue;
 
-        for (const target of targetTitles) {
-          if (!target) continue;
-          const score = dupSimilarity(title, target);
-          if (score > bestScore) {
-            bestScore = score;
-            const fullUrl = href.startsWith("http")
-              ? href.split("?")[0]
-              : `https://poshmark.com${href.split("?")[0]}`;
-            bestMatch = { externalListingId: extId, externalUrl: fullUrl, title, score };
+          for (const target of cleanTargets) {
+            const score = dupSimilarity(title, target);
+            if (score > bestScore) {
+              bestScore = score;
+              const fullUrl = href.startsWith("http")
+                ? href.split("?")[0]
+                : `https://poshmark.com${href.split("?")[0]}`;
+              bestMatch = { externalListingId: extId, externalUrl: fullUrl, title, score };
+            }
           }
+        }
+      };
+
+      // 1. Scan current DOM immediately if we are already on the user's closet
+      if (window.location.pathname.includes("/closet/")) {
+        scanDocument(document);
+        if (bestScore >= minScore) return bestMatch;
+      }
+
+      if (!username) return null;
+
+      // 2. Fetch the user's available closet listings
+      const urlsToTry = [
+        `/closet/${encodeURIComponent(username)}?availability=available&sort_by=added_desc`,
+      ];
+      if (includeSearch && cleanTargets[0]) {
+        const shortQuery = cleanTargets[0]
+          .replace(/[^a-z0-9\s]/gi, " ")
+          .split(/\s+/)
+          .filter((w) => w.length >= 2)
+          .slice(0, 4)
+          .join(" ");
+        if (shortQuery.length >= 3) {
+          urlsToTry.push(
+            `/closet/${encodeURIComponent(username)}?availability=available&query=${encodeURIComponent(shortQuery)}`
+          );
         }
       }
 
-      return bestScore >= 0.78 ? bestMatch : null;
+      for (const fetchUrl of urlsToTry) {
+        try {
+          const res = await fetch(fetchUrl, { credentials: "include" });
+          if (!res.ok) continue;
+          const html = await res.text();
+          const doc = new DOMParser().parseFromString(html, "text/html");
+          scanDocument(doc);
+          if (bestScore >= minScore) return bestMatch;
+        } catch {
+          // try next URL
+        }
+      }
+
+      return bestScore >= minScore ? bestMatch : null;
     } catch {
       return null;
     }
@@ -578,25 +622,155 @@
       const shouldSaveDraft = Boolean(message.autoPilot && message.autoPilotSaveDraft);
 
       try {
-        // ANTI-DOUBLE-SELL AUTO-DELIST HANDLER
+        // ANTI-DOUBLE-SELL AUTO-DELIST HANDLER (STRICT VERIFICATION — ZERO FALSE POSITIVES)
         if (job.action === "delist") {
+          const failToManualConfirm = async (reasonMsg) => {
+            try {
+              await chrome.runtime.sendMessage({ type: "RCC_CLEAR_DELIST_WATCH" });
+            } catch {
+              // ignore
+            }
+            await chrome.runtime.sendMessage({
+              type: "RCC_JOB_STATUS_UPDATE",
+              jobId: job.id,
+              status: "needs_user_confirm",
+              extra: {
+                errorMessage: reasonMsg,
+              },
+            });
+            showRccHud({
+              title: `Confirm Poshmark Delist (${payload.sku || "SKU"})`,
+              message: `${reasonMsg} Delete it manually, then tap Mark Delisted below.`,
+              tone: "confirm",
+              actionLabel: "Mark Delisted",
+              onAction: async () => {
+                await chrome.runtime.sendMessage({
+                  type: "RCC_JOB_STATUS_UPDATE",
+                  jobId: job.id,
+                  status: "completed",
+                  extra: { marketplace: "poshmark" },
+                });
+                showRccHud({
+                  title: "Poshmark Delist Synced",
+                  message: "Marked ended in Command Center.",
+                  tone: "success",
+                });
+              },
+            });
+            sendResponse({ ok: true, delisted: false });
+          };
+
           showRccHud({
             title: `${isAutoPilot ? "Auto-Pilot · " : ""}Auto-Delisting Poshmark (${payload.sku || "SKU"})`,
-            message: `Sold on another marketplace (${payload.reason || "anti-double-sell"}) — removing Poshmark listing now...`,
+            message: `Sold on another marketplace (${payload.reason || "anti-double-sell"}) — locating & verifying Poshmark listing...`,
             tone: "info",
           });
 
-          await sleep(800);
-          const bodyText = (document.body?.innerText || "").toLowerCase();
-          const alreadyGone =
-            bodyText.includes("page not found") ||
-            bodyText.includes("listing not found") ||
-            bodyText.includes("this listing has been deleted") ||
-            (!window.location.pathname.includes("/edit-listing") &&
-              /\bsold\b/.test(bodyText) &&
-              !document.querySelector('a[href*="/edit-listing/"]'));
+          // Never mark delisted if Poshmark redirected to login!
+          if (/\/login\b|\/signin\b/i.test(window.location.pathname)) {
+            await failToManualConfirm("Poshmark requires sign-in before deleting this listing.");
+            return;
+          }
 
-          if (alreadyGone) {
+          const urlIdMatch = window.location.href.match(/([0-9a-f]{24})(?:[/?#]|$)/i);
+          const payloadIdMatch =
+            String(payload.externalListingId || "").match(/([0-9a-f]{24})/i) ||
+            String(payload.externalUrl || "").match(/([0-9a-f]{24})/i);
+          const realListingId = urlIdMatch?.[1] || payloadIdMatch?.[1] || null;
+
+          // If we don't have a real 24-hex Poshmark ID (e.g. legacy fallback URL or /feed / /closet/),
+          // search the user's live Poshmark closet by title and navigate to /edit-listing/<foundId>!
+          if (!urlIdMatch && (!realListingId || !window.location.pathname.includes("/edit-listing"))) {
+            await sleep(1400);
+            if (realListingId && Number(job._redirectAttempt || 0) < 2) {
+              await chrome.runtime.sendMessage({
+                type: "RCC_REDIRECT_DELIST_TAB",
+                url: `https://poshmark.com/edit-listing/${realListingId}`,
+                job,
+                autoPilot: isAutoPilot,
+              });
+              sendResponse({ ok: true, redirected: true });
+              return;
+            }
+            const foundInCloset = await findExistingInPoshmarkCloset(
+              [payload.mappedTitle, payload.title, job.item_title],
+              { minScore: 0.58, includeSearch: true }
+            );
+            if (foundInCloset?.externalListingId && /^[0-9a-f]{24}$/i.test(foundInCloset.externalListingId)) {
+              await chrome.runtime.sendMessage({
+                type: "RCC_REDIRECT_DELIST_TAB",
+                url: `https://poshmark.com/edit-listing/${foundInCloset.externalListingId}`,
+                job: {
+                  ...job,
+                  payload: {
+                    ...payload,
+                    externalListingId: foundInCloset.externalListingId,
+                    externalUrl: foundInCloset.externalUrl,
+                  },
+                },
+                autoPilot: isAutoPilot,
+              });
+              sendResponse({ ok: true, redirected: true });
+              return;
+            }
+            await failToManualConfirm(
+              "Could not automatically locate this Poshmark listing ID in your closet."
+            );
+            return;
+          }
+
+          const findVisibleDeleteListingBtn = () => {
+            const byData = document.querySelector('[data-et-name="delete_listing"]');
+            if (byData && isElementDisplayed(byData) && !byData.closest("#rcc-companion-hud")) {
+              return byData;
+            }
+            return Array.from(document.querySelectorAll('button, a, [role="button"]')).find((el) => {
+              if (el.closest("#rcc-companion-hud") || el.disabled) return false;
+              if (!isElementDisplayed(el)) return false;
+              const txt = (el.textContent || "").replace(/\s+/g, " ").trim();
+              return /^delete listing$/i.test(txt);
+            });
+          };
+
+          const hasExplicitPoshmark404 = () => {
+            const text = (document.body?.innerText || "").toLowerCase();
+            return (
+              text.includes("page not found") ||
+              text.includes("listing not found") ||
+              text.includes("this listing has been deleted") ||
+              text.includes("sorry! we couldn't find") ||
+              (text.includes("uh oh!") && text.includes("404"))
+            );
+          };
+
+          const hasExplicitListingSoldBanner = () => {
+            if (!window.location.pathname.includes("/listing/")) return false;
+            const soldEl = document.querySelector(
+              '.listing__sold-tag, [data-et-name="sold_tag"], [data-test="sold-tag"], .sold-tag, .not-for-sale-tag, [data-test="not-for-sale-tag"]'
+            );
+            return Boolean(soldEl && isElementDisplayed(soldEl));
+          };
+
+          // Wait up to 4.5s for Poshmark's Vue SPA to render the edit form, listing page, or genuine 404
+          const loadStart = Date.now();
+          while (Date.now() - loadStart < 4500) {
+            if (/\/login\b|\/signin\b/i.test(window.location.pathname)) {
+              await failToManualConfirm("Poshmark redirected to sign-in.");
+              return;
+            }
+            if (
+              findVisibleDeleteListingBtn() ||
+              document.querySelector('a[href*="/edit-listing/"]') ||
+              hasExplicitPoshmark404() ||
+              hasExplicitListingSoldBanner()
+            ) {
+              break;
+            }
+            await sleep(300);
+          }
+
+          // Strict alreadyGone check: ONLY when we navigated to a real 24-hex listing ID
+          if (realListingId && (hasExplicitPoshmark404() || hasExplicitListingSoldBanner())) {
             await chrome.runtime.sendMessage({
               type: "RCC_JOB_STATUS_UPDATE",
               jobId: job.id,
@@ -605,7 +779,7 @@
             });
             showRccHud({
               title: `Poshmark Already Ended (${payload.sku || "SKU"})`,
-              message: "Listing was already sold or removed — synced back to Command Center.",
+              message: "Verified listing is already deleted or sold — synced back to Command Center.",
               tone: "success",
             });
             if (isAutoPilot) {
@@ -616,34 +790,187 @@
             return;
           }
 
-          // If on /listing/ view, click Edit to open /edit-listing/<id>
+          // If on /listing/<id> view, navigate cleanly to /edit-listing/<id>
           if (!window.location.pathname.includes("/edit-listing")) {
+            if (realListingId && Number(job._redirectAttempt || 0) < 2) {
+              await chrome.runtime.sendMessage({
+                type: "RCC_REDIRECT_DELIST_TAB",
+                url: `https://poshmark.com/edit-listing/${realListingId}`,
+                job,
+                autoPilot: isAutoPilot,
+              });
+              sendResponse({ ok: true, redirected: true });
+              return;
+            }
             const editLink = document.querySelector('a[href*="/edit-listing/"]');
             if (editLink) {
               editLink.click();
-              await sleep(2200);
+              await sleep(2500);
             } else {
               await clickButtonByText([/^edit$/i, /^edit listing$/i], 2500);
-              await sleep(2200);
+              await sleep(2500);
             }
           }
 
           window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
-          await sleep(700);
+          await sleep(800);
 
-          const clickedDelete = await clickButtonByText(
-            [/^delete listing$/i, /delete listing/i],
-            4500
-          );
+          let deleteBtn = findVisibleDeleteListingBtn();
+          if (!deleteBtn) {
+            const waitDelStart = Date.now();
+            while (Date.now() - waitDelStart < 3500 && !deleteBtn) {
+              window.scrollTo({ top: document.body.scrollHeight, behavior: "instant" });
+              await sleep(350);
+              deleteBtn = findVisibleDeleteListingBtn();
+            }
+          }
 
-          if (clickedDelete) {
-            await sleep(700);
-            await clickButtonByText(
-              [/^yes$/i, /^delete$/i, /^delete listing$/i, /^confirm$/i],
-              4000
+          if (!deleteBtn) {
+            await failToManualConfirm("Could not find the Delete Listing button on this Poshmark page.");
+            return;
+          }
+
+          deleteBtn.scrollIntoView({ block: "center" });
+          await sleep(250);
+          deleteBtn.click();
+
+          // Wait strictly for Poshmark's confirmation modal & find the confirm button INSIDE the modal ONLY
+          // (never re-click the underlying "Delete Listing" button!)
+          const findModalConfirmBtn = () => {
+            const modalContainers = Array.from(
+              document.querySelectorAll(
+                '[role="dialog"], [role="alertdialog"], .modal, .modal__container, .modal__content, .popup, .dialog, .confirmation-modal'
+              )
+            ).filter((m) => !m.closest("#rcc-companion-hud") && isElementDisplayed(m));
+
+            for (const modal of modalContainers) {
+              const btns = Array.from(modal.querySelectorAll('button, a, [role="button"]')).filter(
+                (b) => !b.disabled && isElementDisplayed(b) && b !== deleteBtn
+              );
+              const match = btns.find((b) => {
+                const txt = (b.textContent || "").replace(/\s+/g, " ").trim();
+                if (/^(no|cancel|keep|close|back)$/i.test(txt)) return false;
+                return /^(yes|yes,?\s*delete(\s+listing)?|delete|confirm|ok)$/i.test(txt);
+              });
+              if (match) return match;
+            }
+            return null;
+          };
+
+          let confirmBtn = null;
+          const modalWaitStart = Date.now();
+          while (Date.now() - modalWaitStart < 4500 && !confirmBtn) {
+            await sleep(250);
+            confirmBtn = findModalConfirmBtn();
+          }
+
+          if (!confirmBtn) {
+            await failToManualConfirm(
+              "Clicked Delete Listing, but Poshmark's confirmation dialog did not appear."
             );
-            await sleep(1500);
+            return;
+          }
 
+          // Register background navigation watcher BEFORE clicking confirm in case Poshmark does a full page redirect
+          try {
+            await chrome.runtime.sendMessage({
+              type: "RCC_WATCH_DELIST_SUCCESS",
+              jobId: job.id,
+              marketplace: "poshmark",
+              listingId: realListingId || "",
+              autoPilot: isAutoPilot,
+            });
+          } catch {
+            // ignore
+          }
+
+          confirmBtn.click();
+
+          // MANDATORY POST-DELETE VERIFICATION (up to 7.5s) — never mark completed without proof!
+          const detectPoshmarkDeleteError = () => {
+            const errSelectors =
+              '[role="alert"], .alert, .alert--danger, .toast--error, .flash--error, .form__error-message, .modal__body, .popup';
+            const nodes = Array.from(document.querySelectorAll(errSelectors)).filter(
+              (el) => !el.closest("#rcc-companion-hud") && isElementDisplayed(el)
+            );
+            for (const el of nodes) {
+              const txt = (el.textContent || "").replace(/\s+/g, " ").trim();
+              if (
+                /active offer|cannot be deleted|cannot delete|unable to delete|could not delete|not allowed to delete|something went wrong|error deleting/i.test(
+                  txt
+                )
+              ) {
+                return txt.slice(0, 140);
+              }
+            }
+            return null;
+          };
+
+          let verifiedDeleted = false;
+          let deleteBlockReason = null;
+          const verifyStart = Date.now();
+          while (Date.now() - verifyStart < 7500) {
+            await sleep(450);
+
+            if (/\/login\b|\/signin\b/i.test(window.location.pathname)) {
+              deleteBlockReason = "Poshmark redirected to sign-in after clicking Delete.";
+              break;
+            }
+
+            const errTxt = detectPoshmarkDeleteError();
+            if (errTxt) {
+              deleteBlockReason = `Poshmark blocked Delete: "${errTxt}"`;
+              break;
+            }
+
+            // Proof A: SPA navigated away from /edit-listing/<id>
+            if (
+              !window.location.pathname.includes("/edit-listing") &&
+              (!realListingId || !window.location.pathname.includes(realListingId))
+            ) {
+              verifiedDeleted = true;
+              break;
+            }
+
+            // Proof B: Explicit deletion confirmation toast/banner appeared
+            const bodyNow = (document.body?.innerText || "").toLowerCase();
+            if (
+              bodyNow.includes("listing has been deleted") ||
+              bodyNow.includes("successfully deleted") ||
+              bodyNow.includes("listing deleted") ||
+              hasExplicitPoshmark404()
+            ) {
+              verifiedDeleted = true;
+              break;
+            }
+
+            // Proof C (after 4s): Delete button disappeared AND direct fetch confirms listing is gone
+            if (Date.now() - verifyStart > 4000 && realListingId && !findVisibleDeleteListingBtn()) {
+              try {
+                const checkRes = await fetch(
+                  `https://poshmark.com/listing/${realListingId}`,
+                  { credentials: "include" }
+                );
+                if (checkRes.status === 404 || checkRes.status === 410) {
+                  verifiedDeleted = true;
+                  break;
+                }
+                const checkHtml = (await checkRes.text()).toLowerCase();
+                if (
+                  checkHtml.includes("page not found") ||
+                  checkHtml.includes("listing not found") ||
+                  checkHtml.includes("this listing has been deleted")
+                ) {
+                  verifiedDeleted = true;
+                  break;
+                }
+              } catch {
+                // keep waiting
+              }
+            }
+          }
+
+          if (verifiedDeleted) {
             await chrome.runtime.sendMessage({
               type: "RCC_JOB_STATUS_UPDATE",
               jobId: job.id,
@@ -652,7 +979,7 @@
             });
             showRccHud({
               title: `Delisted from Poshmark! (${payload.sku || "SKU"})`,
-              message: "Anti-double-sell complete — listing removed and synced to Command Center.",
+              message: "Verified removed from Poshmark & synced to Command Center.",
               tone: "success",
             });
             if (isAutoPilot) {
@@ -663,35 +990,10 @@
             return;
           }
 
-          // Fallback interactive confirmation
-          await chrome.runtime.sendMessage({
-            type: "RCC_JOB_STATUS_UPDATE",
-            jobId: job.id,
-            status: "needs_user_confirm",
-            extra: {
-              errorMessage: "Could not find Delete Listing button — please delete manually on this tab.",
-            },
-          });
-          showRccHud({
-            title: `Confirm Poshmark Delist (${payload.sku || "SKU"})`,
-            message: "Click Delete Listing on this page, then tap Mark Delisted below.",
-            tone: "confirm",
-            actionLabel: "Mark Delisted",
-            onAction: async () => {
-              await chrome.runtime.sendMessage({
-                type: "RCC_JOB_STATUS_UPDATE",
-                jobId: job.id,
-                status: "completed",
-                extra: { marketplace: "poshmark" },
-              });
-              showRccHud({
-                title: "Poshmark Delist Synced",
-                message: "Marked ended in Command Center.",
-                tone: "success",
-              });
-            },
-          });
-          sendResponse({ ok: true, delisted: false });
+          await failToManualConfirm(
+            deleteBlockReason ||
+              "Could not verify Poshmark deleted this listing (still on edit page — e.g. active offer or prompt)."
+          );
           return;
         }
 

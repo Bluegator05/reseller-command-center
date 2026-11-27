@@ -411,6 +411,7 @@ export interface SalesOrderRecord {
   true_net_after_cogs: number;
   sold_at: string;
   delisted_channels: MarketplaceType[];
+  pending_delist_channels?: MarketplaceType[];
   source: "webhook" | "inbound_email" | "manual";
 }
 

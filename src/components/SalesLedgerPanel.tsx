@@ -894,6 +894,15 @@ export function SalesLedgerPanel({
                               ✓ Delisted {ch.toUpperCase()}
                             </span>
                           ))}
+                          {(order.pending_delist_channels ?? []).map((ch) => (
+                            <span
+                              key={`pick-pending-delist-${order.id}-${ch}`}
+                              title="Auto-delist not yet verified — check Companion Extension or delist manually"
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#FFFBEB] border border-[#F59E0B] text-[#92400E]"
+                            >
+                              ⚠ Delist Pending {ch.toUpperCase()}
+                            </span>
+                          ))}
                         </div>
                         <div className="mt-1 text-sm font-semibold text-[#14151A]">
                           {order.title}
@@ -1716,6 +1725,15 @@ export function SalesLedgerPanel({
                     <td className="py-3 pl-3 pr-4 text-right whitespace-nowrap">
                       <div className="inline-flex items-center gap-1.5">
                         {order.delisted_channels.map((ch) => channelPill(ch))}
+                        {(order.pending_delist_channels ?? []).map((ch) => (
+                          <span
+                            key={`tbl-pending-delist-${order.id}-${ch}`}
+                            title={`${ch.toUpperCase()} delist is still pending or needs manual confirmation`}
+                            className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[#FFFBEB] text-[#92400E] border border-[#F59E0B] font-mono"
+                          >
+                            ⚠ {ch === "facebook" ? "FB" : ch.toUpperCase()}
+                          </span>
+                        ))}
                         {(order.fulfillment_status === "to_ship" ||
                           order.fulfillment_status === "picked") && (
                           <button
